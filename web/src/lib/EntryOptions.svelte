@@ -30,7 +30,7 @@
     {/snippet}
   </DropdownMenu.Trigger>
   <DropdownMenu.Portal>
-    <DropdownMenu.Content sideOffset={4} align="end" class="bg-popover text-popover-foreground z-50 min-w-40 rounded-md border p-1 shadow-md outline-none" onCloseAutoFocus={(event) => { if (openingDialog) event.preventDefault(); }}>
+    <DropdownMenu.Content preventScroll={false} sideOffset={4} align="end" class="bg-popover text-popover-foreground z-50 min-w-40 rounded-md border p-1 shadow-md outline-none" onInteractOutside={(event) => { if (event.target instanceof Node && trigger?.contains(event.target)) event.preventDefault(); }} onCloseAutoFocus={(event) => { if (openingDialog) event.preventDefault(); }}>
       {#if entry.kind === 'file'}<DropdownMenu.Item class="menu-item" onSelect={() => select('download')}>Download</DropdownMenu.Item>{/if}
       <DropdownMenu.Item class="menu-item" onSelect={() => select('rename')}>Rename</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item" disabled={moveDisabled} onSelect={() => select('move')}>Move</DropdownMenu.Item>

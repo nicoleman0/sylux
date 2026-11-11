@@ -1,9 +1,9 @@
 import { HttpError, type ApiTransport, type RequestOptions } from './api';
-import type { User } from './session';
+import type { User, Account } from './session';
 import type { Entry, Folder } from './listing';
 import type { UploadStatus } from './transfers';
 
-const root: Folder = { id: 'root', parent_id: null, name: 'My files', kind: 'folder', etag: '"root-1"' };
+const root: Folder = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root-1"' };
 const seed: Entry[] = [
   { id: 'folder-projects', parent_id: root.id, name: 'Projects', kind: 'folder', etag: '"folder-1"' },
   { id: 'file-welcome', parent_id: root.id, name: 'Welcome.txt', kind: 'file', size: 238, etag: '"file-1"' },
@@ -13,6 +13,8 @@ const seed: Entry[] = [
 export class MockTransport implements ApiTransport {
   private setupRequired = true;
   private user: User | null = null;
+  private instanceName = 'Sylux';
+  private accounts: Account[] = [{ account_id: 'mock-user', handle: 'owner', role: 'administrator', enabled: true }];
   private entries = [...seed];
   private deletedEntries: Entry[] = [];
   private sequence = 0;
@@ -23,6 +25,29 @@ export class MockTransport implements ApiTransport {
     const method = options.method ?? 'GET';
     const route = path.split('?')[0]!;
     if (options.signal?.aborted) throw new DOMException('Canceled', 'AbortError');
+    if (route === '/instance' && method === 'GET') return { name: this.instanceName } as T;
+    if (route === '/instance' && method === 'PATCH') {
+      if (this.user?.role !== 'administrator') throw new HttpError(403);
+      const name = (options.body as { name: string }).name.trim();
+      if (!name || [...name].length > 40 || /[\u0000-\u001f\u007f]/.test(name)) throw new HttpError(400);
+      this.instanceName = name;
+      return { name } as T;
+    }
+    if (route === '/accounts' && method === 'GET') return [...this.accounts] as T;
+    if (route === '/accounts' && method === 'POST') {
+      const { handle } = options.body as { handle: string };
+      if (this.accounts.some((account) => account.handle === handle)) throw new HttpError(409);
+      this.accounts.push({ account_id: `account-${++this.sequence}`, handle, role: 'user', enabled: true });
+      return undefined as T;
+    }
+    if (route.startsWith('/accounts/') && method === 'POST') {
+      const account = this.accounts.find((item) => item.account_id === route.split('/')[2]);
+      if (!account || account.role !== 'user' || !account.enabled) throw new HttpError(409);
+      if (route.endsWith('/disable')) account.enabled = false;
+      else if (!route.endsWith('/reset')) throw new HttpError(404);
+      return undefined as T;
+    }
+    if (route === '/me/password' && method === 'POST') { this.user = null; return undefined as T; }
     if (route === '/setup' && method === 'GET') return { setupRequired: this.setupRequired, user: this.user, csrfToken: 'mock-csrf-token' } as T;
     if (route === '/auth/csrf' && method === 'GET') return { csrf_token: 'mock-csrf-token' } as T;
     if (route === '/mutation-tickets' && method === 'POST') return { mutation_id: `upload-${++this.sequence}`, ticket: `mock-ticket-${this.sequence}`, expires_at: 'mock-only' } as T;

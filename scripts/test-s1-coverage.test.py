@@ -98,7 +98,7 @@ class CoverageControls(unittest.TestCase):
             "accessibility_keyboard_sign_in", "accessibility_control_names", "accessibility_rename_escape_focus",
             "accessibility_live_failure_retry", "storage_responsive_controls", "storage_listing_states",
             "storage_upload_download_roundtrip", "storage_delayed_upload_browsing", "storage_upload_cancel",
-            "storage_lost_commit_response",
+            "storage_lost_commit_response", "storage_pdf_preview",
         }
         engine_files = {}
         for phase in ["initial", "restart"]:

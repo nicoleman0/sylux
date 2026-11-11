@@ -4,7 +4,7 @@ const ALLOWED_CASES = new Set([
   'trusted_assets', 'trusted_api_routes', 'wrong_san', 'unrelated_ca', 'plaintext_and_cookie_policy',
   'accessibility_keyboard_sign_in', 'accessibility_control_names', 'accessibility_rename_escape_focus', 'accessibility_live_failure_retry',
   'storage_responsive_controls', 'storage_listing_states', 'storage_upload_download_roundtrip', 'storage_delayed_upload_browsing',
-  'storage_upload_cancel', 'storage_lost_commit_response',
+  'storage_upload_cancel', 'storage_lost_commit_response', 'storage_pdf_preview',
 ]);
 const ALLOWED_LISTING_PROGRESS = new Set([
   'signed-in', 'first-folder-response-held', 'returned-to-root', 'nested-file-visible',

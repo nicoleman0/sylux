@@ -79,27 +79,25 @@ test('keyboard-only sign-in exposes named fields and a visible focus indicator',
 
 test('folder, upload, rename, and logout controls have accessible names', { annotation: { type: 'harness_case', description: 'accessibility_control_names' } }, async () => {
   await signIn();
-  await expect(page.getByLabel('Folders')).toBeVisible();
-  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(page.getByRole('navigation', { name: 'Files', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'New folder', exact: true }).click();
   await expect(page.getByLabel('Folder name', { exact: true })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(page.getByLabel('Choose a file to upload')).toBeAttached();
   await expect(page.getByRole('button', { name: 'Refresh folder' })).toBeVisible();
-  const folders = page.getByLabel('Folders');
-  await folders.getByRole('button', { name: new RegExp(fixture.folder) }).click();
+  await page.getByRole('button', { name: `Open ${fixture.folder}`, exact: true }).click();
   await page.getByRole('article').filter({ hasText: fixture.nested }).getByRole('button', { name: 'Open' }).click();
   const item = page.getByRole('article').filter({ hasText: fixture.file });
   await item.getByRole('button', { name: `Options for ${fixture.file}`, exact: true }).click();
   await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Log out', exact: true })).toBeVisible();
 });
 
 test('rename dialog supports Escape and restores focus to its invoking control', { annotation: { type: 'harness_case', description: 'accessibility_rename_escape_focus' } }, async () => {
   await signIn();
-  const folders = page.getByLabel('Folders');
-  await folders.getByRole('button', { name: new RegExp(fixture.folder) }).click();
+  await page.getByRole('button', { name: `Open ${fixture.folder}`, exact: true }).click();
   await page.getByRole('article').filter({ hasText: fixture.nested }).getByRole('button', { name: 'Open' }).click();
   const rename = page.getByRole('article').filter({ hasText: fixture.file }).getByRole('button', { name: `Options for ${fixture.file}`, exact: true });
   await rename.click();
