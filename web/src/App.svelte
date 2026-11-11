@@ -123,6 +123,8 @@
 
   async function navigate(destination: 'files' | 'trash' | 'account' | 'settings', record = true): Promise<void> {
     if (!user) { view = 'login'; return; }
+    if (bulkBusy) return;
+    clearSelection(); closeBulk();
     if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
     if (destination !== 'files') clearSearch();
     accountView = destination === 'account'; settingsView = destination === 'settings'; showTrash = destination === 'trash';
@@ -137,6 +139,8 @@
 
   async function restoreNavigation(event: PopStateEvent): Promise<void> {
     if (!user) return;
+    if (bulkBusy) { recordNavigation(); return; }
+    closeBulk();
     clearSearch();
     const generation = sessionGeneration;
     const state = event.state;
@@ -186,6 +190,25 @@
   let currentFolder = $state<Folder>(emptyRoot);
   let folders = $state<Folder[]>([]);
   let entries = $state<Entry[]>([]);
+  let selectedIds = $state<string[]>([]);
+  const selectedEntries = $derived(entries.filter((entry) => selectedIds.includes(entry.id)));
+
+  function clearSelection(): void { selectedIds = []; }
+  function selectEntry(id: string, checked: boolean): void {
+    selectedIds = checked ? [...selectedIds.filter((item) => item !== id), id] : selectedIds.filter((item) => item !== id);
+  }
+  type BulkAction = 'move' | 'trash';
+  type BulkResult = { entry: Entry; status: 'pending' | 'succeeded' | 'failed' | 'uncertain' | 'changed'; message: string };
+  type BulkReport = { action: BulkAction; sourceId: string; destination: Folder | null; results: BulkResult[] };
+  let bulkAction = $state<BulkAction | null>(null);
+  let bulkTargets = $state<Entry[]>([]);
+  let bulkReport = $state<BulkReport | null>(null);
+  let bulkBusy = $state(false);
+  let bulkNeedsRefresh = $state(false);
+  let bulkError = $state('');
+  let bulkRetry = false;
+  let bulkTrigger: HTMLElement | null = null;
+
   let pageCursors = $state<(string | null)[]>([null]);
   let pageIndex = $state(0);
   let nextCursor = $state<string | null>(null);
@@ -263,9 +286,10 @@
   let unresolvedCancel = $state(false);
   let controller: AbortController | null = null;
   let selectedFileName = $state('');
+  const fileMutationBusy = $derived(bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || folderBusy || transferBusy);
 
   function restoreFocus(trigger: HTMLElement | null, fallback = 'folder-title'): void {
-    if (trigger?.isConnected) trigger.focus();
+    if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus();
     else document.getElementById(fallback)?.focus();
   }
 
@@ -297,6 +321,7 @@
     const generation = sessionGeneration;
     let folderId = currentFolder.id;
     const requestId = ++listingRequest;
+    clearSelection();
     loading = true;
     listingError = '';
     try {
@@ -317,6 +342,7 @@
   }
 
   function clearSearch(restoreBrowse = false): void {
+    clearSelection();
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = null;
     searchController?.abort(); searchController = null;
@@ -357,6 +383,8 @@
   }
 
   function searchChanged(): void {
+    if (bulkBusy) return;
+    clearSelection();
     if (!searchInput) { clearSearch(true); return; }
     if (searchTimer) clearTimeout(searchTimer);
     searchController?.abort(); searchController = null;
@@ -439,7 +467,8 @@
   }
 
   async function loadMore(): Promise<void> {
-    if (!hasMore || !nextCursor || loading) return;
+    if (!hasMore || !nextCursor || loading || bulkBusy) return;
+    clearSelection();
     const generation = sessionGeneration;
     const folderId = currentFolder.id;
     const cursor = nextCursor;
@@ -463,7 +492,8 @@
   }
 
   async function loadPrevious(): Promise<void> {
-    if (pageIndex === 0 || loading) return;
+    if (pageIndex === 0 || loading || bulkBusy) return;
+    clearSelection();
     const generation = sessionGeneration;
     const folderId = currentFolder.id;
     const requestId = ++listingRequest;
@@ -561,6 +591,7 @@
   }
   function clearWorkspace(): void {
     clearSearch();
+    bulkAction = null; bulkTargets = []; bulkReport = null; bulkBusy = false; bulkNeedsRefresh = false; bulkError = '';
     navigationPaths.clear();
     controller?.abort(); controller = null;
     replacementPrompt = null; uploadReplacement = false; selectedFileName = '';
@@ -677,18 +708,19 @@
   }
 
   function closeMove(): void {
+    if (bulkAction === 'move') { bulkAction = null; bulkTargets = []; }
     moveRequest++; moveTarget = null; movePath = []; moveFolders = []; moveCursor = null; moveLoading = false; moveDestinationReady = false; moveError = '';
   }
   async function loadMoveFolder(path: Folder[], cursor: string | null = null): Promise<void> {
     const destination = path.at(-1);
-    if (!destination || !moveTarget) return;
+    if (!destination || (!moveTarget && bulkAction !== 'move')) return;
     const request = ++moveRequest;
     const generation = sessionGeneration;
     moveLoading = true; moveDestinationReady = false; moveError = ''; movePath = path;
     if (!cursor) { moveFolders = []; moveCursor = null; }
     try {
       const page = await listing.children(destination.id, cursor);
-      if (request !== moveRequest || generation !== sessionGeneration || !moveTarget) return;
+      if (request !== moveRequest || generation !== sessionGeneration || (!moveTarget && bulkAction !== 'move')) return;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       movePath = path;
       const children = page.items.filter((entry): entry is Folder => entry.kind === 'folder');
@@ -700,7 +732,7 @@
     } finally { if (request === moveRequest) moveLoading = false; }
   }
   async function beginMove(entry: Entry, trigger: HTMLElement): Promise<void> {
-    if (dropPending || moveNeedsRefresh) return;
+    if (bulkBusy || bulkNeedsRefresh || dropPending || moveNeedsRefresh) return;
     closeMove(); moveTarget = entry; moveTrigger = trigger;
     const root = folders[0];
     if (root) await loadMoveFolder([root]);
@@ -731,8 +763,133 @@
     } catch { if (generation === sessionGeneration) notice = `${target.name} moved to ${destination.name}. Refresh your files to update the folder list.`; }
   }
 
+  async function beginBulk(action: BulkAction, trigger: HTMLElement, targets = selectedEntries, retry = false): Promise<void> {
+    if (!targets.length || fileMutationBusy || loading || searchQuery) return;
+    closeMove();
+    bulkTargets = targets.map((entry) => ({ ...entry }));
+    bulkAction = action; bulkRetry = retry; bulkTrigger = trigger; bulkError = '';
+    if (action === 'move') {
+      const root = folders[0];
+      if (root) await loadMoveFolder([root]);
+      else moveError = 'Your storage is unavailable. Close this dialog and refresh your files.';
+    }
+  }
+
+  function closeBulk(): void {
+    if (bulkBusy) return;
+    if (bulkAction === 'move') closeMove();
+    bulkAction = null; bulkTargets = [];
+  }
+
+  function bulkDestinationBlocked(folder: Folder): boolean {
+    return bulkTargets.some((entry) => entry.id === folder.id);
+  }
+
+  async function runBulk(): Promise<void> {
+    const action = bulkAction;
+    const destination = action === 'move' ? movePath.at(-1) ?? null : null;
+    if (!action || !bulkTargets.length || fileMutationBusy || loading ||
+      (action === 'move' && (!destination || moveLoading || !moveDestinationReady ||
+        bulkDestinationBlocked(destination) || bulkTargets.every((entry) => entry.parent_id === destination.id)))) return;
+    const generation = sessionGeneration;
+    const targets = bulkTargets.map((entry) => ({ ...entry }));
+    const report: BulkReport = bulkRetry && bulkReport ? bulkReport : {
+      action, sourceId: currentFolder.id, destination, results: targets.map((entry) => ({ entry, status: 'pending', message: 'Waiting.' })),
+    };
+    report.destination = destination;
+    bulkReport = report;
+    bulkBusy = true; bulkError = ''; clearSelection();
+    for (const target of targets) {
+      if (generation !== sessionGeneration) return;
+      const result = bulkReport!.results.find((item) => item.entry.id === target.id)!;
+      result.status = 'pending'; result.message = action === 'move' ? 'Moving…' : 'Moving to trash…';
+      try {
+        if (action === 'move') await listing.move(target.id, destination!.id, target.etag);
+        else await listing.trash(target.id, target.etag);
+        if (generation !== sessionGeneration) return;
+        result.status = 'succeeded'; result.message = action === 'move' ? `Moved to ${destination!.name}.` : 'Moved to trash.';
+      } catch (error) {
+        if (generation !== sessionGeneration) return;
+        result.status = moveOutcomeUncertain(error) ? 'uncertain' : 'failed';
+        result.message = result.status === 'uncertain' ? 'Outcome unconfirmed. Refresh before retrying.' :
+          action === 'move' ? moveFailure(error) : error instanceof HttpError && error.status === 403 ? 'You do not have permission to move this item to trash.' : error instanceof HttpError && error.status === 409 ? 'Folder is not empty. Empty it before retrying.' :
+          error instanceof HttpError && error.status === 412 ? 'This item changed. Refresh before retrying.' : 'Could not move to trash. Refresh before retrying.';
+        if (result.status === 'uncertain') bulkNeedsRefresh = true;
+        if (error instanceof HttpError && error.status === 401) break;
+      }
+    }
+    if (generation !== sessionGeneration) return;
+    if (action === 'move') closeMove();
+    bulkAction = null; bulkTargets = [];
+    const succeeded = bulkReport!.results.filter((result) => result.status === 'succeeded').length;
+    notice = `${succeeded} of ${bulkReport!.results.length} items ${action === 'move' ? 'moved' : 'moved to trash'}.`;
+    try {
+      await refreshRoot();
+      if (generation === sessionGeneration && !await refresh()) bulkError = 'Could not refresh your files. The item results are kept below.';
+    } catch { if (generation === sessionGeneration) bulkError = 'Could not refresh your files. The item results are kept below.'; }
+    finally { if (generation === sessionGeneration) bulkBusy = false; }
+  }
+
+  async function folderEntries(folderId: string, generation: number): Promise<Entry[]> {
+    const items: Entry[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      if (generation !== sessionGeneration) throw new Error('Session changed');
+      const page = await listing.children(folderId, cursor);
+      if (generation !== sessionGeneration) throw new Error('Session changed');
+      items.push(...page.items);
+      cursor = page.next_cursor;
+      if (cursor && cursors.has(cursor)) throw new Error('Repeated listing cursor');
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
+    return items;
+  }
+
+  async function reconcileBulk(): Promise<boolean> {
+    const report = bulkReport;
+    if (!report || bulkBusy) return false;
+    const generation = sessionGeneration;
+    bulkBusy = true; bulkError = ''; clearSelection();
+    try {
+      const source = await folderEntries(report.sourceId, generation);
+      if (generation !== sessionGeneration) return false;
+      const destination = report.action === 'move' && report.destination ? await folderEntries(report.destination.id, generation) : [];
+      if (generation !== sessionGeneration) return false;
+      const deleted = report.action === 'trash' ? (await listing.deleted()).items : [];
+      if (generation !== sessionGeneration) return false;
+      for (const result of report.results) {
+        if (result.status === 'succeeded') continue;
+        const live = source.find((entry) => entry.id === result.entry.id);
+        const completed = destination.some((entry) => entry.id === result.entry.id) || deleted.some((entry) => entry.id === result.entry.id);
+        if (completed) { result.status = 'succeeded'; result.message = report.action === 'move' ? `Moved to ${report.destination!.name}.` : 'Moved to trash.'; }
+        else if (live && live.etag === result.entry.etag) { result.status = 'failed'; result.message = 'Still in the original folder. Ready to retry.'; }
+        else if (live) { result.status = 'changed'; result.message = 'This item changed. Select it again to act on its current version.'; }
+        else { result.status = 'changed'; result.message = 'Outcome could not be confirmed. Item is no longer in the original folder. Check its location before selecting it again.'; }
+      }
+      bulkNeedsRefresh = report.results.some((result) => result.status === 'uncertain');
+      if (!await refresh()) {
+        if (generation === sessionGeneration) bulkError = 'Could not refresh your files. The item results are kept below. Refresh before retrying.';
+        return false;
+      }
+      return generation === sessionGeneration;
+    } catch {
+      if (generation === sessionGeneration) bulkError = 'Could not check the item results. Check your connection and refresh before retrying.';
+      return false;
+    } finally { if (generation === sessionGeneration) bulkBusy = false; }
+  }
+
+  async function retryBulk(trigger: HTMLElement): Promise<void> {
+    if (!bulkReport || !await reconcileBulk()) return;
+    const targets = bulkReport.results.filter((result) => result.status === 'failed').map((result) => result.entry);
+    if (!targets.length) return;
+    if (bulkNeedsRefresh) return;
+    await beginBulk(bulkReport.action, trigger, targets, true);
+  }
+
   function moveFailure(error: unknown): string {
     if (error instanceof HttpError) {
+      if (error.status === 403) return 'You do not have permission to move this item.';
       if (error.code === 'name_conflict') return 'An item with this name is already there. Choose another folder, or rename your item.';
       if (error.code === 'invalid_destination') return 'Choose a different folder. A folder cannot be moved into itself or its children.';
       if (error.code === 'depth_limit') return 'This destination would nest folders too deeply. Choose a folder closer to Files.';
@@ -747,7 +904,7 @@
   }
 
   function canDrop(entry: Entry | null, destination: Folder): boolean {
-    if (!entry || dropPending || moveBusy || moveNeedsRefresh || destination.id === entry.id || destination.id === entry.parent_id) return false;
+    if (!entry || bulkBusy || bulkNeedsRefresh || dropPending || moveBusy || moveNeedsRefresh || destination.id === entry.id || destination.id === entry.parent_id) return false;
     const seen = new Set<string>();
     let ancestor: string | null | undefined = destination.id;
     while (ancestor) {
@@ -758,7 +915,7 @@
   }
 
   function startDrag(event: DragEvent, entry: Entry): void {
-    if (!event.dataTransfer || dropPending || moveBusy || moveNeedsRefresh) { event.preventDefault(); return; }
+    if (!event.dataTransfer || bulkBusy || bulkNeedsRefresh || dropPending || moveBusy || moveNeedsRefresh) { event.preventDefault(); return; }
     draggedEntry = entry; dropError = '';
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData(dragType, entry.id);
@@ -806,6 +963,7 @@
     void tick().then(() => { restoreFocus(previewTrigger); previewTrigger = null; });
   }
   function entryAction(action: 'download' | 'rename' | 'move' | 'delete', entry: Entry, trigger: HTMLElement): void {
+    if (bulkBusy || (bulkNeedsRefresh && action !== 'download')) return;
     if (action === 'download') void download(entry);
     else if (action === 'rename') beginRename(entry, trigger);
     else if (action === 'move') void beginMove(entry, trigger);
@@ -1101,6 +1259,8 @@
   }
 
   async function openFolder(folder: Folder): Promise<void> {
+    if (bulkBusy) return;
+    closeBulk();
     clearSearch();
     const index = folderPath.findIndex((item) => item.id === folder.id);
     folderPath = index >= 0 ? folderPath.slice(0, index + 1) : [...folderPath, folder];
@@ -1193,7 +1353,7 @@
             </div>
             <div class="search-toolbar">
               <Label for="file-search">Search files and folders</Label>
-              <div class="search-controls"><Input id="file-search" type="search" placeholder="Search by name" maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} />
+              <div class="search-controls"><Input id="file-search" disabled={bulkBusy} type="search" placeholder="Search by name" maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} />
                 {#if searchQuery}<Button variant="outline" type="button" onclick={clearSearchFromButton}>Clear search</Button>{/if}
               </div>
             </div>
@@ -1218,30 +1378,52 @@
               </section>
             {:else}
             <section class="upload-toolbar" aria-label="Upload files">
-              <Button variant="outline" disabled={folderBusy || !currentFolder.id} onclick={(event) => beginCreate(event.currentTarget as HTMLElement)}><PlusIcon />New folder</Button>
+              <Button variant="outline" disabled={folderBusy || bulkBusy || bulkNeedsRefresh || !currentFolder.id} onclick={(event) => beginCreate(event.currentTarget as HTMLElement)}><PlusIcon />New folder</Button>
               <form class="upload-form" onsubmit={upload}>
-                <Input class="sr-only size-px border-0 p-0" id="upload-file" type="file" tabindex={-1} aria-label="Choose a file to upload" disabled={transferBusy || !!unresolvedUploadId} onchange={(event) => { selectedFileName = event.currentTarget.files?.[0]?.name ?? ''; }} />
-                <Button id="choose-file" variant="outline" type="button" disabled={transferBusy || !!unresolvedUploadId} onclick={() => document.getElementById('upload-file')?.click()}>Choose file</Button>
-                <Button type="submit" disabled={transferBusy || !!unresolvedUploadId || !!replacementPrompt || !currentFolder.id || !selectedFileName}>Upload</Button>
+                <Input class="sr-only size-px border-0 p-0" id="upload-file" type="file" tabindex={-1} aria-label="Choose a file to upload" disabled={bulkBusy || bulkNeedsRefresh || transferBusy || !!unresolvedUploadId} onchange={(event) => { selectedFileName = event.currentTarget.files?.[0]?.name ?? ''; }} />
+                <Button id="choose-file" variant="outline" type="button" disabled={bulkBusy || bulkNeedsRefresh || transferBusy || !!unresolvedUploadId} onclick={() => document.getElementById('upload-file')?.click()}>Choose file</Button>
+                <Button type="submit" disabled={bulkBusy || bulkNeedsRefresh || transferBusy || !!unresolvedUploadId || !!replacementPrompt || !currentFolder.id || !selectedFileName}>Upload</Button>
               </form>
-              <Button variant="outline" disabled={loading} onclick={refresh} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
+              <Button variant="outline" disabled={loading || bulkBusy} onclick={() => bulkNeedsRefresh ? reconcileBulk() : refresh()} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
               <span class="chosen-file" aria-live="polite">{selectedFileName}</span>
               {#if transferBusy || progress > 0}<div class="grid basis-full justify-items-start gap-2" role="status"><div class="grid w-full gap-1 text-sm"><span class="break-all">{transferName}</span><div class="flex justify-between gap-3"><span>{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span>{progress}% transferred</span></div></div><Progress value={progress} max={100} aria-label="Upload progress" />{#if transferBusy}<Button variant="link" class="h-auto p-0" onclick={() => { if (uploadCancelable) controller?.abort(); }} disabled={!uploadCancelable}>Cancel upload</Button>{/if}</div>{/if}
 
             </section>
+            {#if entries.length && !loading && !listingError}
+              <div class="selection-toolbar" role="group" aria-label="Selected items">
+                <span aria-live="polite">{selectedEntries.length} selected</span>
+                <Button variant="ghost" size="sm" disabled={fileMutationBusy} onclick={() => selectedIds = entries.map((entry) => entry.id)}>Select all loaded items</Button>
+                <Button variant="ghost" size="sm" disabled={!selectedIds.length || bulkBusy} onclick={clearSelection}>Clear selection</Button>
+                {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
+              </div>
+            {/if}
             {#if loading}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if listingError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Could not open this folder</Alert.Title><Alert.Description><p>{listingError}</p><Button variant="outline" size="sm" class="mt-2" onclick={refresh}>Try again</Button></Alert.Description></Alert.Root>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
-            {:else}<div class="file-list"><div class="list-head"><span>Name</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>{#each entries as entry (entry.id)}
-              <article aria-label={entry.name} draggable={!dropPending && !moveBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row ${dropTarget === entry.id ? 'drop-active' : ''}`}>
-                <button type="button" class="item-name" aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="filename">{entry.name}</span></button><span class="file-size">{entry.kind === 'folder' ? '—' : formatSize(entry.size)}</span>
-                <EntryOptions {entry} disabled={!!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
+            {:else}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span><span>Name</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>{#each entries as entry (entry.id)}
+              <article aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
+                <label class="entry-selection"><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onchange={(event) => selectEntry(entry.id, event.currentTarget.checked)} /></label>
+                <button type="button" class="item-name" aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="filename">{entry.name}</span></button><span class="file-size">{entry.kind === 'folder' ? '—' : formatSize(entry.size)}</span>
+                <EntryOptions {entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
               </article>
             {/each}</div>{/if}
             {#if dropPending}<p role="status">Moving {dropPending.entry.name} to {dropPending.destination.name}…</p>{/if}
             {#if dropError}<p role="alert">{dropError}</p>{/if}
-            {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading}>Next page</Button>{/if}</div>{/if}
+            {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading || bulkBusy}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading || bulkBusy}>Next page</Button>{/if}</div>{/if}
             <p class="list-summary">{loading ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
+            {/if}
+            {#if bulkReport}
+              <section class="bulk-results" aria-labelledby="bulk-results-heading" aria-busy={bulkBusy}>
+                <h2 id="bulk-results-heading">{bulkReport.action === 'move' ? 'Move results' : 'Trash results'}</h2>
+                <p role="status">{bulkReport.results.filter((result) => result.status === 'succeeded').length} of {bulkReport.results.length} succeeded{bulkBusy ? '. Working…' : '.'}</p>
+                <ul>{#each bulkReport.results as result (result.entry.id)}<li><strong>{result.entry.name}</strong><span>{result.message}</span></li>{/each}</ul>
+                {#if bulkError}<p role="alert">{bulkError}</p>{/if}
+                <div class="flex flex-wrap gap-2">
+                  {#if bulkNeedsRefresh}<Button variant="outline" disabled={bulkBusy} onclick={reconcileBulk}>Refresh before retry</Button>{/if}
+                  {#if bulkReport.results.some((result) => result.status === 'failed')}<Button variant="outline" disabled={bulkBusy || bulkNeedsRefresh || fileMutationBusy || loading} onclick={(event) => retryBulk(event.currentTarget)}>Retry failed items</Button>{/if}
+                  <Button variant="ghost" disabled={bulkBusy} onclick={() => { const uncertain = bulkNeedsRefresh; bulkReport = null; bulkError = ''; bulkNeedsRefresh = false; if (uncertain) { entries = []; moveNeedsRefresh = true; void refresh(); } }}>Dismiss results</Button>
+                </div>
+              </section>
             {/if}
             {#if notice}<Alert.Root role="status"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
@@ -1255,19 +1437,26 @@
         <form class="grid gap-6" aria-busy={folderBusy} onsubmit={createFolder}><div class="grid gap-2"><Label for="new-folder">Folder name</Label><Input id="new-folder" bind:ref={folderInput} bind:value={folderName} disabled={folderBusy} maxlength={255} aria-invalid={!!folderError} aria-describedby={folderError ? 'folder-error' : undefined} required /></div>{#if folderError}<p id="folder-error" role="alert">{folderError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={folderBusy} onclick={() => createOpen = false}>Cancel</Button><Button type="submit" disabled={folderBusy}>{folderBusy ? 'Creating…' : 'Create folder'}</Button></Dialog.Footer></form>
       </Dialog.Content>
     </Dialog.Root>
-    <Dialog.Root open={!!moveTarget} onOpenChange={(open) => { if (!open && !moveBusy) closeMove(); }}>
-      <Dialog.Content class="max-h-[85dvh] overflow-y-auto" onCloseAutoFocus={(event) => { event.preventDefault(); if (moveTrigger?.isConnected) moveTrigger.focus(); else document.getElementById('folder-title')?.focus(); moveTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Move {moveTarget?.name}</Dialog.Title><Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.</Dialog.Description></Dialog.Header>
-        <nav aria-label="Move destination path" class="flex flex-wrap gap-2">{#each movePath as folder, index (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" disabled={moveLoading || moveBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => loadMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>{/each}</nav>
+    <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !moveBusy && !bulkBusy) closeMove(); }}>
+      <Dialog.Content showCloseButton={!bulkBusy} class="max-h-[85dvh] overflow-y-auto" onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger ?? moveTrigger); moveTrigger = null; bulkTrigger = null; }}>
+        <Dialog.Header><Dialog.Title>Move {bulkAction === 'move' ? `${bulkTargets.length} selected items` : moveTarget?.name}</Dialog.Title><Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.{bulkAction === 'move' ? ' Each item is handled separately; some items may stay in place.' : ''}</Dialog.Description></Dialog.Header>
+        <nav aria-label="Move destination path" class="flex flex-wrap gap-2">{#each movePath as folder, index (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" disabled={moveLoading || moveBusy || bulkBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => loadMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>{/each}</nav>
         <div class="grid gap-2 rounded-lg border p-3" aria-label="Destination folders" aria-busy={moveLoading}>
           {#if moveLoading}<p role="status">Loading destinations...</p>{:else if moveFolders.length === 0}<p class="text-muted-foreground text-sm">No folders here.</p>{/if}
-          {#each moveFolders as folder (folder.id)}<Button variant="ghost" class="h-auto min-h-9 justify-start text-left break-all whitespace-normal" disabled={moveLoading || moveBusy || folder.id === moveTarget?.id} onclick={() => loadMoveFolder([...movePath, folder])}><FolderIcon class="size-4 shrink-0" />{folder.name}{folder.id === moveTarget?.id ? ' (cannot move into itself)' : ''}</Button>{/each}
-          {#if moveCursor}<Button variant="outline" disabled={moveLoading || moveBusy} onclick={() => loadMoveFolder(movePath, moveCursor)}>More destination folders</Button>{/if}
+          {#each moveFolders as folder (folder.id)}<Button variant="ghost" class="h-auto min-h-9 justify-start text-left break-all whitespace-normal" disabled={moveLoading || moveBusy || bulkBusy || folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder))} onclick={() => loadMoveFolder([...movePath, folder])}><FolderIcon class="size-4 shrink-0" />{folder.name}{folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder)) ? ' (cannot move into itself)' : ''}</Button>{/each}
+          {#if moveCursor}<Button variant="outline" disabled={moveLoading || moveBusy || bulkBusy} onclick={() => loadMoveFolder(movePath, moveCursor)}>More destination folders</Button>{/if}
         </div>
         <p class="text-sm break-all">Destination: {movePath.map((folder) => folder.name).join(' / ') || 'Choose a folder'}</p>
-        {#if movePath.at(-1)?.id === moveTarget?.parent_id}<p class="text-muted-foreground text-sm">This item is already here. Open another folder or choose an ancestor above.</p>{/if}
+        {#if movePath.at(-1)?.id === moveTarget?.parent_id || (bulkAction === 'move' && bulkTargets.every((entry) => entry.parent_id === movePath.at(-1)?.id))}<p class="text-muted-foreground text-sm">{bulkAction === 'move' ? 'The selected items are already here.' : 'This item is already here.'} Open another folder or choose an ancestor above.</p>{/if}
         {#if moveError}<p role="alert">{moveError}</p>{#if moveNeedsRefresh}<Button variant="outline" onclick={async () => { closeMove(); await refresh(); }}>Close and refresh files</Button>{:else}<Button variant="outline" disabled={moveBusy || moveLoading} onclick={() => loadMoveFolder(movePath.length ? movePath : folders.slice(0, 1))}>Refresh destinations</Button>{/if}{/if}
-        <Dialog.Footer><Button variant="outline" disabled={moveBusy} onclick={closeMove}>Cancel</Button><Button disabled={moveBusy || moveNeedsRefresh || moveLoading || !moveDestinationReady || !movePath.length || movePath.at(-1)?.id === moveTarget?.parent_id} onclick={moveEntry}>{moveBusy ? 'Moving...' : 'Move here'}</Button></Dialog.Footer>
+        <Dialog.Footer><Button variant="outline" disabled={moveBusy || bulkBusy} onclick={closeMove}>Cancel</Button><Button disabled={moveBusy || bulkBusy || moveNeedsRefresh || moveLoading || !moveDestinationReady || !movePath.length || movePath.at(-1)?.id === moveTarget?.parent_id || (bulkAction === 'move' && bulkTargets.every((entry) => entry.parent_id === movePath.at(-1)?.id))} onclick={() => bulkAction === 'move' ? runBulk() : moveEntry()}>{moveBusy || bulkBusy ? 'Moving...' : 'Move here'}</Button></Dialog.Footer>
+      </Dialog.Content>
+    </Dialog.Root>
+    <Dialog.Root open={bulkAction === 'trash'} onOpenChange={(open) => { if (!open) closeBulk(); }}>
+      <Dialog.Content showCloseButton={!bulkBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger); bulkTrigger = null; }}>
+        <Dialog.Header><Dialog.Title>Move {bulkTargets.length} selected items to trash?</Dialog.Title><Dialog.Description>You can restore these items later. Folders must be empty. Each item is handled separately; some items may stay in place.</Dialog.Description></Dialog.Header>
+        <ul class="bulk-confirm-items">{#each bulkTargets as entry (entry.id)}<li>{entry.name}</li>{/each}</ul>
+        <Dialog.Footer><Button variant="outline" disabled={bulkBusy} onclick={closeBulk}>Cancel</Button><Button disabled={bulkBusy} onclick={runBulk}>{bulkBusy ? 'Moving to trash…' : 'Move to trash'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!replacementPrompt} onOpenChange={(open) => { if (!open) replacementPrompt = null; }}>
