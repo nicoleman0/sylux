@@ -35,9 +35,11 @@
   let darkMode = $state(false);
   let samples = $state<ColorSample[]>(colorTokens.map((color) => ({ ...color, value: '' })));
   let sampleNotice = $state('');
+  let typeSizes = $state<Record<string, string>>({});
 
   function readColors(): void {
     const styles = getComputedStyle(document.documentElement);
+    typeSizes = Object.fromEntries(typography.map(({ token }) => [token, styles.getPropertyValue(token).trim()]));
     samples = colorTokens.map(({ label, token }) => ({
       label,
       token,
@@ -71,11 +73,11 @@
 
   <main class="catalogue-main">
     <section class="catalogue-section" aria-labelledby="type-title">
-      <div class="section-heading"><h2 id="type-title">Typography</h2><p>System UI for file names and controls.</p></div>
+      <div class="section-heading"><h2 id="type-title">Typography</h2><p>One font, sized by role. Samples show the actual sizes.</p></div>
       <div class="type-grid">
         {#each typography as item}
           <div class="type-sample" data-type-sample={item.token}>
-            <p class="sample-caption">{item.label} <code>{item.token}</code></p>
+            <p class="sample-caption">{item.label}<code>{item.token} · {typeSizes[item.token] ?? ""}</code></p>
             <p class="type-specimen" style={`font-family: var(--font-ui); font-size: var(${item.token}); font-weight: var(${["--type-page", "--type-page-compact", "--type-section", "--type-brand"].includes(item.token) ? "--weight-heading" : "--weight-body"});`}>{item.sample}</p>
           </div>
         {/each}
@@ -155,14 +157,15 @@
   .wordmark :global(svg) { color: var(--primary); width: var(--icon-file); height: var(--icon-file); }
   .header-copy { flex: 1; min-width: 0; }
   .sample-caption { color: var(--muted-foreground); font-size: var(--type-note); margin: 0 0 3px; }
-  .header-copy h1 { font-size: var(--type-section); letter-spacing: 0; margin: 0; }
+  .header-copy h1 { font-size: var(--type-brand); letter-spacing: 0; margin: 0; }
   .catalogue-main { width: min(100%, 1120px); margin: 0 auto; padding: 8px clamp(16px, 4vw, 48px) 40px; }
   .catalogue-section { padding: 24px 0; border-bottom: 1px solid var(--border); }
   .section-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 14px; }
   .section-heading h2 { font-size: var(--type-section); margin: 0; }
   .section-heading p { color: var(--muted-foreground); font-size: var(--type-meta); margin: 0; }
-  .type-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 12px; }
-  .type-sample { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); }
+  .type-grid { display: grid; }
+  .type-sample { display: grid; grid-template-columns: 230px minmax(0, 1fr); align-items: center; min-width: 0; min-height: 60px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .sample-caption { display: grid; gap: 3px; font-size: var(--type-ui); }
   .sample-caption code, .swatch-copy code { color: var(--muted-foreground); font-family: var(--font-code); font-size: var(--type-note); }
   .type-specimen { margin: 0; overflow-wrap: anywhere; }
   .code-specimen { font-size: var(--type-ui); }
@@ -177,9 +180,10 @@
   .field { display: grid; gap: 7px; min-width: 0; }
   .field-sample :global(button) { grid-column: 1 / -1; justify-self: start; }
   .badge-group { grid-column: 1 / -1; padding-top: 4px; }
-  .sample-rows { border-top: 1px solid var(--border); }
+  .sample-rows { max-width: 640px; border-top: 1px solid var(--border); }
   .sample-notice { min-height: 1.5em; margin: 8px 0 0; color: var(--muted-foreground); font-size: var(--type-meta); }
   @media (max-width: 680px) {
+    .type-sample { grid-template-columns: minmax(0, 1fr); gap: 8px; }
     .catalogue-header { gap: 12px; padding-inline: 16px; }
     .wordmark span { display: none; }
     .catalogue-main { padding-inline: 16px; }
