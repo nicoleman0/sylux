@@ -20,16 +20,4 @@ physical power-loss durability or schema upgrade/downgrade support.
 Email **hello@corvus-dev.com** with the version, host environment, steps to reproduce,
 expected result and observed result. Do not send passwords, setup tokens or personal files.
 
-## Build and verify
-
-The toolchains and dependencies are pinned. The reference environment is Ubuntu
-24.04 x86_64 with Docker, local ext4 storage and one Sylux instance.
-
-- `scripts/check.sh`: web/Rust builds, lint, tests and dependency checks.
-- `scripts/check-beta.sh`: feature-enabled contract, integration and browser checks.
-- `scripts/syl7-linux.sh`: disposable Docker install, isolation, restart and restore checks.
-
-See [release preparation](docs/releasing.md) and [dependency notices](docs/dependency-notices.md)
-for prerequisites, qualification limits and distribution details.
-
-Licensed under the [MIT License](LICENSE).
+Licensed under the [MIT License](LICENSE). See [third-party notices](docs/dependency-notices.md).
