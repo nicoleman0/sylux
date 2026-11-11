@@ -12,6 +12,8 @@ The beta includes local account administration, isolated private storage, folder
 file moves, recoverable deletion and replacement uploads. OIDC, shared folders,
 public sharing links, previews and WebDAV are not included.
 
+[Folder listings](docs/folder-listings.md) support name and file-size sorting.
+
 Keep independent copies of important files. Functional tests do not establish
 physical power-loss durability or schema upgrade/downgrade support.
 

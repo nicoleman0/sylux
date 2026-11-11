@@ -809,3 +809,356 @@ fn deleted_entries_include_owner_folder_paths_even_when_parent_is_deleted() {
     );
     tx.commit().unwrap();
 }
+
+fn insert_sized_file(db: &Connection, id: &str, name: &str, size: i64) {
+    let key = EntryName::parse(name).unwrap().key;
+    db.execute(
+        "INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'file',?4,?5,1)",
+        params![id, OWNER, ROOT, name, key],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO blob(blob_id,shard,length,sha256) VALUES(?1,substr(?1,1,2),?2,zeroblob(32))",
+        params![id, size],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES(?1,?1,?1,?2,zeroblob(32),1,?3)",
+        params![id, size, OWNER],
+    ).unwrap();
+    db.execute(
+        "UPDATE entry SET current_revision_id=?1 WHERE entry_id=?1",
+        [id],
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn folder_sorting_orders_complete_listing_before_paging_and_returns_file_sizes() {
+    let fixture = HttpFixture::new("sorted-pages", 0).await;
+    fixture.workers.as_ref().unwrap().transact(|tx| {
+        for (id, name) in [
+            ("00000000000000000000000000001003", "Å folder"),
+            ("00000000000000000000000000001001", "B folder"),
+            ("00000000000000000000000000001002", "Z folder"),
+        ] {
+            let key = EntryName::parse(name).unwrap().key;
+            tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id, OWNER, ROOT, name, key]).unwrap();
+        }
+        for (id, name, size) in [
+            ("00000000000000000000000000002001", "zero.txt", 0),
+            ("00000000000000000000000000002002", "a.txt", 5),
+            ("00000000000000000000000000002003", "Z.txt", 5),
+            ("00000000000000000000000000002004", "A\u{30a}.txt", 5),
+            ("00000000000000000000000000002005", "big.txt", 90),
+            ("00000000000000000000000000002006", "small.txt", 1),
+        ] {
+            insert_sized_file(tx, id, name, size);
+        }
+        Ok(())
+    }).await.unwrap();
+    let folders = ["B folder", "Z folder", "Å folder"];
+    for (sort, files) in [
+        (
+            "name_asc",
+            [
+                "Z.txt",
+                "a.txt",
+                "big.txt",
+                "small.txt",
+                "zero.txt",
+                "A\u{30a}.txt",
+            ],
+        ),
+        (
+            "name_desc",
+            [
+                "A\u{30a}.txt",
+                "zero.txt",
+                "small.txt",
+                "big.txt",
+                "a.txt",
+                "Z.txt",
+            ],
+        ),
+        (
+            "size_asc",
+            [
+                "zero.txt",
+                "small.txt",
+                "Z.txt",
+                "a.txt",
+                "A\u{30a}.txt",
+                "big.txt",
+            ],
+        ),
+        (
+            "size_desc",
+            [
+                "big.txt",
+                "Z.txt",
+                "a.txt",
+                "A\u{30a}.txt",
+                "small.txt",
+                "zero.txt",
+            ],
+        ),
+    ] {
+        let expected: Vec<_> = folders.into_iter().chain(files).collect();
+        for limit in [1, 2, 4, 500] {
+            let mut cursor = None;
+            let mut names = Vec::new();
+            let mut ids = std::collections::HashSet::new();
+            loop {
+                let query = format!(
+                    "?sort={sort}&limit={limit}{}",
+                    cursor
+                        .as_ref()
+                        .map(|value| format!("&cursor={value}"))
+                        .unwrap_or_default()
+                );
+                let (status, body) = fixture.list(&query).await;
+                assert_eq!(status, 200, "{sort}: {}", String::from_utf8_lossy(&body));
+                let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let items = page["items"].as_array().unwrap();
+                assert!(!items.is_empty());
+                for item in items {
+                    assert!(
+                        ids.insert(item["id"].as_str().unwrap().to_owned()),
+                        "duplicate entry in {sort}"
+                    );
+                    let name = item["name"].as_str().unwrap();
+                    names.push(name.to_owned());
+                    if item["kind"] == "file" {
+                        let expected_size = match name {
+                            "zero.txt" => 0,
+                            "small.txt" => 1,
+                            "big.txt" => 90,
+                            _ => 5,
+                        };
+                        assert_eq!(item["size"].as_i64(), Some(expected_size));
+                    } else {
+                        assert!(item.get("size").is_none());
+                    }
+                }
+                cursor = page["next_cursor"].as_str().map(str::to_owned);
+                assert_eq!(page["has_more"], cursor.is_some());
+                if cursor.is_none() {
+                    break;
+                }
+                assert!(names.len() < expected.len(), "paging must terminate");
+            }
+            assert_eq!(names, expected, "{sort} with page size {limit}");
+        }
+    }
+    let (status, body) = fixture
+        .get_as(
+            &format!("/folders/{ROOT}/children?sort=size_desc"),
+            SESSION,
+            SECRET,
+        )
+        .await;
+    assert_eq!(status, 200);
+    let explicit: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        explicit["items"][3]["name"], "big.txt",
+        "explicit folder route forwards sorting"
+    );
+    let (_, default) = fixture.list("").await;
+    let (_, name_asc) = fixture.list("?sort=name_asc").await;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&default).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(&name_asc).unwrap()
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn folder_sorting_rejects_invalid_modes_and_cross_sort_cursors() {
+    let fixture = HttpFixture::new("sort-cursors", 3).await;
+    for invalid in ["", "NAME_ASC", "modified_desc", "size"] {
+        let (status, body) = fixture.list(&format!("?sort={invalid}")).await;
+        assert_eq!(status, 400);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+            "invalid_sort"
+        );
+    }
+    let sorts = ["name_asc", "name_desc", "size_asc", "size_desc"];
+    for sort in sorts {
+        let (status, body) = fixture.list(&format!("?sort={sort}&limit=1")).await;
+        assert_eq!(status, 200);
+        let first: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let cursor = first["next_cursor"].as_str().unwrap();
+        for other in sorts.into_iter().filter(|other| *other != sort) {
+            let (status, body) = fixture
+                .list(&format!("?sort={other}&cursor={cursor}"))
+                .await;
+            assert_eq!(status, 400, "{sort} cursor reused for {other}");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+                "invalid_cursor"
+            );
+        }
+        if sort == "name_asc" {
+            assert_eq!(fixture.list(&format!("?cursor={cursor}")).await.0, 200);
+        }
+        fixture
+            .workers
+            .as_ref()
+            .unwrap()
+            .transact(|tx| {
+                tx.execute(
+                    "UPDATE entry SET generation=generation+1 WHERE entry_id=?1",
+                    [ROOT],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (status, body) = fixture.list(&format!("?sort={sort}&cursor={cursor}")).await;
+        assert_eq!(status, 409);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+            "listing_changed"
+        );
+    }
+    fixture.close().await;
+}
+
+#[test]
+fn folder_sorting_breaks_equal_name_keys_by_id_on_every_page() {
+    let db = namespace_db();
+    // Exercise the final tie-breaker despite active sibling uniqueness normally preventing ties.
+    db.execute("DROP INDEX entry_active_sibling", []).unwrap();
+    for id in [
+        "00000000000000000000000000002003",
+        "00000000000000000000000000002001",
+        "00000000000000000000000000002002",
+    ] {
+        insert_sized_file(&db, id, "same.txt", 5);
+    }
+    for sort in [
+        namespace::ListingSort::NameAsc,
+        namespace::ListingSort::NameDesc,
+        namespace::ListingSort::SizeAsc,
+        namespace::ListingSort::SizeDesc,
+    ] {
+        let mut cursor = None;
+        let mut ids = Vec::new();
+        loop {
+            let mut rows =
+                namespace::list_sorted(&db, OWNER, ROOT, sort, cursor.as_ref(), 1).unwrap();
+            let more = rows.len() > 1;
+            let row = rows.remove(0);
+            ids.push(row.entry.id);
+            cursor = Some(row.position);
+            if !more {
+                break;
+            }
+            assert!(ids.len() < 3);
+        }
+        assert_eq!(
+            ids,
+            [
+                "00000000000000000000000000002001",
+                "00000000000000000000000000002002",
+                "00000000000000000000000000002003"
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn folder_sorting_traverses_over_500_mixed_entries_in_every_mode() {
+    const FOLDERS: usize = 103;
+    const FILES: usize = 503;
+    let fixture = HttpFixture::new("large-sorted-pages", 0).await;
+    let expected = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            let mut expected = Vec::new();
+            for n in (0..FOLDERS).rev() {
+                let id = format!("{:032x}", n + 0x1000);
+                let name = format!("folder-{n:04}");
+                let key = EntryName::parse(&name).unwrap().key;
+                tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id, OWNER, ROOT, name, key])?;
+                expected.push((id, name, true, 0));
+            }
+            for n in (0..FILES).rev() {
+                let id = format!("{:032x}", n + 0x2000);
+                let name = format!("file-{n:04}");
+                let size = (n % 17) as i64 * 13;
+                insert_sized_file(tx, &id, &name, size);
+                expected.push((id, name, false, size));
+            }
+            Ok(expected)
+        })
+        .await
+        .unwrap();
+    for sort in ["name_asc", "name_desc", "size_asc", "size_desc"] {
+        let mut expected = expected.clone();
+        expected.sort_by(|left, right| {
+            right
+                .2
+                .cmp(&left.2)
+                .then_with(|| {
+                    if left.2 {
+                        left.1.cmp(&right.1)
+                    } else {
+                        match sort {
+                            "name_asc" => left.1.cmp(&right.1),
+                            "name_desc" => right.1.cmp(&left.1),
+                            "size_asc" => left.3.cmp(&right.3).then(left.1.cmp(&right.1)),
+                            "size_desc" => right.3.cmp(&left.3).then(left.1.cmp(&right.1)),
+                            _ => unreachable!(),
+                        }
+                    }
+                })
+                .then(left.0.cmp(&right.0))
+        });
+        let mut cursor = None;
+        let mut actual = Vec::new();
+        let mut ids = std::collections::HashSet::new();
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            assert!(
+                pages <= (FOLDERS + FILES).div_ceil(100),
+                "{sort} must terminate"
+            );
+            let query = format!(
+                "?sort={sort}&limit=100{}",
+                cursor
+                    .as_ref()
+                    .map(|value| format!("&cursor={value}"))
+                    .unwrap_or_default()
+            );
+            let (status, body) = fixture.list(&query).await;
+            assert_eq!(status, 200, "{sort}: {}", String::from_utf8_lossy(&body));
+            let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let items = page["items"].as_array().unwrap();
+            assert_eq!(items.len(), 100.min(FOLDERS + FILES - actual.len()));
+            for item in items {
+                let id = item["id"].as_str().unwrap().to_owned();
+                assert!(ids.insert(id.clone()), "{sort}: duplicate entry {id}");
+                actual.push((
+                    id,
+                    item["name"].as_str().unwrap().to_owned(),
+                    item["kind"] == "folder",
+                    item["size"].as_i64().unwrap_or(0),
+                ));
+            }
+            cursor = page["next_cursor"].as_str().map(str::to_owned);
+            assert_eq!(page["has_more"], cursor.is_some());
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(actual, expected, "complete order for {sort}");
+        assert_eq!(ids.len(), FOLDERS + FILES);
+        assert_eq!(pages, (FOLDERS + FILES).div_ceil(100));
+    }
+    fixture.close().await;
+}

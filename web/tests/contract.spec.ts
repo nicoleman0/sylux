@@ -82,7 +82,7 @@ test('roots lists the private root through the backend collection route', async 
     next_cursor: null,
     has_more: false,
   });
-  expect(transport.requests[0]?.path).toBe('/folders/children?limit=100');
+  expect(transport.requests[0]?.path).toBe('/folders/children?limit=100&sort=name_asc');
 });
 
 test('malformed error JSON preserves unauthorized status and expires the session', async () => {

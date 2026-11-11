@@ -124,6 +124,16 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
   await page.getByRole('button', { name: 'Upload', exact: true }).click();
   await expect(page.getByRole('article').filter({ hasText: 'fixture.txt' })).toBeVisible({ timeout: 8000 });
   await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeVisible();
+  const uploadStatus = page.getByRole('status').filter({ hasText: 'fixture.txt' });
+  await expect(uploadStatus.getByText('Saved', { exact: true })).toBeVisible();
+  await expect(uploadStatus.getByText('100%', { exact: true })).toBeVisible();
+  await expect(uploadStatus).not.toContainText('transferred');
+  await expect(uploadStatus.getByRole('progressbar')).toHaveCount(0);
+  const listSummary = await page.locator('.list-summary').boundingBox();
+  const notice = await page.locator('.workspace-notice').boundingBox();
+  expect(listSummary).not.toBeNull();
+  expect(notice).not.toBeNull();
+  expect(notice!.y - (listSummary!.y + listSummary!.height)).toBeGreaterThanOrEqual(16);
   await page.getByRole('button', { name: 'Options for Notes', exact: true }).click();
   await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
@@ -235,10 +245,14 @@ test('clearing search after a rename restores the previous browsing page with fr
   await login(page);
   let name = 'Later.txt';
   let version = 1;
+  const browseRequests: URL[] = [];
   const later = () => ({ id: 'page-two', parent_id: 'root-1', name, kind: 'file', etag: `page-two:${version}`, size: 4 });
   await page.route('**/folders/root-1/children**', (route) => {
-    const second = new URL(route.request().url()).searchParams.has('cursor');
-    return route.fulfill({ json: { items: second ? [later()] : [{ id: 'first', parent_id: 'root-1', name: 'First.txt', kind: 'file', etag: 'first:1', size: 4 }], next_cursor: second ? null : 'page-2', has_more: !second } });
+    const url = new URL(route.request().url());
+    browseRequests.push(url);
+    const cursor = url.searchParams.get('cursor');
+    if (cursor && cursor !== `page-2:${version}`) return route.fulfill({ status: 409, json: { code: 'listing_changed' } });
+    return route.fulfill({ json: { items: cursor ? [later()] : [{ id: 'first', parent_id: 'root-1', name: 'First.txt', kind: 'file', etag: 'first:1', size: 4 }], next_cursor: cursor ? null : `page-2:${version}`, has_more: !cursor } });
   });
   await page.route('**/entries/page-two', (route) => {
     if (route.request().method() === 'PATCH') {
@@ -249,7 +263,7 @@ test('clearing search after a rename restores the previous browsing page with fr
     return route.fulfill({ json: later() });
   });
   await page.route('**/entries/search**', (route) => route.fulfill({ json: { items: name.toLowerCase().includes('later') ? [{ entry: later(), location: [{ id: 'root-1', parent_id: null, name: '', kind: 'folder', etag: 'root-1:1' }] }] : [], next_cursor: null, has_more: false } }));
-  await page.getByRole('button', { name: 'Refresh folder' }).click();
+  await page.getByLabel('Sort files by', { exact: true }).selectOption('size_desc');
   await page.getByRole('button', { name: 'Next page' }).click();
   await expect(page.getByRole('button', { name: 'Preview Later.txt' })).toBeVisible();
   await page.getByLabel('Search files and folders').fill('Later');
@@ -265,8 +279,14 @@ test('clearing search after a rename restores the previous browsing page with fr
   await page.getByRole('button', { name: 'Save name' }).click();
   await expect(page.getByText('No matching files or folders.')).toBeVisible();
   await page.getByRole('button', { name: 'Clear search' }).click();
-  await expect(page.getByRole('button', { name: 'Preview Updated.txt' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Previous page' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview First.txt' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Previous page' })).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: 'This folder changed. The listing has been restarted.' })).toBeVisible();
+  await expect(page.getByLabel('Sort files by', { exact: true })).toHaveValue('size_desc');
+  expect(browseRequests.slice(-2).map(url => ({ sort: url.searchParams.get('sort'), cursor: url.searchParams.get('cursor') }))).toEqual([
+    { sort: 'size_desc', cursor: 'page-2:1' },
+    { sort: 'size_desc', cursor: null },
+  ]);
 });
 
 test('late search responses cannot appear after navigation or sign-out', async ({ page }) => {
@@ -1065,11 +1085,14 @@ for (const width of [1280, 390]) {
     await page.getByLabel('Choose a file to upload').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
     await expect(page.getByText(longName, { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Upload', exact: true }).click();
-    await expect(page.getByRole('status').filter({ hasText: longName }).getByText('Saved', { exact: true })).toBeVisible();
+    const uploadStatus = page.getByRole('status').filter({ hasText: longName });
+    await expect(uploadStatus.getByText('Saved', { exact: true })).toBeVisible();
+    await expect(uploadStatus.getByText('100%', { exact: true })).toBeVisible();
+    await expect(uploadStatus).not.toContainText('transferred');
+    await expect(uploadStatus.getByRole('progressbar')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await expect(page.locator('[data-slot=progress-indicator]')).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
     await page.screenshot({ path: test.info().outputPath(`layout-${width}.png`), fullPage: true });
   });
 }

@@ -17,6 +17,9 @@
   import FolderIcon from '@lucide/svelte/icons/folder';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+  import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
+  import ArrowDownIcon from '@lucide/svelte/icons/arrow-down';
+  import ArrowUpDownIcon from '@lucide/svelte/icons/arrow-up-down';
   import * as Alert from '$lib/components/ui/alert/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -24,7 +27,7 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import { Progress } from '$lib/components/ui/progress/index.js';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
-  import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit } from './lib/listing';
+  import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
 
@@ -219,6 +222,7 @@
   let loading = $state(false);
   let listingError = $state('');
   let listingRequest = 0;
+  let folderSort = $state<FolderSort>('name_asc');
   let searchInput = $state('');
   let searchQuery = $state('');
   let searchItems = $state<SearchHit[]>([]);
@@ -331,7 +335,7 @@
         if (!await refreshRoot() || requestId !== listingRequest) return false;
         currentFolder = folders[0]; folderPath = [currentFolder]; folderId = currentFolder.id;
       }
-      const page = await listing.children(folderId);
+      const page = await listing.children(folderId, null, folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return false;
       entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
@@ -341,6 +345,21 @@
     }
     catch { if (generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest) listingError = 'Could not load this folder. Try again.'; return false; }
     finally { if (generation === sessionGeneration && requestId === listingRequest) loading = false; }
+  }
+
+  async function changeFolderSort(event: Event): Promise<void> {
+    await setFolderSort((event.currentTarget as HTMLSelectElement).value as FolderSort);
+  }
+
+  function toggleFolderSort(field: 'name' | 'size'): void {
+    void setFolderSort(folderSort === `${field}_asc` ? `${field}_desc` : `${field}_asc`);
+  }
+
+  async function setFolderSort(sort: FolderSort): Promise<void> {
+    folderSort = sort;
+    clearSelection();
+    pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false;
+    await refresh();
   }
 
   function clearSearch(restoreBrowse = false): void {
@@ -371,7 +390,7 @@
     const request = ++listingRequest;
     loading = true; listingError = '';
     try {
-      const page = await listing.children(folderId, cursor);
+      const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || request !== listingRequest || searchQuery || currentFolder.id !== folderId) return;
       entries = page.items; nextCursor = page.next_cursor; hasMore = page.has_more; browseDirty = false;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
@@ -477,7 +496,7 @@
     const requestId = ++listingRequest;
     loading = true; listingError = '';
     try {
-      const page = await listing.children(folderId, cursor);
+      const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || nextCursor !== cursor || requestId !== listingRequest) return;
       pageCursors = [...pageCursors.slice(0, pageIndex + 1), nextCursor];
       pageIndex += 1; entries = page.items;
@@ -502,7 +521,7 @@
     loading = true; listingError = '';
     const target = pageIndex - 1;
     try {
-      const page = await listing.children(folderId, pageCursors[target]);
+      const page = await listing.children(folderId, pageCursors[target], folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
       pageIndex = target; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
@@ -600,6 +619,7 @@
     transfers.invalidate(); transfers = new TransferApi(client, mutations);
     transferName = ''; progress = 0; transferPhase = ''; transferBusy = false; uploadCancelable = false;
     uploadId = ''; unresolvedUploadId = ''; unresolvedUploadName = ''; unresolvedCancel = false; notice = '';
+    folderSort = 'name_asc';
     listingRequest++; currentFolder = emptyRoot; folders = []; entries = []; folderPath = [emptyRoot];
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false; loading = false; listingError = '';
     folderName = ''; folderBusy = false; createOpen = false; folderError = ''; previewEntry = null; previewTrigger = null;
@@ -1411,8 +1431,25 @@
                 <Button type="submit" disabled={bulkBusy || bulkNeedsRefresh || transferBusy || !!unresolvedUploadId || !!replacementPrompt || !currentFolder.id || !selectedFileName}>Upload</Button>
               </form>
               <Button variant="outline" disabled={loading || bulkBusy} onclick={() => bulkNeedsRefresh ? reconcileBulk() : refresh()} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
+              <div class="folder-sort">
+                <label for="folder-sort">Sort files by</label>
+                <select id="folder-sort" value={folderSort} disabled={bulkBusy || bulkNeedsRefresh} onchange={changeFolderSort}>
+                  <option value="name_asc">Name: A to Z</option>
+                  <option value="name_desc">Name: Z to A</option>
+                  <option value="size_asc">Size: smallest first</option>
+                  <option value="size_desc">Size: largest first</option>
+                </select>
+              </div>
               <span class="chosen-file" aria-live="polite">{selectedFileName}</span>
-              {#if transferBusy || progress > 0}<div class="grid basis-full justify-items-start gap-2" role="status"><div class="grid w-full gap-1 text-sm"><span class="break-all">{transferName}</span><div class="flex justify-between gap-3"><span>{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span>{progress}% transferred</span></div></div><Progress value={progress} max={100} aria-label="Upload progress" />{#if transferBusy}<Button variant="link" class="h-auto p-0" onclick={() => { if (uploadCancelable) controller?.abort(); }} disabled={!uploadCancelable}>Cancel upload</Button>{/if}</div>{/if}
+              {#if transferBusy || progress > 0}
+                <div class="upload-status" role="status">
+                  <div class="upload-status-body">
+                    <div class="upload-status-line"><span class="upload-name" title={transferName}>{transferName}</span><span class="upload-phase">{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span class="upload-percent">{progress}%</span></div>
+                    {#if transferBusy && transferPhase !== 'complete'}<Progress value={progress} max={100} aria-label="Upload progress" />{/if}
+                    {#if transferBusy}<Button variant="link" class="h-auto justify-self-start p-0" onclick={() => { if (uploadCancelable) controller?.abort(); }} disabled={!uploadCancelable}>Cancel upload</Button>{/if}
+                  </div>
+                </div>
+              {/if}
 
             </section>
             {#if entries.length && !loading && !listingError}
@@ -1423,10 +1460,17 @@
                 {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
               </div>
             {/if}
+            {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span>
+              <button type="button" class="list-sort" aria-label="Sort by name" aria-pressed={folderSort.startsWith('name_')} aria-describedby="name-sort-order" disabled={bulkBusy || bulkNeedsRefresh} onclick={() => toggleFolderSort('name')}>
+                Name<span aria-hidden="true">{#if folderSort === 'name_asc'}<ArrowUpIcon />{:else if folderSort === 'name_desc'}<ArrowDownIcon />{:else}<ArrowUpDownIcon />{/if}</span>
+              </button><span id="name-sort-order" class="sr-only">{folderSort === 'name_asc' ? 'Ascending' : folderSort === 'name_desc' ? 'Descending' : 'Not selected'}</span>
+              <button type="button" class="list-sort size-sort" aria-label="Sort by size" aria-pressed={folderSort.startsWith('size_')} aria-describedby="size-sort-order" disabled={bulkBusy || bulkNeedsRefresh} onclick={() => toggleFolderSort('size')}>
+                Size<span aria-hidden="true">{#if folderSort === 'size_asc'}<ArrowUpIcon />{:else if folderSort === 'size_desc'}<ArrowDownIcon />{:else}<ArrowUpDownIcon />{/if}</span>
+              </button><span id="size-sort-order" class="sr-only">{folderSort === 'size_asc' ? 'Ascending' : folderSort === 'size_desc' ? 'Descending' : 'Not selected'}</span><span class="sr-only">Options</span></div></div>{/if}
             {#if loading}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if listingError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Could not open this folder</Alert.Title><Alert.Description><p>{listingError}</p><Button variant="outline" size="sm" class="mt-2" onclick={refresh}>Try again</Button></Alert.Description></Alert.Root>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
-            {:else}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span><span>Name</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>{#each entries as entry (entry.id)}
+            {:else}<div class="file-list">{#each entries as entry (entry.id)}
               <article aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
                 <label class="entry-selection"><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onchange={(event) => selectEntry(entry.id, event.currentTarget.checked)} /></label>
                 <button type="button" class="item-name" aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="filename">{entry.name}</span></button><span class="file-size">{entry.kind === 'folder' ? '—' : formatSize(entry.size)}</span>
@@ -1451,7 +1495,7 @@
                 </div>
               </section>
             {/if}
-            {#if notice}<Alert.Root role="status"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
+            {#if notice}<Alert.Root role="status" class="workspace-notice"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
         {/if}
         </div>

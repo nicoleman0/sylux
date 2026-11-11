@@ -109,12 +109,21 @@ pub struct Rename {
 #[serde(deny_unknown_fields)]
 pub struct Listing {
     folder_id: Option<String>,
+    sort: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
 }
 #[derive(Serialize)]
+struct ListingItem {
+    #[serde(flatten)]
+    entry: namespace::Entry,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<i64>,
+}
+
+#[derive(Serialize)]
 struct ListingReply {
-    items: Vec<namespace::Entry>,
+    items: Vec<ListingItem>,
     root: Option<namespace::Entry>,
     next_cursor: Option<String>,
     has_more: bool,
@@ -272,15 +281,17 @@ struct Cursor {
     folder: String,
     generation: i64,
     filter: String,
-    sort: String,
+    sort: namespace::ListingSort,
     key_version: i64,
+    last_kind_rank: u8,
+    last_size: i64,
     last_key: String,
     last_id: String,
 }
 fn encode_cursor(key: &[u8; 32], cursor: &Cursor) -> Option<String> {
     let body = serde_json::to_vec(cursor).ok()?;
     let mut mac = HmacSha256::new_from_slice(key).ok()?;
-    mac.update(b"sylux:entry-list-cursor:v1\0");
+    mac.update(b"sylux:entry-list-cursor:v2\0");
     mac.update(&body);
     let token = format!(
         "{}.{}",
@@ -297,7 +308,7 @@ fn decode_cursor(key: &[u8; 32], value: &str) -> Option<Cursor> {
     let body = URL_SAFE_NO_PAD.decode(a).ok()?;
     let sig = URL_SAFE_NO_PAD.decode(b).ok()?;
     let mut mac = HmacSha256::new_from_slice(key).ok()?;
-    mac.update(b"sylux:entry-list-cursor:v1\0");
+    mac.update(b"sylux:entry-list-cursor:v2\0");
     mac.update(&body);
     mac.verify_slice(&sig).ok()?;
     serde_json::from_slice(&body).ok()
@@ -415,6 +426,13 @@ pub async fn listing(
     if limit == 0 || limit > 500 {
         return error(StatusCode::BAD_REQUEST, "invalid_limit");
     }
+    let sort = match q.sort.as_deref().unwrap_or("name_asc") {
+        "name_asc" => namespace::ListingSort::NameAsc,
+        "name_desc" => namespace::ListingSort::NameDesc,
+        "size_asc" => namespace::ListingSort::SizeAsc,
+        "size_desc" => namespace::ListingSort::SizeDesc,
+        _ => return error(StatusCode::BAD_REQUEST, "invalid_sort"),
+    };
     let key = cursor_key(&s);
     let result = s
         .workers
@@ -424,6 +442,7 @@ pub async fn listing(
                 &account,
                 q.folder_id,
                 q.cursor,
+                sort,
                 limit,
                 key,
             ))
@@ -441,6 +460,7 @@ fn build_listing(
     account: &str,
     folder_id: Option<String>,
     cursor: Option<String>,
+    sort: namespace::ListingSort,
     limit: usize,
     key: [u8; 32],
 ) -> Result<ListingReply, Response> {
@@ -465,12 +485,12 @@ fn build_listing(
         let Some(decoded) = decode_cursor(&key, &value) else {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
         };
-        if decoded.version != 1
+        if decoded.version != 2
             || decoded.actor != account
             || decoded.root != root_id
             || decoded.folder != folder
             || decoded.filter != "all"
-            || decoded.sort != "name_key_asc_id_asc"
+            || decoded.sort != sort
             || decoded.key_version != crate::domain::names::NAME_KEY_VERSION
         {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
@@ -481,7 +501,10 @@ fn build_listing(
         let Some(last_key) = URL_SAFE_NO_PAD.decode(decoded.last_key).ok() else {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
         };
-        if last_key.is_empty()
+        if decoded.last_kind_rank > 1
+            || decoded.last_size < 0
+            || (decoded.last_kind_rank == 0 && decoded.last_size != 0)
+            || last_key.is_empty()
             || last_key.len() > crate::domain::names::MAX_NAME_BYTES
             || decoded.last_id.len() != 32
             || !decoded
@@ -491,12 +514,16 @@ fn build_listing(
         {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
         }
-        Some((last_key, decoded.last_id))
+        Some(namespace::ListingPosition {
+            kind_rank: decoded.last_kind_rank,
+            name_key: last_key,
+            size: decoded.last_size,
+            id: decoded.last_id,
+        })
     } else {
         None
     };
-    let after_ref = after.as_ref().map(|(k, id)| (k.as_slice(), id.as_str()));
-    let mut rows = namespace::list(db, account, &folder, after_ref, limit)
+    let mut rows = namespace::list_sorted(db, account, &folder, sort, after.as_ref(), limit)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?;
     let more = rows.len() > limit;
     if more {
@@ -504,27 +531,22 @@ fn build_listing(
     }
     let next_cursor = if more {
         let last = rows.last().unwrap();
-        let name_key: Vec<u8> = db
-            .query_row(
-                "SELECT name_key FROM entry WHERE entry_id=?1",
-                [&last.id],
-                |r| r.get(0),
-            )
-            .unwrap_or_default();
         Some(
             encode_cursor(
                 &key,
                 &Cursor {
-                    version: 1,
+                    version: 2,
                     actor: account.to_owned(),
                     root: root_id,
                     folder: folder.clone(),
                     generation,
                     filter: "all".to_owned(),
-                    sort: "name_key_asc_id_asc".to_owned(),
+                    sort,
                     key_version: crate::domain::names::NAME_KEY_VERSION,
-                    last_key: URL_SAFE_NO_PAD.encode(&name_key),
-                    last_id: last.id.clone(),
+                    last_kind_rank: last.position.kind_rank,
+                    last_size: last.position.size,
+                    last_key: URL_SAFE_NO_PAD.encode(&last.position.name_key),
+                    last_id: last.position.id.clone(),
                 },
             )
             .ok_or_else(|| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?,
@@ -533,7 +555,13 @@ fn build_listing(
         None
     };
     Ok(ListingReply {
-        items: rows,
+        items: rows
+            .into_iter()
+            .map(|row| ListingItem {
+                size: (row.entry.kind == "file").then_some(row.position.size),
+                entry: row.entry,
+            })
+            .collect(),
         root: is_root.then_some(root),
         next_cursor,
         has_more: more,

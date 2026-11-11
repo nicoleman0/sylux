@@ -107,11 +107,23 @@ export class MockTransport implements ApiTransport {
       const end = Math.min(offset + limit, hits.length);
       return { items: hits.slice(offset, end), next_cursor: end < hits.length ? encodeCursor({ query, offset: end, fingerprint }) : null, has_more: end < hits.length } as T;
     }
-    if (route === '/folders/children' && method === 'GET') return { root, items: [...this.entries.filter((entry) => entry.parent_id === root.id)], next_cursor: null, has_more: false } as T;
-    if (route.startsWith('/folders/') && route.endsWith('/children') && method === 'GET') {
-      const folderId = decodeURIComponent(route.split('/')[2]!);
-      const items = this.entries.filter((entry) => entry.parent_id === folderId);
-      return { items: [...items], next_cursor: null, has_more: false } as T;
+    if ((route === '/folders/children' || /^\/folders\/[^/]+\/children$/.test(route)) && method === 'GET') {
+      const params = new URLSearchParams(path.split('?')[1]);
+      const sort = params.get('sort') ?? 'name_asc';
+      if (!['name_asc', 'name_desc', 'size_asc', 'size_desc'].includes(sort)) throw new HttpError(400);
+      const folderId = route === '/folders/children' ? root.id : decodeURIComponent(route.split('/')[2]!);
+      const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+      const nameKey = (entry: Entry) => [...new TextEncoder().encode(entry.name.normalize('NFC'))];
+      const items = this.entries.filter((entry) => entry.parent_id === folderId).sort((a, b) => {
+        if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1;
+        const left = nameKey(a), right = nameKey(b);
+        const difference = left.findIndex((byte, index) => byte !== right[index]);
+        const name = difference < 0 ? left.length - right.length : left[difference] - (right[difference] ?? -1);
+        if (a.kind === 'folder' || b.kind === 'folder') return name || compare(a.id, b.id);
+        if (sort.startsWith('size_')) return (a.size - b.size) * (sort === 'size_desc' ? -1 : 1) || name || compare(a.id, b.id);
+        return name * (sort === 'name_desc' ? -1 : 1) || compare(a.id, b.id);
+      });
+      return { ...(route === '/folders/children' ? { root } : {}), items, next_cursor: null, has_more: false } as T;
     }
     if (route.endsWith('/children') && method === 'POST') {
       const body = options.body as { name: string; parent_id: string };
