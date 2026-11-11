@@ -130,8 +130,8 @@ Cool green-gray neutrals establish the workspace, with muted teal for actions an
 ### Hierarchy
 - **Headline** (600, 25px, 1.25): Main page headings; 23px on narrow screens.
 - **Title** (600, 18px): Settings and section headings.
-- **Body** (400, 14px): Default interface text.
-- **Label** (400, 12px): Compact metadata and list headings; some component labels use medium weight.
+- **Body** (400, 13px): Default interface text.
+- **Label** (400, 12px): Compact metadata and list headings; controls, navigation and file names use the shared 13px interface size.
 - **Brand** (600, 19px): Header wordmark, reduced to 18px on narrow screens.
 
 **Not canonized:** The current build uses system UI for display headings. That implementation detail is recorded as observed, not prescribed for future display typography.

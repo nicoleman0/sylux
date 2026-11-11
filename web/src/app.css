@@ -79,6 +79,8 @@
 	--shadow-lg: 0 8px 24px #132d2924;
 	--shadow-xl: 0 8px 24px #132d2924;
 	--shadow-2xl: 0 8px 24px #132d2924;
+	--text-sm: 13px;
+	--text-xs: 12px;
 	--color-sidebar-ring: var(--sidebar-ring);
 	--color-sidebar-border: var(--sidebar-border);
 	--color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -134,7 +136,7 @@
 
 
 :root { font-size: 14px; font-synthesis: none; }
-body { margin: 0; }
+body { margin: 0; font-size: var(--text-sm); }
 button, a, input { touch-action: manipulation; }
 button, a { -webkit-tap-highlight-color: transparent; }
 button { cursor: pointer; }
@@ -157,6 +159,8 @@ h1:focus, h2:focus { outline: none; }
 .brand { display: inline-flex; align-items: center; gap: 11px; font-size: 19px; font-weight: 600; letter-spacing: -.025em; min-width: 0; text-decoration: none; }
 .brand svg { width: 25px; height: 25px; color: var(--primary); flex-shrink: 0; }
 .brand span { max-width: 48vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.header-icon-button { width: 32px; height: 32px; }
+.header-icon-button svg { width: 12px; height: 12px; }
 .header-actions { display: flex; align-items: center; gap: 13px; }
 .workspace-header { height: 56px; padding: 0 24px; border-radius: var(--radius-xl) var(--radius-xl) 0 0; }
 .workspace-location { display: flex; align-items: center; gap: 12px; min-width: 0; font-size: 13px; }
@@ -190,7 +194,7 @@ h1:focus, h2:focus { outline: none; }
 .file-row[draggable="true"]:active { cursor: grabbing; }
 .file-row[data-drop-active="true"] { background: var(--accent); }
 .item-name { display: flex; align-items: center; gap: 13px; min-width: 0; min-height: 57px; text-align: left; border: 0; background: transparent; padding: 0; width: 100%; border-radius: 2px; }
-.item-name svg { width: 21px; height: 21px; color: var(--muted-foreground); }
+.item-name svg { width: 18px; height: 18px; color: var(--muted-foreground); }
 .item-name .folder-icon svg { color: var(--primary); fill: var(--accent); }
 .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-name:hover .filename { color: var(--primary); }
@@ -286,7 +290,7 @@ h1:focus, h2:focus { outline: none; }
 
 @media (pointer: coarse) {
   [data-slot="button"], [data-slot="sidebar-trigger"], [data-slot="sidebar-menu-button"] { min-height: 44px; }
-  [data-slot="sidebar-trigger"] { min-width: 44px; }
+  [data-slot="sidebar-trigger"], .header-icon-button { min-width: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   [data-slot^="sidebar"] { transition: none; }

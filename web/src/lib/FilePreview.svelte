@@ -46,7 +46,7 @@
   <Dialog.Content class="!max-w-[calc(100vw-1rem)] w-[calc(100vw-1rem)] h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] overflow-hidden flex flex-col gap-4 p-4 sm:!max-w-[min(92vw,1400px)] sm:w-[92vw] sm:h-[88dvh] sm:max-h-[88dvh] sm:gap-6 sm:p-6" showCloseButton={false} onCloseAutoFocus={(event) => event.preventDefault()}>
     <Dialog.Header class="shrink-0">
       <Dialog.Title class="break-all">Preview {entry?.name}</Dialog.Title>
-      <Dialog.Description>PDF up to 20 MiB and 500 pages. Text and images up to 2 MiB; images up to 16 megapixels.</Dialog.Description>
+      <Dialog.Description>Read-only preview.</Dialog.Description>
     </Dialog.Header>
     <div class="min-h-0 min-w-0 flex-1 overflow-auto" aria-busy={!preview && !error}>
       {#if error}
