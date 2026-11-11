@@ -46,7 +46,7 @@
   <Dialog.Content class="max-h-[90dvh] overflow-y-auto sm:max-w-3xl" showCloseButton={false} onCloseAutoFocus={(event) => event.preventDefault()}>
     <Dialog.Header>
       <Dialog.Title class="break-all">Preview {entry?.name}</Dialog.Title>
-      <Dialog.Description>UTF-8 text, PNG, JPEG and GIF up to 2 MiB. Images must be at most 16 megapixels.</Dialog.Description>
+      <Dialog.Description>PDF up to 20 MiB and 500 pages. Text and images up to 2 MiB; images up to 16 megapixels.</Dialog.Description>
     </Dialog.Header>
     <div class="min-h-24 min-w-0" aria-busy={!preview && !error}>
       {#if error}
@@ -55,6 +55,14 @@
         <pre class="bg-muted max-h-[55dvh] overflow-auto rounded-md p-4 font-mono text-sm whitespace-pre-wrap break-words">{preview.text || 'This file is empty.'}</pre>
       {:else if preview?.kind === 'image'}
         <img src={imageUrl} alt={entry?.name ?? 'File preview'} class="mx-auto max-h-[55dvh] max-w-full object-contain" onerror={() => { error = 'This image could not be displayed. Download the file to open it.'; }} />
+      {:else if preview?.kind === 'pdf'}
+        {#await import('./PdfPreview.svelte')}
+          <p role="status">Opening PDF…</p>
+        {:then component}
+          <component.default bytes={preview.bytes} onretry={() => attempt++} />
+        {:catch}
+          <div class="grid gap-3"><p role="alert">Could not load the PDF viewer. Retry or download the file.</p><Button variant="outline" class="justify-self-start" onclick={() => attempt++}>Retry preview</Button></div>
+        {/await}
       {:else if preview?.kind === 'unsupported'}
         <p role="status">{preview.message}</p>
       {:else}
