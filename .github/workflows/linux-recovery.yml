@@ -1,0 +1,46 @@
+name: Linux container recovery
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - rust-toolchain.toml
+      - src/**
+      - migrations/**
+      - web/**
+      - tools/**
+      - scripts/syl7-linux*
+      - scripts/package-beta.sh
+      - deploy/docker/**
+      - docs/docker-beta.md
+      - .github/workflows/beta-release.yml
+      - docs/container-install.md
+      - .github/workflows/linux-recovery.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install the temporary SSH server for the isolated client check
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openssh-server
+          sudo systemctl stop ssh.service ssh.socket 2>/dev/null || true
+          sudo systemctl disable ssh.service ssh.socket 2>/dev/null || true
+      - name: Exercise host bind mount and stopped-service restore
+        run: scripts/syl7-linux.sh

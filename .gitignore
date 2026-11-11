@@ -1,0 +1,32 @@
+# Local state and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.local/
+.worktrees/
+.hermes/
+data/
+state/
+# Build outputs
+/target/
+node_modules/
+/dist/
+/build/
+.svelte-kit/
+coverage/
+.DS_Store
+__pycache__/
+
+# Internal planning / discovery artifacts (not for public release)
+_bmad-output/
+FILE-STORAGE-HANDOFF.md
+docs/project-status.md
+AGENTS.md
+
+# Transient provenance and runtime evidence output
+**/evidence/
+BUILD-HANDOFF.md

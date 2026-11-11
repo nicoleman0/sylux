@@ -1,0 +1,4 @@
+# Build and test outputs
+dist/
+test-results/
+playwright-report/

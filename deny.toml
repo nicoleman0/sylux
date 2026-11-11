@@ -1,0 +1,48 @@
+[graph]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = false
+
+[advisories]
+db-path = ".local/advisory-dbs"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+ignore = []
+maximum-db-staleness = "P1D"
+
+[licenses]
+confidence-threshold = 0.95
+# MIT chosen for OR expressions where available. AND obligations still apply.
+allow = ["MIT", "Apache-2.0", "ISC", "BSD-3-Clause", "Unicode-3.0", "Zlib"]
+unused-allowed-license = "warn"
+
+[licenses.private]
+# Only the unpublished first-party package lacks a product license.
+ignore = true
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+skip = [
+    { crate = "getrandom@0.2.17", reason = "ring 0.17.14 uses 0.2; application uses reviewed 0.4.3. Both audited." },
+]
+deny = ["openssl", "openssl-sys", "aws-lc-rs", "aws-lc-sys", "sqlx", "sqlx-core"]
+
+[[bans.features]]
+crate = "libsqlite3-sys"
+deny = ["sqlcipher", "bundled-sqlcipher", "bundled-sqlcipher-vendored-openssl", "buildtime_bindgen", "loadable_extension"]
+
+[[bans.features]]
+crate = "rusqlite"
+deny = ["load_extension", "functions", "vtab", "sqlcipher"]
+
+[[bans.features]]
+crate = "base64"
+deny = ["simd-unsafe"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

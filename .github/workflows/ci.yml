@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Linux x86_64 checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master snapshot
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install pinned npm
+        run: npm install --global npm@11.19.1
+
+      - name: Install pinned cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked --root "$RUNNER_TEMP/cargo-deny"
+
+      - name: Run documented checks
+        env:
+          CARGO_DENY_BIN: ${{ runner.temp }}/cargo-deny/bin/cargo-deny
+        run: scripts/check.sh
+
+      - name: Install isolated browser test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libnss3-tools
+          npm --prefix web exec -- playwright install --with-deps chromium
+
+      - name: Run beta contract, integration and browser checks
+        run: scripts/check-beta.sh

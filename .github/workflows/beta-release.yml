@@ -1,0 +1,120 @@
+name: Beta release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New beta version, for example v0.1.0-beta.1'
+        required: true
+        type: string
+      publish:
+        description: 'Publish the qualified archive in the public repository'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-release
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]] || exit 1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-gnu
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install check tools
+        run: |
+          npm install --global npm@11.19.1
+          cargo install cargo-deny --version 0.20.2 --locked --root "$RUNNER_TEMP/cargo-deny"
+          sudo apt-get update
+          sudo apt-get install --yes libnss3-tools openssh-server
+          sudo systemctl stop ssh.service ssh.socket
+          sudo systemctl disable ssh.service ssh.socket
+      - name: Check source and browser journeys
+        env:
+          CARGO_DENY_BIN: ${{ runner.temp }}/cargo-deny/bin/cargo-deny
+        run: |
+          scripts/check.sh
+          npm --prefix web exec -- playwright install --with-deps chromium
+          scripts/check-beta.sh
+      - name: Package the exact checked source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/package-beta.sh "$VERSION" .local/release
+      - name: Test the packaged image and restored state
+        run: |
+          export SYLUX_TEST_IMAGE
+          SYLUX_TEST_IMAGE=$(cat .local/release/image-id.txt)
+          scripts/syl7-linux.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: beta-release
+          path: .local/release/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: qualify
+    if: inputs.publish && !github.event.repository.private && github.repository == 'nicoleman0/sylux' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: beta-release
+          path: release
+      - name: Publish a new beta release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ github.sha }}
+        run: |
+          cd release
+          sha256sum --check SHA256SUMS
+          python3 - "$REVISION" "$VERSION" <<'PY'
+          import json, pathlib, sys
+          info = json.loads(pathlib.Path('release.json').read_text())
+          assert info['source_commit'] == sys.argv[1]
+          assert info['version'] == sys.argv[2]
+          PY
+          gh api "repos/$GH_REPO/git/matching-refs/tags/$VERSION" > "$RUNNER_TEMP/tags.json"
+          python3 - "$RUNNER_TEMP/tags.json" "$VERSION" <<'PY'
+          import json, pathlib, sys
+          refs = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert not any(ref['ref'] == 'refs/tags/' + sys.argv[2] for ref in refs), 'Version already exists'
+          PY
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF_NOTES
+          Beta for Linux amd64 Docker installations. Read docker-beta.md before installing.
+
+          Verify SHA256SUMS, load sylux-image.tar.gz, and pin Compose to the loaded image ID as described in the guide.
+          Source commit: $REVISION
+          Source, browser and packaged-image recovery checks passed in this workflow.
+          Physical durability and schema upgrades are not qualified. Keep independent copies.
+          Feedback: hello@corvus-dev.com
+          EOF_NOTES
+          gh release create "$VERSION" sylux-image.tar.gz SHA256SUMS image-id.txt release.json compose.yaml .env.example docker-beta.md \
+            --target "$REVISION" --title "Sylux $VERSION" --prerelease --latest=false \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

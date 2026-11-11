@@ -1,0 +1,29 @@
+name: sylux
+
+services:
+  sylux:
+    image: ${SYLUX_IMAGE:?Set SYLUX_IMAGE to the verified local sha256 image ID}
+    pull_policy: never
+    platform: linux/amd64
+    network_mode: host
+    user: "10001:10001"
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    volumes:
+      - type: bind
+        source: ${SYLUX_DATA_DIR:-/srv/sylux}
+        target: /var/lib/sylux
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SYLUX_TLS_DIR:-/etc/sylux/tls}
+        target: /run/sylux/tls
+        read_only: true
+        bind:
+          create_host_path: false
