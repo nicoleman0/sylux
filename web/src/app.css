@@ -207,7 +207,7 @@ h1:focus, h2:focus { outline: none; }
 .account-details dd { overflow-wrap: anywhere; }
 .settings-tabs { display: flex; gap: 25px; margin-top: 29px; border-bottom: 1px solid var(--border); }
 .settings-tabs [data-slot="button"] { border-radius: 0; padding: 0 1px 12px; color: var(--muted-foreground); border-bottom: 2px solid transparent; }
-.settings-tabs .active { color: var(--primary); border-color: var(--primary); }
+.settings-tabs .active { color: var(--primary); border-bottom-color: var(--primary); }
 .settings-tabs + .settings-section { border-top: 0; margin-top: 0; }
 .account-list { border-top: 1px solid var(--border); }
 .account-row { display: grid; grid-template-columns: minmax(120px,1fr) 75px auto; gap: 16px; align-items: center; min-height: 75px; border-bottom: 1px solid var(--border); }

@@ -551,6 +551,30 @@ test('account screens create, reset, disable and change passwords', async ({ pag
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
 });
 
+test('settings tab selection draws only the underline and keeps keyboard focus visible', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeFocused();
+
+  const accounts = page.getByRole('button', { name: 'Accounts', exact: true });
+  const instance = page.getByRole('button', { name: 'Instance', exact: true });
+  const borders = await accounts.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return [style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor];
+  });
+  expect(borders[0]).toBe('rgba(0, 0, 0, 0)');
+  expect(borders[1]).toBe('rgba(0, 0, 0, 0)');
+  expect(borders[2]).not.toBe('rgba(0, 0, 0, 0)');
+  expect(borders[3]).toBe('rgba(0, 0, 0, 0)');
+
+  await accounts.focus();
+  await page.keyboard.press('Tab');
+  await expect(instance).toBeFocused();
+  await expect(instance).toHaveCSS('outline-style', 'solid');
+  await instance.click();
+  await expect(instance).toHaveAttribute('aria-current', 'page');
+});
+
 test('logging out clears account form secrets before another sign-in', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
