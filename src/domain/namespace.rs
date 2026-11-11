@@ -130,6 +130,30 @@ pub fn create_folder(
     })
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListingSort {
+    #[default]
+    NameAsc,
+    NameDesc,
+    SizeAsc,
+    SizeDesc,
+}
+
+#[derive(Debug)]
+pub struct ListingPosition {
+    pub kind_rank: u8,
+    pub name_key: Vec<u8>,
+    pub size: i64,
+    pub id: String,
+}
+
+#[derive(Debug)]
+pub struct ListedEntry {
+    pub entry: Entry,
+    pub position: ListingPosition,
+}
+
 pub fn list(
     db: &Connection,
     owner: &str,
@@ -167,6 +191,85 @@ pub fn list(
         .map_err(|_| NamespaceError::Sql)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|_| NamespaceError::Sql)
+}
+
+pub fn list_sorted(
+    db: &Connection,
+    owner: &str,
+    folder: &str,
+    sort: ListingSort,
+    after: Option<&ListingPosition>,
+    limit: usize,
+) -> Result<Vec<ListedEntry>, NamespaceError> {
+    let sql = listing_sql(sort);
+    let mut stmt = db.prepare(&sql).map_err(|_| NamespaceError::Sql)?;
+    let rows = stmt
+        .query_map(
+            params![
+                owner,
+                folder,
+                after.map(|position| position.kind_rank),
+                after.map(|position| position.name_key.as_slice()),
+                after.map(|position| position.size),
+                after.map(|position| position.id.as_str()),
+                (limit.min(500) + 1) as i64
+            ],
+            |r| {
+                let id: String = r.get(0)?;
+                let generation: i64 = r.get(4)?;
+                Ok(ListedEntry {
+                    position: ListingPosition {
+                        kind_rank: r.get(6)?,
+                        name_key: r.get(5)?,
+                        size: r.get(7)?,
+                        id: id.clone(),
+                    },
+                    entry: Entry {
+                        etag: folder_etag(&id, generation as u64),
+                        id,
+                        parent_id: r.get(1)?,
+                        name: r.get(2)?,
+                        kind: r.get(3)?,
+                        generation,
+                    },
+                })
+            },
+        )
+        .map_err(|_| NamespaceError::Sql)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|_| NamespaceError::Sql)
+}
+
+fn listing_sql(sort: ListingSort) -> String {
+    let ascending_name = "(name_key>?4 OR (name_key=?4 AND entry_id>?6))";
+    let (file_after, order) = match sort {
+        ListingSort::NameAsc => (ascending_name, "kind_rank,name_key,entry_id"),
+        ListingSort::NameDesc => (
+            "(name_key<?4 OR (name_key=?4 AND entry_id>?6))",
+            "kind_rank,CASE WHEN kind_rank=0 THEN name_key END ASC,CASE WHEN kind_rank=1 THEN name_key END DESC,entry_id",
+        ),
+        ListingSort::SizeAsc => (
+            "(byte_size>?5 OR (byte_size=?5 AND (name_key>?4 OR (name_key=?4 AND entry_id>?6))))",
+            "kind_rank,byte_size ASC,name_key,entry_id",
+        ),
+        ListingSort::SizeDesc => (
+            "(byte_size<?5 OR (byte_size=?5 AND (name_key>?4 OR (name_key=?4 AND entry_id>?6))))",
+            "kind_rank,byte_size DESC,name_key,entry_id",
+        ),
+    };
+    // Only fixed SQL fragments vary; filtering and ordering cover every sibling before LIMIT.
+    format!(
+        "WITH listing AS (
+            SELECT e.entry_id,e.parent_id,e.original_name,e.kind,e.generation,e.name_key,
+                CASE e.kind WHEN 'folder' THEN 0 ELSE 1 END AS kind_rank,
+                CASE e.kind WHEN 'folder' THEN 0 ELSE r.length END AS byte_size
+            FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id
+            WHERE e.owner_account_id=?1 AND e.parent_id=?2 AND e.state='active'
+        ) SELECT entry_id,parent_id,original_name,kind,generation,name_key,kind_rank,byte_size
+        FROM listing WHERE ?3 IS NULL OR kind_rank>?3 OR (kind_rank=?3 AND (
+            (kind_rank=0 AND {ascending_name}) OR (kind_rank=1 AND {file_after})
+        )) ORDER BY {order} LIMIT ?7"
+    )
 }
 
 pub fn rename(
@@ -396,4 +499,53 @@ pub fn restore(
     )
     .map_err(|_| NamespaceError::Sql)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sorted_listing_limits_sql_work_to_indexed_siblings() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("../../migrations/sqlite/0001_s1.sql"))
+            .unwrap();
+        for sort in [
+            ListingSort::NameAsc,
+            ListingSort::NameDesc,
+            ListingSort::SizeAsc,
+            ListingSort::SizeDesc,
+        ] {
+            let sql = format!("EXPLAIN QUERY PLAN {}", listing_sql(sort));
+            let mut statement = db.prepare(&sql).unwrap();
+            let details = statement
+                .query_map(
+                    params![
+                        "owner",
+                        "folder",
+                        Option::<u8>::None,
+                        Option::<Vec<u8>>::None,
+                        Option::<i64>::None,
+                        Option::<String>::None,
+                        101
+                    ],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                details.iter().any(|detail| detail
+                    .contains("SEARCH e USING INDEX entry_active_listing")
+                    && detail.contains("owner_account_id=? AND parent_id=? AND state=?")),
+                "{sort:?}: {details:?}"
+            );
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("SEARCH r USING INDEX")),
+                "{sort:?}: {details:?}"
+            );
+        }
+    }
 }

@@ -3,6 +3,7 @@ import type { ApiClient } from './api';
 export type Folder = { id: string; parent_id: string | null; name: string; kind: 'folder'; etag: string };
 export type FileEntry = { id: string; parent_id: string; name: string; kind: 'file'; size: number; etag: string };
 export type Entry = Folder | FileEntry;
+export type FolderSort = 'name_asc' | 'name_desc' | 'size_asc' | 'size_desc';
 export type DeletedEntry = Entry & { original_path: string[] };
 export type Listing<T extends Entry = Entry> = { items: T[]; next_cursor: string | null; has_more: boolean };
 export type RootListing = { items: Entry[]; root: Folder; next_cursor: string | null; has_more: boolean };
@@ -12,13 +13,13 @@ export type SearchListing = { items: SearchHit[]; next_cursor: string | null; ha
 export class ListingApi {
   constructor(private readonly client: ApiClient) {}
 
-  async roots(cursor?: string | null): Promise<RootListing> {
-    const roots = await this.client.request<RootListing>(`/folders/children?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+  async roots(cursor?: string | null, sort: FolderSort = 'name_asc'): Promise<RootListing> {
+    const roots = await this.client.request<RootListing>(`/folders/children?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
     if (!roots.root) throw new Error('Backend did not return the private root descriptor');
     return roots;
   }
-  children(folderId: string, cursor?: string | null): Promise<Listing> {
-    return this.client.request(`/folders/${encodeURIComponent(folderId)}/children?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+  children(folderId: string, cursor?: string | null, sort: FolderSort = 'name_asc'): Promise<Listing> {
+    return this.client.request(`/folders/${encodeURIComponent(folderId)}/children?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
   }
   search(query: string, cursor?: string | null, signal?: AbortSignal): Promise<SearchListing> {
     return this.client.request(`/entries/search?q=${encodeURIComponent(query)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });

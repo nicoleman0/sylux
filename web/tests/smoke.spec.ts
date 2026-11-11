@@ -235,10 +235,14 @@ test('clearing search after a rename restores the previous browsing page with fr
   await login(page);
   let name = 'Later.txt';
   let version = 1;
+  const browseRequests: URL[] = [];
   const later = () => ({ id: 'page-two', parent_id: 'root-1', name, kind: 'file', etag: `page-two:${version}`, size: 4 });
   await page.route('**/folders/root-1/children**', (route) => {
-    const second = new URL(route.request().url()).searchParams.has('cursor');
-    return route.fulfill({ json: { items: second ? [later()] : [{ id: 'first', parent_id: 'root-1', name: 'First.txt', kind: 'file', etag: 'first:1', size: 4 }], next_cursor: second ? null : 'page-2', has_more: !second } });
+    const url = new URL(route.request().url());
+    browseRequests.push(url);
+    const cursor = url.searchParams.get('cursor');
+    if (cursor && cursor !== `page-2:${version}`) return route.fulfill({ status: 409, json: { code: 'listing_changed' } });
+    return route.fulfill({ json: { items: cursor ? [later()] : [{ id: 'first', parent_id: 'root-1', name: 'First.txt', kind: 'file', etag: 'first:1', size: 4 }], next_cursor: cursor ? null : `page-2:${version}`, has_more: !cursor } });
   });
   await page.route('**/entries/page-two', (route) => {
     if (route.request().method() === 'PATCH') {
@@ -249,7 +253,7 @@ test('clearing search after a rename restores the previous browsing page with fr
     return route.fulfill({ json: later() });
   });
   await page.route('**/entries/search**', (route) => route.fulfill({ json: { items: name.toLowerCase().includes('later') ? [{ entry: later(), location: [{ id: 'root-1', parent_id: null, name: '', kind: 'folder', etag: 'root-1:1' }] }] : [], next_cursor: null, has_more: false } }));
-  await page.getByRole('button', { name: 'Refresh folder' }).click();
+  await page.getByLabel('Sort files by', { exact: true }).selectOption('size_desc');
   await page.getByRole('button', { name: 'Next page' }).click();
   await expect(page.getByRole('button', { name: 'Preview Later.txt' })).toBeVisible();
   await page.getByLabel('Search files and folders').fill('Later');
@@ -265,8 +269,14 @@ test('clearing search after a rename restores the previous browsing page with fr
   await page.getByRole('button', { name: 'Save name' }).click();
   await expect(page.getByText('No matching files or folders.')).toBeVisible();
   await page.getByRole('button', { name: 'Clear search' }).click();
-  await expect(page.getByRole('button', { name: 'Preview Updated.txt' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Previous page' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview First.txt' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Previous page' })).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: 'This folder changed. The listing has been restarted.' })).toBeVisible();
+  await expect(page.getByLabel('Sort files by', { exact: true })).toHaveValue('size_desc');
+  expect(browseRequests.slice(-2).map(url => ({ sort: url.searchParams.get('sort'), cursor: url.searchParams.get('cursor') }))).toEqual([
+    { sort: 'size_desc', cursor: 'page-2:1' },
+    { sort: 'size_desc', cursor: null },
+  ]);
 });
 
 test('late search responses cannot appear after navigation or sign-out', async ({ page }) => {

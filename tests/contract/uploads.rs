@@ -1528,6 +1528,53 @@ async fn explicit_replacement_preserves_prior_bytes_in_deleted_items_and_restore
     let old_bytes = b"old bytes\x00\xff\r\n";
     let new_bytes = b"new bytes\x00\xfe";
     let old = fixture.upload("same.bin", old_bytes).await;
+    let middle_bytes = b"middle bytes";
+    let (middle_id, middle_ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 2, "middle.bin", middle_bytes)
+        .await;
+    let staged = fixture
+        .mutate(
+            "PUT",
+            &format!("/uploads/{middle_id}/content"),
+            &owner_auth(),
+            Some(&middle_ticket),
+            &[("Content-Type", "application/octet-stream".to_owned())],
+            middle_bytes.to_vec(),
+        )
+        .await;
+    assert_eq!(staged.status, 200, "{}", staged.text());
+    let middle = fixture
+        .mutate(
+            "POST",
+            &format!("/uploads/{middle_id}/commit"),
+            &owner_auth(),
+            Some(&middle_ticket),
+            &[
+                ("Content-Type", "application/json".to_owned()),
+                ("If-None-Match", "*".to_owned()),
+            ],
+            serde_json::to_vec(&serde_json::json!({
+                "sha256": hex(&Sha256::digest(middle_bytes)),
+                "parent_etag": folder_etag(OWNER_ROOT, 2),
+            }))
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(middle.status, 201, "{}", middle.text());
+    let middle = middle.json();
+    let before = fixture
+        .request(
+            "GET",
+            "/folders/children?sort=size_asc&limit=1",
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(before.status, 200, "{}", before.text());
+    let before = before.json();
+    assert_eq!(before["items"][0]["id"], middle["id"]);
+    let cursor = before["next_cursor"].as_str().unwrap();
     let (id, ticket, admission) = fixture.replacement(&old, new_bytes).await;
     assert_eq!(
         fixture
@@ -1541,6 +1588,31 @@ async fn explicit_replacement_preserves_prior_bytes_in_deleted_items_and_restore
     assert_eq!(committed.status, 201, "{}", committed.text());
     let new = committed.json();
     assert_eq!(new["replaced_entry_id"], old["id"]);
+    let stale = fixture
+        .request(
+            "GET",
+            &format!("/folders/children?sort=size_asc&limit=1&cursor={cursor}"),
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(stale.status, 409, "{}", stale.text());
+    assert_eq!(stale.json()["code"], "listing_changed");
+    let restarted = fixture
+        .request(
+            "GET",
+            "/folders/children?sort=size_asc",
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(restarted.status, 200, "{}", restarted.text());
+    let restarted = restarted.json();
+    assert_eq!(restarted["items"][0]["id"], new["id"]);
+    assert_eq!(restarted["items"][0]["size"], new_bytes.len());
+    assert_eq!(restarted["items"][1]["id"], middle["id"]);
     fixture.assert_content(&new, new_bytes).await;
     let deleted = fixture
         .request("GET", "/trash", Some(&owner_auth()), &[], Vec::new())

@@ -24,7 +24,7 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import { Progress } from '$lib/components/ui/progress/index.js';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
-  import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit } from './lib/listing';
+  import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
 
@@ -219,6 +219,7 @@
   let loading = $state(false);
   let listingError = $state('');
   let listingRequest = 0;
+  let folderSort = $state<FolderSort>('name_asc');
   let searchInput = $state('');
   let searchQuery = $state('');
   let searchItems = $state<SearchHit[]>([]);
@@ -331,7 +332,7 @@
         if (!await refreshRoot() || requestId !== listingRequest) return false;
         currentFolder = folders[0]; folderPath = [currentFolder]; folderId = currentFolder.id;
       }
-      const page = await listing.children(folderId);
+      const page = await listing.children(folderId, null, folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return false;
       entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
@@ -341,6 +342,13 @@
     }
     catch { if (generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest) listingError = 'Could not load this folder. Try again.'; return false; }
     finally { if (generation === sessionGeneration && requestId === listingRequest) loading = false; }
+  }
+
+  async function changeFolderSort(event: Event): Promise<void> {
+    folderSort = (event.currentTarget as HTMLSelectElement).value as FolderSort;
+    clearSelection();
+    pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false;
+    await refresh();
   }
 
   function clearSearch(restoreBrowse = false): void {
@@ -371,7 +379,7 @@
     const request = ++listingRequest;
     loading = true; listingError = '';
     try {
-      const page = await listing.children(folderId, cursor);
+      const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || request !== listingRequest || searchQuery || currentFolder.id !== folderId) return;
       entries = page.items; nextCursor = page.next_cursor; hasMore = page.has_more; browseDirty = false;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
@@ -477,7 +485,7 @@
     const requestId = ++listingRequest;
     loading = true; listingError = '';
     try {
-      const page = await listing.children(folderId, cursor);
+      const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || nextCursor !== cursor || requestId !== listingRequest) return;
       pageCursors = [...pageCursors.slice(0, pageIndex + 1), nextCursor];
       pageIndex += 1; entries = page.items;
@@ -502,7 +510,7 @@
     loading = true; listingError = '';
     const target = pageIndex - 1;
     try {
-      const page = await listing.children(folderId, pageCursors[target]);
+      const page = await listing.children(folderId, pageCursors[target], folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
       pageIndex = target; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
@@ -600,6 +608,7 @@
     transfers.invalidate(); transfers = new TransferApi(client, mutations);
     transferName = ''; progress = 0; transferPhase = ''; transferBusy = false; uploadCancelable = false;
     uploadId = ''; unresolvedUploadId = ''; unresolvedUploadName = ''; unresolvedCancel = false; notice = '';
+    folderSort = 'name_asc';
     listingRequest++; currentFolder = emptyRoot; folders = []; entries = []; folderPath = [emptyRoot];
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false; loading = false; listingError = '';
     folderName = ''; folderBusy = false; createOpen = false; folderError = ''; previewEntry = null; previewTrigger = null;
@@ -1411,6 +1420,15 @@
                 <Button type="submit" disabled={bulkBusy || bulkNeedsRefresh || transferBusy || !!unresolvedUploadId || !!replacementPrompt || !currentFolder.id || !selectedFileName}>Upload</Button>
               </form>
               <Button variant="outline" disabled={loading || bulkBusy} onclick={() => bulkNeedsRefresh ? reconcileBulk() : refresh()} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
+              <div class="folder-sort">
+                <label for="folder-sort">Sort files by</label>
+                <select id="folder-sort" value={folderSort} disabled={bulkBusy || bulkNeedsRefresh} onchange={changeFolderSort}>
+                  <option value="name_asc">Name: A to Z</option>
+                  <option value="name_desc">Name: Z to A</option>
+                  <option value="size_asc">Size: smallest first</option>
+                  <option value="size_desc">Size: largest first</option>
+                </select>
+              </div>
               <span class="chosen-file" aria-live="polite">{selectedFileName}</span>
               {#if transferBusy || progress > 0}<div class="grid basis-full justify-items-start gap-2" role="status"><div class="grid w-full gap-1 text-sm"><span class="break-all">{transferName}</span><div class="flex justify-between gap-3"><span>{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span>{progress}% transferred</span></div></div><Progress value={progress} max={100} aria-label="Upload progress" />{#if transferBusy}<Button variant="link" class="h-auto p-0" onclick={() => { if (uploadCancelable) controller?.abort(); }} disabled={!uploadCancelable}>Cancel upload</Button>{/if}</div>{/if}
 

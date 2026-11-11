@@ -118,6 +118,12 @@ h1:focus, h2:focus { outline: none; }
 .breadcrumb { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; color: var(--muted-foreground); font-size: var(--type-ui); margin-bottom: 12px; }
 .breadcrumb [data-slot="button"] { min-height: var(--control-height); }
 .upload-toolbar { display: flex; align-items: center; gap: 9px; margin-bottom: 26px; flex-wrap: wrap; }
+.folder-sort { display: flex; align-items: center; gap: 8px; max-width: 100%; font-size: var(--type-ui); }
+.folder-sort label { white-space: nowrap; }
+.folder-sort select { min-width: 0; min-height: var(--control-height); max-width: 100%; border: 1px solid var(--input); border-radius: var(--radius-lg); background: var(--background); color: var(--foreground); padding: 0 10px; font: inherit; }
+.folder-sort select:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.folder-sort select:disabled { opacity: .5; }
+@media (pointer: coarse) { .folder-sort select { min-height: var(--control-height-touch); } }
 .search-toolbar { display: grid; gap: 7px; max-width: 520px; margin-bottom: 22px; }
 .search-controls { display: flex; gap: 9px; align-items: center; }
 .search-controls input { min-width: 0; flex: 1; }
