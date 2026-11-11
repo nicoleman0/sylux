@@ -6,4 +6,5 @@ pub mod ids;
 pub mod mutation;
 pub mod names;
 pub mod namespace;
+pub mod search;
 pub mod upload;

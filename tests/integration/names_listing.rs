@@ -135,6 +135,18 @@ impl HttpFixture {
         self.list_as(query, SESSION, SECRET).await
     }
     async fn list_as(&self, query: &str, sid: &str, secret: &[u8; 32]) -> (u16, Vec<u8>) {
+        self.get_as(&format!("/folders/children{query}"), sid, secret)
+            .await
+    }
+    async fn search(&self, query: &str) -> (u16, Vec<u8>) {
+        self.get_as(&format!("/entries/search{query}"), SESSION, SECRET)
+            .await
+    }
+    async fn search_as(&self, query: &str, sid: &str, secret: &[u8; 32]) -> (u16, Vec<u8>) {
+        self.get_as(&format!("/entries/search{query}"), sid, secret)
+            .await
+    }
+    async fn get_as(&self, path: &str, sid: &str, secret: &[u8; 32]) -> (u16, Vec<u8>) {
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
             time::timeout,
@@ -144,7 +156,7 @@ impl HttpFixture {
             .unwrap();
         let cookie = format!("__Host-sylux={}.{}", sid, URL_SAFE_NO_PAD.encode(secret));
         let req = format!(
-            "GET /folders/children{query} HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {cookie}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {cookie}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(req.as_bytes()).await.unwrap();
         let mut response = Vec::new();
@@ -371,6 +383,248 @@ async fn http_listing_over_500_entries_has_exact_ordered_pages() {
     assert_eq!(last["items"][1]["name"], "item-0501");
     assert_eq!(last["items"][2]["name"], "item-0502");
     assert_eq!(last["has_more"], false);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn search_reaches_nested_literal_matches_and_isolates_paths_and_pages() {
+    let fixture = HttpFixture::new("account-search", 103).await;
+    let nested = fixture
+        .request_bytes(
+            "/folders/children",
+            "",
+            format!(r#"{{"parent_id":"{ROOT}","name":"Projects"}}"#).as_bytes(),
+        )
+        .await;
+    assert_eq!(nested.0, 201);
+    let nested: serde_json::Value = serde_json::from_slice(&nested.1).unwrap();
+    let parent = nested["id"].as_str().unwrap();
+    let child = fixture
+        .request_bytes(
+            "/folders/children",
+            "",
+            format!(r#"{{"parent_id":"{parent}","name":"Notes%_Å"}}"#).as_bytes(),
+        )
+        .await;
+    assert_eq!(child.0, 201);
+    let child: serde_json::Value = serde_json::from_slice(&child.1).unwrap();
+    let workers = fixture.workers.as_ref().unwrap().clone();
+    workers.transact(|tx| {
+        tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder','Notes%_private',?4,1)", params!["0000000000000000000000000000f001", OTHER, OTHER_ROOT, b"Notes%_private"]).unwrap();
+        Ok(())
+    }).await.unwrap();
+    let (status, body) = fixture.search("?q=notes%25_%C3%A5").await;
+    assert_eq!(status, 200);
+    let found: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(found["items"].as_array().unwrap().len(), 1);
+    assert_eq!(found["items"][0]["entry"]["name"], "Notes%_Å");
+    assert_eq!(found["items"][0]["location"][1]["name"], "Projects");
+    assert_eq!(found["items"][0]["location"][0]["id"], ROOT);
+    let (status, body) = fixture.search("?q=notes%25_A%CC%8A").await;
+    assert_eq!(status, 200);
+    let decomposed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(decomposed["items"][0]["entry"]["id"], child["id"]);
+    let (_, body) = fixture.search("?q=%25_").await;
+    let found: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        found["items"].as_array().unwrap().len(),
+        1,
+        "punctuation is literal and other account is private"
+    );
+    let (_, body) = fixture.search("?q=item&limit=100").await;
+    let first: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(first["items"].as_array().unwrap().len(), 100);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let mut tampered = cursor.as_bytes().to_vec();
+    let last_byte = tampered.len() - 1;
+    tampered[last_byte] = if tampered[last_byte] == b'A' {
+        b'B'
+    } else {
+        b'A'
+    };
+    assert_eq!(
+        fixture
+            .search(&format!(
+                "?q=item&cursor={}",
+                String::from_utf8(tampered).unwrap()
+            ))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        fixture
+            .search(&format!("?q=item&cursor={}", "A".repeat(4097)))
+            .await
+            .0,
+        400
+    );
+    let (status, body) = fixture
+        .search(&format!("?q=item&limit=100&cursor={cursor}"))
+        .await;
+    assert_eq!(status, 200);
+    let last: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(last["items"].as_array().unwrap().len(), 3);
+    assert_eq!(last["items"][0]["entry"]["name"], "item-0100");
+    assert_eq!(last["has_more"], false);
+    let (status, body) = fixture.search(&format!("?q=Items&cursor={cursor}")).await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+        "invalid_cursor"
+    );
+    let (status, body) = fixture
+        .search_as(
+            &format!("?q=item&cursor={cursor}"),
+            OTHER_SESSION,
+            OTHER_SECRET,
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+        "invalid_cursor"
+    );
+    let (status, body) = fixture
+        .search_as("?q=Notes", OTHER_SESSION, OTHER_SECRET)
+        .await;
+    assert_eq!(status, 200);
+    let other: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(other["items"].as_array().unwrap().len(), 1);
+    assert_eq!(other["items"][0]["location"][0]["id"], OTHER_ROOT);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn search_rejects_invalid_inputs_and_restarts_after_nested_changes() {
+    let fixture = HttpFixture::new("search-changes", 2).await;
+    for query in ["?q=", "?q=%0A", "?q=a&limit=0", "?q=a&limit=101"] {
+        assert_eq!(fixture.search(query).await.0, 400, "{query}");
+    }
+    assert_eq!(
+        fixture.search(&format!("?q={}", "a".repeat(256))).await.0,
+        400
+    );
+    assert_eq!(
+        fixture
+            .search_as("?q=item", "00000000000000000000000000000fff", SECRET)
+            .await
+            .0,
+        401
+    );
+    let (status, body) = fixture.search("?q=item&limit=1").await;
+    assert_eq!(status, 200);
+    let first: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let workers = fixture.workers.as_ref().unwrap().clone();
+    workers
+        .transact(|tx| {
+            let entry = namespace::list(tx, OWNER, ROOT, None, 1).unwrap().remove(0);
+            namespace::rename(tx, OWNER, &entry.id, "renamed", &entry.etag).unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (status, body) = fixture
+        .search(&format!("?q=item&limit=1&cursor={cursor}"))
+        .await;
+    assert_eq!(
+        status, 409,
+        "changed search restarts even when fewer matches remain"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+        "listing_changed"
+    );
+    let (status, body) = fixture.search("?q=renamed").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["items"][0]["entry"]["name"],
+        "renamed"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn search_orders_duplicate_files_by_location_and_tracks_move_and_trash() {
+    let fixture = HttpFixture::new("search-mutations", 0).await;
+    let workers = fixture.workers.as_ref().unwrap().clone();
+    let (alpha, beta, gamma) = workers.transact(|tx| {
+        let alpha = namespace::create_folder(tx, OWNER, ROOT, "Alpha").unwrap();
+        let beta = namespace::create_folder(tx, OWNER, ROOT, "Beta").unwrap();
+        let gamma = namespace::create_folder(tx, OWNER, ROOT, "Gamma").unwrap();
+        for (id, parent) in [("0000000000000000000000000000f101", alpha.id.as_str()), ("0000000000000000000000000000f102", beta.id.as_str())] {
+            tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'file','Report.txt',?4,1)", params![id, OWNER, parent, b"Report.txt"]).unwrap();
+        }
+        Ok((alpha, beta, gamma))
+    }).await.unwrap();
+    let (status, body) = fixture.search("?q=report").await;
+    assert_eq!(status, 200);
+    let found: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = found["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["entry"]["kind"], "file");
+    assert_eq!(items[0]["location"][1]["name"], "Alpha");
+    assert_eq!(items[1]["location"][1]["name"], "Beta");
+    let file_id = items[0]["entry"]["id"].as_str().unwrap().to_owned();
+    let etag = items[0]["entry"]["etag"].as_str().unwrap().to_owned();
+    workers
+        .transact(move |tx| {
+            namespace::move_entry(tx, OWNER, &file_id, &gamma.id, &etag).unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = fixture.search("?q=report").await;
+    let moved: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(moved["items"].as_array().unwrap().len(), 2);
+    assert_eq!(moved["items"][0]["location"][1]["name"], "Beta");
+    assert_eq!(moved["items"][1]["location"][1]["name"], "Gamma");
+    let moved_hit = moved["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["entry"]["id"] == "0000000000000000000000000000f101")
+        .unwrap();
+    let new_etag = moved_hit["entry"]["etag"].as_str().unwrap().to_owned();
+    workers
+        .transact(move |tx| {
+            namespace::trash(tx, OWNER, "0000000000000000000000000000f101", &new_etag).unwrap();
+            tx.execute(
+                "UPDATE entry SET state='deleted' WHERE entry_id=?1",
+                [&alpha.id],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = fixture.search("?q=report").await;
+    let after: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(after["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        after["items"][0]["entry"]["id"],
+        "0000000000000000000000000000f102"
+    );
+    workers
+        .transact(move |tx| {
+            tx.execute(
+                "UPDATE entry SET state='deleted' WHERE entry_id=?1",
+                [&beta.id],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = fixture.search("?q=report").await;
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "active children of a non-live parent are outside the live tree"
+    );
     fixture.close().await;
 }
 

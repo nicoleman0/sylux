@@ -5,6 +5,7 @@ use crate::{
     domain::{
         authz,
         namespace::{self, NamespaceError},
+        search as domain_search,
     },
     http::{
         AuthState,
@@ -123,6 +124,145 @@ fn cursor_key(state: &AuthState) -> [u8; 32] {
     Sha256::digest(state.setup_authorization.as_bytes()).into()
 }
 const MAX_CURSOR_BYTES: usize = 4096;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchQuery {
+    q: String,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SearchCursor {
+    version: u8,
+    actor: String,
+    query: String,
+    fingerprint: String,
+    offset: usize,
+}
+
+fn search_cursor_encode(key: &[u8; 32], cursor: &SearchCursor) -> Option<String> {
+    let body = serde_json::to_vec(cursor).ok()?;
+    let mut mac = HmacSha256::new_from_slice(key).ok()?;
+    mac.update(b"sylux:account-search-cursor:v1\0");
+    mac.update(&body);
+    let token = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(body),
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    );
+    (token.len() <= MAX_CURSOR_BYTES).then_some(token)
+}
+
+fn search_cursor_decode(key: &[u8; 32], value: &str) -> Option<SearchCursor> {
+    if value.len() > MAX_CURSOR_BYTES {
+        return None;
+    }
+    let (body, signature) = value.split_once('.')?;
+    let body = URL_SAFE_NO_PAD.decode(body).ok()?;
+    let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+    let mut mac = HmacSha256::new_from_slice(key).ok()?;
+    mac.update(b"sylux:account-search-cursor:v1\0");
+    mac.update(&body);
+    mac.verify_slice(&signature).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+pub async fn search(
+    State(s): State<AuthState>,
+    headers: HeaderMap,
+    Query(q): Query<SearchQuery>,
+) -> Response {
+    if q.q.is_empty() || q.q.len() > 255 || q.q.chars().any(char::is_control) {
+        return error(StatusCode::BAD_REQUEST, "invalid_query");
+    }
+    let limit = q.limit.unwrap_or(100);
+    if limit == 0 || limit > 100 {
+        return error(StatusCode::BAD_REQUEST, "invalid_limit");
+    }
+    let (account, _) = match principal(&s, &headers).await {
+        Ok(value) => value,
+        Err(value) => return error(value.0, value.1),
+    };
+    let Some(cookie) = session_cookie(&headers) else {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let key = cursor_key(&s);
+    let result = s
+        .workers
+        .read(move |db| Ok(build_search(db, cookie, account, q, limit, key)))
+        .await;
+    match result {
+        Ok(Ok(reply)) => (StatusCode::OK, Json(reply)).into_response(),
+        Ok(Err(response)) => response,
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    }
+}
+
+fn build_search(
+    db: &rusqlite::Connection,
+    cookie: crate::http::middleware::SessionCookie,
+    account: String,
+    q: SearchQuery,
+    limit: usize,
+    key: [u8; 32],
+) -> Result<serde_json::Value, Response> {
+    let Some((current, _, _)) = authz::validate_session(
+        db,
+        &cookie.session_id,
+        &cookie.secret,
+        crate::http::auth::now(),
+    ) else {
+        return Err(error(StatusCode::UNAUTHORIZED, "unauthorized"));
+    };
+    if current != account {
+        return Err(error(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    let found = domain_search::find(db, &account, &q.q)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?;
+    let offset = if let Some(token) = q.cursor {
+        let Some(cursor) = search_cursor_decode(&key, &token) else {
+            return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
+        };
+        if cursor.version != 1
+            || cursor.actor != account
+            || cursor.query != q.q
+            || cursor.offset == 0
+        {
+            return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
+        }
+        if cursor.fingerprint != found.fingerprint {
+            return Err(error(StatusCode::CONFLICT, "listing_changed"));
+        }
+        if cursor.offset >= found.hits.len() {
+            return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
+        }
+        cursor.offset
+    } else {
+        0
+    };
+    let end = offset.saturating_add(limit).min(found.hits.len());
+    let next_cursor = if end < found.hits.len() {
+        search_cursor_encode(
+            &key,
+            &SearchCursor {
+                version: 1,
+                actor: account,
+                query: q.q,
+                fingerprint: found.fingerprint,
+                offset: end,
+            },
+        )
+        .ok_or_else(|| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?
+        .into()
+    } else {
+        None
+    };
+    Ok(
+        serde_json::json!({ "items": &found.hits[offset..end], "next_cursor": next_cursor, "has_more": end < found.hits.len() }),
+    )
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Cursor {

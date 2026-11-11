@@ -22,6 +22,7 @@ coverage/
 __pycache__/
 
 # Internal planning / discovery artifacts (not for public release)
+/_bmad/
 _bmad-output/
 FILE-STORAGE-HANDOFF.md
 docs/project-status.md

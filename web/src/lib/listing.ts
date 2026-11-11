@@ -6,6 +6,8 @@ export type Entry = Folder | FileEntry;
 export type DeletedEntry = Entry & { original_path: string[] };
 export type Listing<T extends Entry = Entry> = { items: T[]; next_cursor: string | null; has_more: boolean };
 export type RootListing = { items: Entry[]; root: Folder; next_cursor: string | null; has_more: boolean };
+export type SearchHit = { entry: Entry; location: Folder[] };
+export type SearchListing = { items: SearchHit[]; next_cursor: string | null; has_more: boolean };
 
 export class ListingApi {
   constructor(private readonly client: ApiClient) {}
@@ -17,6 +19,9 @@ export class ListingApi {
   }
   children(folderId: string, cursor?: string | null): Promise<Listing> {
     return this.client.request(`/folders/${encodeURIComponent(folderId)}/children?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+  }
+  search(query: string, cursor?: string | null, signal?: AbortSignal): Promise<SearchListing> {
+    return this.client.request(`/entries/search?q=${encodeURIComponent(query)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
   }
   async createFolder(parentId: string, name: string, _etag: string): Promise<Folder> {
     return this.client.request('/folders/children', {
