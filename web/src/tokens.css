@@ -1,0 +1,81 @@
+/* Shared decisions live here; component layouts stay with their components. */
+:root {
+  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-code: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --weight-body: 400;
+  --weight-control: 500;
+  --weight-heading: 600;
+  --type-ui: 13px;
+  --type-meta: 12px;
+  --type-note: 11px;
+  --type-brand: 16px;
+  --type-section: 18px;
+  --type-page: 25px;
+  --type-page-compact: 23px;
+  --control-height: 32px;
+  --control-height-touch: 44px;
+  --input-height: 43px;
+  --icon-small: 12px;
+  --icon-file: 18px;
+  --radius: .65rem;
+  --shadow-overlay: 0 8px 24px #132d2924;
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #202b2b;
+  --card: #ffffff;
+  --card-foreground: #202b2b;
+  --popover: #ffffff;
+  --popover-foreground: #202b2b;
+  --primary: #146c60;
+  --primary-foreground: #ffffff;
+  --secondary: #e5f0ed;
+  --secondary-foreground: #146c60;
+  --muted: #f6f7f7;
+  --muted-foreground: #5f6d68;
+  --accent: #e5f0ed;
+  --accent-foreground: #146c60;
+  --destructive: #a12d35;
+  --destructive-foreground: #ffffff;
+  --border: #e3e8e7;
+  --input: #d7dfdc;
+  --ring: #277e71;
+  --sidebar: #f6f7f7;
+  --sidebar-foreground: #202b2b;
+  --sidebar-primary: #146c60;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e5f0ed;
+  --sidebar-accent-foreground: #146c60;
+  --sidebar-border: #e3e8e7;
+  --sidebar-ring: #277e71;
+}
+.dark {
+  --background: #171c1c;
+  --foreground: #e4eae8;
+  --card: #171c1c;
+  --card-foreground: #e4eae8;
+  --popover: #1d2323;
+  --popover-foreground: #e4eae8;
+  --primary: #8bd0bb;
+  --primary-foreground: #171c1c;
+  --secondary: #283f36;
+  --secondary-foreground: #8bd0bb;
+  --muted: #1d2323;
+  --muted-foreground: #a2afab;
+  --accent: #283f36;
+  --accent-foreground: #8bd0bb;
+  --destructive: #f0a1a5;
+  --destructive-foreground: #171c1c;
+  --border: #303b38;
+  --input: #42534b;
+  --ring: #8bd0bb;
+  --sidebar: #1d2323;
+  --sidebar-foreground: #e4eae8;
+  --sidebar-primary: #8bd0bb;
+  --sidebar-primary-foreground: #171c1c;
+  --sidebar-accent: #283f36;
+  --sidebar-accent-foreground: #8bd0bb;
+  --sidebar-border: #303b38;
+  --sidebar-ring: #8bd0bb;
+}

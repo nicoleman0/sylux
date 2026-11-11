@@ -166,11 +166,11 @@
 <style>
   .pdf-preview { display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; min-height: 100%; height: 100%; }
   .pdf-controls, .zoom-controls { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 0.5rem; }
-  .page-count, .zoom-value { font-variant-numeric: tabular-nums; font-size: 0.875rem; white-space: nowrap; }
+  .page-count, .zoom-value { font-variant-numeric: tabular-nums; font-size: var(--type-ui); white-space: nowrap; }
   .zoom-controls { width: 100%; }
   .pdf-page { flex: 1 1 auto; min-height: 0; min-width: 0; overflow: auto; background: var(--muted); border-radius: var(--radius); padding: 0.5rem; }
   .pdf-page canvas { display: block; background: white; margin-inline: auto; }
   .pdf-page canvas[hidden], .pdf-page[hidden] { display: none; }
-  .pdf-note { color: var(--muted-foreground); font-size: 0.75rem; line-height: 1.5; }
+  .pdf-note { color: var(--muted-foreground); font-size: var(--type-meta); line-height: 1.5; }
   .pdf-error { display: grid; gap: 0.75rem; justify-items: start; }
 </style>
