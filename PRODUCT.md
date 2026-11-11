@@ -14,6 +14,10 @@ Self-hosters and small groups. Account administration is occasional, rather than
 
 Private file storage with a browser interface for browsing, uploading, moving and recovering files.
 
+## Product Direction
+
+A focused file server for self-hosters and small groups: pleasant to use, fast and efficient. Favor clear everyday workflows and low operating overhead. Add capabilities that solve a concrete problem for these users; broad feature parity is not the goal.
+
 ## Capabilities and Constraints
 
 - Local accounts with administrator and user roles.
@@ -33,6 +37,7 @@ Sylux is the default instance name. Use short, factual copy and a quiet, familia
 - Routine actions should be evident without explanatory paragraphs.
 - Explain consequences where users could lose access or change stored files.
 - Preserve keyboard access and clear interaction feedback.
+- Treat responsiveness and resource use as part of the affected workflow. Measure suspected bottlenecks before adding complexity.
 
 ## Evidence on Hand
 
