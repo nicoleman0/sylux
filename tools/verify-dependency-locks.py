@@ -125,7 +125,8 @@ npm_lock = json.loads(Path('web/package-lock.json').read_text())
 npm_manifest = json.loads(Path('web/package.json').read_text())
 assert npm_manifest['private'] is True and 'license' not in npm_manifest
 assert npm_lock['lockfileVersion'] == 3
-assert npm_lock['packages']['']['devDependencies'] == npm_manifest['devDependencies']
+for kind in ('dependencies', 'devDependencies'):
+    assert npm_lock['packages'][''].get(kind, {}) == npm_manifest.get(kind, {})
 npm = []
 native_npm = []
 npm_cache = Path(subprocess.check_output(['npm', 'config', 'get', 'cache'], text=True).strip())
@@ -180,7 +181,18 @@ for location, package in npm_lock['packages'].items():
             (OUT / (name.replace('/', '_').replace('@', '') + '.tgz')).write_bytes(archive_bytes)
             native_npm.append(dict(name=name, version=package['version'], license=license, archive=package['resolved'], integrity=integrity, binary_sha256=hashlib.sha256(node.read_bytes()).hexdigest(), notices=notices))
     npm.append(dict(name=name, version=package['version'], license=license, installed=installed.exists(), notices=notices, has_install_script=package.get('hasInstallScript', False)))
-assert {p['name'] for p in native_npm} == {'@rolldown/binding-linux-x64-gnu', '@tailwindcss/oxide-linux-x64-gnu', 'lightningcss-linux-x64-gnu'}
+# PDF.js also installs its optional Node canvas backend on the build host.
+expected_native_npm = {
+    '@napi-rs/canvas-linux-x64-gnu',
+    '@rolldown/binding-linux-x64-gnu',
+    '@tailwindcss/oxide-linux-x64-gnu',
+    'lightningcss-linux-x64-gnu',
+}
+actual_native_npm = {p['name'] for p in native_npm}
+assert actual_native_npm == expected_native_npm, (
+    f'native npm package mismatch: missing={sorted(expected_native_npm - actual_native_npm)}, '
+    f'unexpected={sorted(actual_native_npm - expected_native_npm)}'
+)
 (OUT / 'npm-inventory.json').write_text(json.dumps(npm, indent=2))
 (OUT / 'npm-native-provenance.json').write_text(json.dumps(native_npm, indent=2))
 summary = dict(rust_lock_packages=len(lock['package']) - 1, rust_target_packages=len(rust), npm_lock_packages=len(npm), npm_installed_packages=sum(p['installed'] for p in npm), npm_native=native_npm, sqlite_crate_sha256=expected, sqlite_source_sha3_256=source_hash, executable_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), sqlite_runtime=runtime)

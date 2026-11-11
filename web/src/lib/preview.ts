@@ -2,15 +2,25 @@ import { ResponseTooLargeError, type ApiClient } from './api';
 import type { FileEntry } from './listing';
 
 export const PREVIEW_LIMIT = 2 * 1024 * 1024;
+export const PDF_PREVIEW_LIMIT = 20 * 1024 * 1024;
 const MAX_PIXELS = 16_000_000;
 const TEXT_EXTENSIONS = new Set(['txt', 'md', 'csv', 'json', 'log', 'yaml', 'yml', 'toml', 'rs', 'js', 'ts', 'css']);
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif']);
-export type Preview = { kind: 'text'; text: string } | { kind: 'image'; blob: Blob } | { kind: 'unsupported'; message: string };
+export type Preview = { kind: 'text'; text: string } | { kind: 'image'; blob: Blob } | { kind: 'pdf'; bytes: Uint8Array<ArrayBuffer> } | { kind: 'unsupported'; message: string };
+
+function previewLimit(entry: FileEntry): number {
+  return entry.name.split('.').at(-1)?.toLowerCase() === 'pdf' ? PDF_PREVIEW_LIMIT : PREVIEW_LIMIT;
+}
+
+function tooLarge(limit: number): Extract<Preview, { kind: 'unsupported' }> {
+  return { kind: 'unsupported', message: `This file is larger than the ${limit / 1024 / 1024} MiB preview limit. Download the file to open it.` };
+}
 
 export function previewUnavailable(entry: FileEntry): string | null {
-  if (entry.size > PREVIEW_LIMIT) return 'This file is larger than the 2 MiB preview limit. Download the file to open it.';
+  const limit = previewLimit(entry);
+  if (entry.size > limit) return tooLarge(limit).message;
   const extension = entry.name.split('.').at(-1)?.toLowerCase() ?? '';
-  if (!TEXT_EXTENSIONS.has(extension) && !IMAGE_EXTENSIONS.has(extension)) return 'Preview is not available for this file type. Download the file to open it.';
+  if (extension !== 'pdf' && !TEXT_EXTENSIONS.has(extension) && !IMAGE_EXTENSIONS.has(extension)) return 'Preview is not available for this file type. Download the file to open it.';
   return null;
 }
 
@@ -46,18 +56,25 @@ function imageFormat(bytes: Uint8Array): { type: string; width: number; height: 
 export async function loadPreview(client: ApiClient, entry: FileEntry, url: string, signal: AbortSignal): Promise<Preview> {
   const unavailable = previewUnavailable(entry);
   if (unavailable) return { kind: 'unsupported', message: unavailable };
+  const limit = previewLimit(entry);
   let blob: Blob;
-  try { blob = await client.request<Blob>(url, { signal, maxResponseBytes: PREVIEW_LIMIT }); }
+  try { blob = await client.request<Blob>(url, { signal, maxResponseBytes: limit }); }
   catch (error) {
-    if (error instanceof ResponseTooLargeError) return { kind: 'unsupported', message: 'This file is larger than the 2 MiB preview limit. Download the file to open it.' };
+    if (error instanceof ResponseTooLargeError) return tooLarge(limit);
     throw error;
   }
   signal.throwIfAborted();
   if (!(blob instanceof Blob)) throw new Error('Unexpected preview response');
-  if (blob.size > PREVIEW_LIMIT) return { kind: 'unsupported', message: 'This file is larger than the 2 MiB preview limit. Download the file to open it.' };
+  if (blob.size > limit) return tooLarge(limit);
   const bytes = new Uint8Array(await blob.arrayBuffer());
   signal.throwIfAborted();
   const extension = entry.name.split('.').at(-1)!.toLowerCase();
+  if (extension === 'pdf') {
+    if (!new TextDecoder().decode(bytes.subarray(0, 1024)).includes('%PDF-')) {
+      return { kind: 'unsupported', message: 'This file is not a PDF document. Download the file to open it.' };
+    }
+    return { kind: 'pdf', bytes };
+  }
   if (IMAGE_EXTENSIONS.has(extension)) {
     const format = imageFormat(bytes);
     if (!format || !format.width || !format.height || format.width * format.height > MAX_PIXELS) {

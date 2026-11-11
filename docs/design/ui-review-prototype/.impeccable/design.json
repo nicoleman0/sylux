@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-11T00:00:00Z",
+  "title": "Design System: Sylux UI Review Prototype",
+  "extensions": {
+    "colorMeta": {
+      "accent": { "role": "primary", "displayName": "Muted Teal", "canonical": "#146c60", "tonalRamp": ["#102c28", "#16433c", "#1d5b51", "#247568", "#398f80", "#65a99b", "#9bc7bd", "#e5f0ed"] },
+      "accent-hover": { "role": "primary", "displayName": "Deep Teal", "canonical": "#0d594f", "tonalRamp": ["#0b211e", "#10332e", "#15463f", "#1a594f", "#267165", "#4d897f", "#84aaa3", "#d6e4e1"] },
+      "active": { "role": "secondary", "displayName": "Selected Wash", "canonical": "#e5f0ed", "tonalRamp": ["#1e302c", "#354d47", "#4f6b63", "#6d897f", "#8da99f", "#b0c9c1", "#ceded9", "#e5f0ed"] },
+      "bg": { "role": "neutral", "displayName": "White", "canonical": "#ffffff", "tonalRamp": ["#202020", "#393939", "#555555", "#737373", "#929292", "#b2b2b2", "#d3d3d3", "#ffffff"] },
+      "side": { "role": "neutral", "displayName": "Soft Gray", "canonical": "#f6f7f7", "tonalRamp": ["#232424", "#3e3f3f", "#5b5c5c", "#797a7a", "#989999", "#b8b9b9", "#d8d9d9", "#f6f7f7"] },
+      "text": { "role": "neutral", "displayName": "Ink Green-Gray", "canonical": "#202b2b", "tonalRamp": ["#202b2b", "#384343", "#525d5d", "#6e7979", "#8b9696", "#aab4b4", "#cbd3d3", "#edf2f2"] },
+      "muted": { "role": "neutral", "displayName": "Muted Green-Gray", "canonical": "#667171", "tonalRamp": ["#222626", "#3c4141", "#585e5e", "#747b7b", "#929999", "#b1b8b8", "#d1d8d8", "#f0f6f6"] },
+      "line": { "role": "neutral", "displayName": "Quiet Line", "canonical": "#e3e8e7", "tonalRamp": ["#252727", "#414444", "#5e6261", "#7d8180", "#9da2a1", "#bec4c3", "#d3d9d8", "#e3e8e7"] },
+      "hover": { "role": "neutral", "displayName": "Row Wash", "canonical": "#f1f5f4", "tonalRamp": ["#232625", "#3f4342", "#5d6260", "#7c8280", "#9ca3a1", "#bdc6c4", "#d8e1df", "#f1f5f4"] },
+      "danger": { "role": "tertiary", "displayName": "Muted Red", "canonical": "#a12d35", "tonalRamp": ["#321114", "#50191e", "#702228", "#912b32", "#b6464d", "#ca7378", "#dda4a7", "#f2d9da"] }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Body", "purpose": "Default interface text and compact controls." },
+      "title": { "displayName": "Page title", "purpose": "Page headings in the file-manager shell." },
+      "label": { "displayName": "Label", "purpose": "Metadata and supporting interface labels." }
+    },
+    "shadows": [
+      { "name": "overlay-menu-light", "value": "0 8px 30px #132d2924", "purpose": "Menu and toast overlay depth in light theme." },
+      { "name": "overlay-menu-dark", "value": "0 10px 32px #0006", "purpose": "Menu and toast overlay depth in dark theme." },
+      { "name": "dialog", "value": "0 18px 70px #0003", "purpose": "Separate modal dialogs from the page." }
+    ],
+    "motion": [
+      { "name": "row-hover", "value": "140ms ease-out", "purpose": "File-row background feedback." },
+      { "name": "toast-enter", "value": "180ms ease-out", "purpose": "Brief toast entrance; disabled under reduced motion." }
+    ],
+    "breakpoints": [
+      { "name": "mobile", "value": "620px" },
+      { "name": "compact-desktop", "value": "1000px" },
+      { "name": "wide", "value": "1500px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Filled teal action for the main task on a surface.",
+      "html": "<button class=\"ds-button-primary\">Save name</button>",
+      "css": ".ds-button-primary { background: #146c60; color: #ffffff; border: 1px solid #146c60; border-radius: 5px; min-height: 44px; padding: 0 14px; font: 500 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; } .ds-button-primary:hover { background: #0d594f; border-color: #0d594f; } .ds-button-primary:focus-visible { outline: 2px solid #277e71; outline-offset: 3px; } .ds-button-primary:active { filter: brightness(.94); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Outlined surface action for secondary tasks.",
+      "html": "<button class=\"ds-button-secondary\">New folder</button>",
+      "css": ".ds-button-secondary { background: #ffffff; color: #202b2b; border: 1px solid #e3e8e7; border-radius: 5px; min-height: 44px; padding: 0 14px; font: 500 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; } .ds-button-secondary:hover { background: #f1f5f4; border-color: #667171; } .ds-button-secondary:focus-visible { outline: 2px solid #277e71; outline-offset: 3px; } .ds-button-secondary:active { filter: brightness(.94); }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Compact single-line field with a clear theme-colored focus outline.",
+      "html": "<label class=\"ds-field\">Instance name<input class=\"ds-input\" value=\"Sylux\"></label>",
+      "css": ".ds-field { display: flex; flex-direction: column; gap: 8px; max-width: 430px; color: #202b2b; font: 500 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; } .ds-input { width: 100%; min-height: 43px; padding: 9px 12px; border: 1px solid #e3e8e7; border-radius: 5px; background: #ffffff; color: #202b2b; font: 400 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; } .ds-input:hover { border-color: #667171; } .ds-input:focus-visible { outline: 2px solid #277e71; outline-offset: 3px; }"
+    },
+    {
+      "name": "Active Navigation Link",
+      "kind": "nav",
+      "refersTo": "nav-active",
+      "description": "Marks the current file-manager destination.",
+      "html": "<a class=\"ds-nav-active\" href=\"#files\"><span class=\"ds-nav-dot\" aria-hidden=\"true\"></span>Files</a>",
+      "css": ".ds-nav-active { display: inline-flex; align-items: center; gap: 12px; min-height: 44px; padding: 11px 14px; border-radius: 5px; background: #e5f0ed; color: #146c60; font: 500 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; text-decoration: none; } .ds-nav-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; } .ds-nav-active:hover { background: #f1f5f4; } .ds-nav-active:focus-visible { outline: 2px solid #277e71; outline-offset: 3px; }"
+    },
+    {
+      "name": "File Row",
+      "kind": "custom",
+      "description": "Flat file listing row with aligned size metadata.",
+      "html": "<div class=\"ds-file-row\"><span class=\"ds-file-name\">Quarterly report.pdf</span><span class=\"ds-file-size\">248 KB</span></div>",
+      "css": ".ds-file-row { display: grid; grid-template-columns: minmax(0, 1fr) 116px; align-items: center; min-height: 59px; column-gap: 16px; padding: 0 12px; border-bottom: 1px solid #e3e8e7; color: #202b2b; font: 400 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; transition: background 140ms ease-out; } .ds-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-file-size { color: #667171; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; } .ds-file-row:hover { background: #f1f5f4; } .ds-file-row:focus-within { background: #f1f5f4; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet File Desk",
+    "overview": "This system gives files the main visual weight. A slim header and compact navigation frame a broad working area; filenames sit in aligned rows, with thin separators doing the grouping. Neutral surfaces and a single muted teal accent keep routine file work calm and familiar.\n\nThe system uses system sans-serif type, small radii and brief state transitions. Light and dark themes share the same roles; the theme follows the operating system unless the user chooses one manually. This is a prototype direction pending user review, not approval of Sylux's production design system.",
+    "keyCharacteristics": ["Quiet neutral planes with teal reserved for primary and active states.", "Rows, separators and navigation carry structure instead of enclosing cards.", "Responsive shell and reduced-motion support."],
+    "rules": [
+      { "name": "The One Accent Rule", "body": "Keep teal for primary actions, links and current locations; use neutral surfaces for the rest of the file workspace.", "section": "colors" }
+    ],
+    "dos": ["Do keep file names visually dominant and actions grouped in the toolbar or row menu.", "Do use teal for primary actions and the current location.", "Do keep focus outlines visible and honor reduced-motion preferences.", "Do let neutral borders and surfaces establish grouping."],
+    "donts": ["Don't wrap the main file workspace in a large enclosing card.", "Don't add promotional sign-in copy or unsupported capacity claims.", "Don't use shadows on ordinary resting surfaces."]
+  }
+}

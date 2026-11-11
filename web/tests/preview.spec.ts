@@ -1,7 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { ApiClient, ResponseTooLargeError, type ApiTransport, type RequestOptions } from '../src/lib/api';
 import type { FileEntry } from '../src/lib/listing';
-import { loadPreview, PREVIEW_LIMIT } from '../src/lib/preview';
+import { loadPreview, PREVIEW_LIMIT, PDF_PREVIEW_LIMIT } from '../src/lib/preview';
 
 const entry = (name: string, size = 10): FileEntry => ({ id: 'preview', parent_id: 'root', kind: 'file', name, size, etag: '"1"' });
 function harness(blob: Blob) {
@@ -119,4 +120,124 @@ test('closing previews releases image URLs and aborts pending content requests',
   await expect(page.getByRole('dialog').getByRole('status')).toHaveText('Loading preview…');
   await page.getByRole('button', { name: 'Close preview', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { previewResources: { aborted: number } }).previewResources.aborted)).toBe(2);
+});
+
+test('PDF preview uses its own byte bound and rejects disguised documents', async () => {
+  const { client, requests } = harness(new Blob(['%PDF-1.7\ninvalid body']));
+  const signal = new AbortController().signal;
+  const result = await loadPreview(client, entry('document.PDF'), '/content', signal);
+  expect(result.kind).toBe('pdf');
+  expect(requests[0].options.maxResponseBytes).toBe(PDF_PREVIEW_LIMIT);
+  const oversized = harness(new Blob([new Uint8Array(PDF_PREVIEW_LIMIT + 1)]));
+  expect(await loadPreview(oversized.client, entry('document.pdf'), '/content', signal)).toMatchObject({ kind: 'unsupported', message: expect.stringContaining('20 MiB') });
+  expect(await loadPreview(client, entry('document.pdf', PDF_PREVIEW_LIMIT + 1), '/content', signal)).toMatchObject({ kind: 'unsupported' });
+  const disguised = harness(new Blob(['<html>not a PDF</html>'], { type: 'application/pdf' }));
+  expect(await loadPreview(disguised.client, entry('document.pdf'), '/content', signal)).toMatchObject({ kind: 'unsupported', message: expect.stringContaining('not a PDF') });
+});
+
+async function pdfHarness(page: import('@playwright/test').Page, contents: () => Buffer) {
+  const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
+  await page.route('**/*', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/') {
+      const response = await route.fetch();
+      return route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': "connect-src 'self'" } });
+    }
+    if (path === '/auth/csrf') return route.fulfill({ json: { csrf_token: 'csrf' } });
+    if (path === '/auth/local') return route.fulfill({ json: { account_id: 'owner', handle: 'owner', role: 'user', csrf_token: 'csrf' } });
+    if (path === '/folders/children') return route.fulfill({ json: { root, items: [entry('document.pdf')], next_cursor: null, has_more: false } });
+    if (path === '/folders/root/children') return route.fulfill({ json: { items: [entry('document.pdf')], next_cursor: null, has_more: false } });
+    if (path === '/entries/preview/content') return route.fulfill({ contentType: 'application/pdf', body: contents() });
+    await route.continue();
+  });
+  await page.goto('/');
+  await page.getByLabel('Account name').fill('owner');
+  await page.getByLabel('Password', { exact: true }).fill('password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await page.getByRole('button', { name: 'Preview document.pdf', exact: true }).click();
+}
+
+for (const width of [1280, 390]) {
+  test(`PDF renders pages and zooms at ${width}px without external requests`, async ({ page, baseURL }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const origin = new URL(baseURL!).origin;
+    const external: string[] = [];
+    page.on('request', request => {
+      if (!request.url().startsWith(`${origin}/`) && !request.url().startsWith('blob:') && !request.url().startsWith('data:')) external.push(request.url());
+    });
+    await page.addInitScript(() => {
+      const state = { created: 0, terminated: 0 };
+      Object.assign(window, { pdfWorkers: state });
+      const OriginalWorker = window.Worker;
+      window.Worker = new Proxy(OriginalWorker, { construct(target, args) {
+        const worker: Worker = Reflect.construct(target, args);
+        state.created++;
+        const terminate = worker.terminate.bind(worker);
+        worker.terminate = () => { state.terminated++; terminate(); };
+        return worker;
+      } });
+    });
+    const fixture = readFileSync(new URL('./fixtures/three-pages.pdf', import.meta.url));
+    await pdfHarness(page, () => fixture);
+    const dialog = page.getByRole('dialog');
+    const canvas = dialog.locator('canvas');
+    await expect(canvas).toBeVisible();
+    await expect(dialog.getByText('Page 1 of 3', { exact: true })).toBeVisible();
+    const firstPixels = await canvas.evaluate(element => (element as HTMLCanvasElement).toDataURL());
+    await dialog.getByRole('button', { name: 'Next page', exact: true }).click();
+    await expect(dialog.getByText('Page 2 of 3', { exact: true })).toBeVisible();
+    await expect(canvas).toBeVisible();
+    expect(await canvas.evaluate(element => (element as HTMLCanvasElement).toDataURL())).not.toBe(firstPixels);
+    const initialWidth = await canvas.evaluate(element => element.getBoundingClientRect().width);
+    await dialog.getByRole('button', { name: 'Zoom in', exact: true }).click();
+    await expect(canvas).toBeVisible();
+    expect(await canvas.evaluate(element => element.getBoundingClientRect().width)).toBeGreaterThan(initialWidth);
+    await dialog.getByRole('button', { name: 'Fit width', exact: true }).click();
+    await expect(canvas).toBeVisible();
+    const dimensions = await canvas.evaluate(element => ({ width: (element as HTMLCanvasElement).width, height: (element as HTMLCanvasElement).height }));
+    expect(dimensions.width * dimensions.height).toBeLessThanOrEqual(4_000_000);
+    expect(dimensions.width).toBeLessThanOrEqual(4096);
+    expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await dialog.getByRole('button', { name: 'Close preview', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => {
+      const workers = (window as unknown as { pdfWorkers: { created: number; terminated: number } }).pdfWorkers;
+      return workers.created > 0 && workers.terminated === workers.created;
+    })).toBe(true);
+    expect(external).toEqual([]);
+  });
+}
+
+test('malformed PDFs offer retry and download, and retry renders valid content', async ({ page }) => {
+  let malformed = true;
+  const fixture = readFileSync(new URL('./fixtures/three-pages.pdf', import.meta.url));
+  await pdfHarness(page, () => malformed ? Buffer.from('%PDF-1.7\nnot a document\n%%EOF') : fixture);
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('alert')).toContainText('Could not open this PDF');
+  await expect(dialog.getByRole('button', { name: 'Download file', exact: true })).toBeVisible();
+  malformed = false;
+  await dialog.getByRole('button', { name: 'Retry preview', exact: true }).click();
+  await expect(dialog.locator('canvas')).toBeVisible();
+  await expect(dialog.getByText('Page 1 of 3', { exact: true })).toBeVisible();
+});
+
+test('rapid PDF page changes and closing do not leave stale rendering on reopen', async ({ page }) => {
+  const fixture = readFileSync(new URL('./fixtures/three-pages.pdf', import.meta.url));
+  await pdfHarness(page, () => fixture);
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.locator('canvas')).toBeVisible();
+  await dialog.evaluate(element => {
+    const click = (name: string) => (Array.from(element.querySelectorAll('button')).find(button => button.textContent === name) as HTMLButtonElement).click();
+    click('Next page');
+    click('Next page');
+  });
+  await expect(dialog.getByText('Page 3 of 3', { exact: true })).toBeVisible();
+  await expect(dialog.locator('canvas')).toBeVisible();
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Close preview', exact: true }).click();
+  await page.getByRole('button', { name: 'Preview document.pdf', exact: true }).click();
+  await expect(dialog.getByText('Page 1 of 3', { exact: true })).toBeVisible();
+  await expect(dialog.locator('canvas')).toBeVisible();
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  expect(await dialog.locator('canvas').evaluate(element => (element as HTMLCanvasElement).width)).toBeGreaterThan(0);
 });

@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-11T00:00:00Z",
+  "title": "Design System: Sylux",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Muted Teal", "canonical": "#146c60", "tonalRamp": ["#082e29", "#0d453d", "#125a50", "#146c60", "#38867a", "#6aa69b", "#a3c9c1", "#e5f0ed"] },
+      "primary-foreground": { "role": "neutral", "displayName": "White Action Text", "canonical": "#ffffff", "tonalRamp": ["#252525", "#4b4b4b", "#707070", "#969696", "#bcbcbc", "#d0d0d0", "#e7e7e7", "#ffffff"] },
+      "dark-primary": { "role": "primary", "displayName": "Soft Mint Teal", "canonical": "#8bd0bb", "tonalRamp": ["#163c32", "#285c4d", "#3e806b", "#5bab91", "#8bd0bb", "#a8ddcc", "#c5e9dc", "#e4f6ef"] },
+      "background": { "role": "neutral", "displayName": "White", "canonical": "#ffffff", "tonalRamp": ["#252525", "#4b4b4b", "#707070", "#969696", "#bcbcbc", "#d0d0d0", "#e7e7e7", "#ffffff"] },
+      "foreground": { "role": "neutral", "displayName": "Ink Green-Gray", "canonical": "#202b2b", "tonalRamp": ["#202b2b", "#354242", "#4c5959", "#667171", "#84908f", "#a4aeac", "#c4cdca", "#e7edeb"] },
+      "secondary": { "role": "neutral", "displayName": "Pale Green-Gray", "canonical": "#e5f0ed", "tonalRamp": ["#202b2b", "#354242", "#4c5959", "#667171", "#84908f", "#a4aeac", "#c4cdca", "#e5f0ed"] },
+      "dark-primary-foreground": { "role": "neutral", "displayName": "Dark Action Text", "canonical": "#171c1c", "tonalRamp": ["#171c1c", "#2d3333", "#454b4b", "#606666", "#7c8282", "#9a9f9f", "#bbc0c0", "#e0e4e4"] },
+      "dark-secondary": { "role": "neutral", "displayName": "Deep Green", "canonical": "#283f36", "tonalRamp": ["#14211c", "#1b3028", "#22372f", "#283f36", "#466258", "#71847b", "#a3b0aa", "#dce1de"] },
+      "muted": { "role": "neutral", "displayName": "Cool Mist", "canonical": "#f6f7f7", "tonalRamp": ["#262929", "#454949", "#626868", "#818787", "#a2a8a8", "#c1c7c7", "#dce1e1", "#f6f7f7"] },
+      "dark-muted": { "role": "neutral", "displayName": "Dark Muted Surface", "canonical": "#1d2323", "tonalRamp": ["#1d2323", "#333939", "#4b5151", "#666c6c", "#828888", "#a0a6a6", "#c0c6c6", "#e1e6e6"] },
+      "muted-foreground": { "role": "neutral", "displayName": "Muted Green-Gray", "canonical": "#5f6d68", "tonalRamp": ["#202a26", "#35423d", "#4a5953", "#5f6d68", "#7a8782", "#9aa5a1", "#bdc6c3", "#e0e5e3"] },
+      "destructive": { "role": "tertiary", "displayName": "Muted Red", "canonical": "#a12d35", "tonalRamp": ["#431216", "#64191f", "#812229", "#a12d35", "#bc4d55", "#d77b81", "#e9afb2", "#f7e4e5"] },
+      "border": { "role": "neutral", "displayName": "Quiet Line", "canonical": "#e3e8e7", "tonalRamp": ["#232727", "#3d4342", "#585e5d", "#737a79", "#929897", "#b2b8b6", "#cbd1cf", "#e3e8e7"] },
+      "input": { "role": "neutral", "displayName": "Input Outline", "canonical": "#d7dfdc", "tonalRamp": ["#232a28", "#3d4643", "#58625e", "#737d79", "#929c98", "#b1bbb7", "#c5cfcb", "#d7dfdc"] },
+      "ring": { "role": "primary", "displayName": "Focus Teal", "canonical": "#277e71", "tonalRamp": ["#0d3731", "#14564c", "#1c6c5f", "#277e71", "#4b968a", "#78b2a8", "#afd2cc", "#e5f0ed"] },
+      "dark-background": { "role": "neutral", "displayName": "Dark Charcoal", "canonical": "#171c1c", "tonalRamp": ["#171c1c", "#2d3333", "#454b4b", "#606666", "#7c8282", "#9a9f9f", "#bbc0c0", "#e0e4e4"] },
+      "dark-foreground": { "role": "neutral", "displayName": "Pale Gray-Mint", "canonical": "#e4eae8", "tonalRamp": ["#202725", "#37403d", "#505a56", "#6c7773", "#89938f", "#a7b0ad", "#c6cecb", "#e4eae8"] }
+      ,"dark-muted-foreground": { "role": "neutral", "displayName": "Dark Secondary Text", "canonical": "#a2afab", "tonalRamp": ["#29302e", "#414946", "#5a625f", "#737c78", "#8a9490", "#a2afab", "#c4ceca", "#e7eeeb"] },
+      "dark-destructive": { "role": "tertiary", "displayName": "Pale Muted Red", "canonical": "#f0a1a5", "tonalRamp": ["#401518", "#662126", "#8e343a", "#b7545a", "#d77b81", "#f0a1a5", "#f5c5c7", "#fbe9ea"] },
+      "dark-border": { "role": "neutral", "displayName": "Dark Divider", "canonical": "#303b38", "tonalRamp": ["#1d2522", "#303b38", "#46514e", "#5d6865", "#75807d", "#909a97", "#b0b9b6", "#d4dbd8"] },
+      "dark-input": { "role": "neutral", "displayName": "Dark Input Outline", "canonical": "#42534b", "tonalRamp": ["#222c27", "#35443c", "#42534b", "#596a62", "#74837c", "#919e98", "#b1bbb6", "#d6ddda"] },
+      "dark-ring": { "role": "primary", "displayName": "Dark Focus Teal", "canonical": "#8bd0bb", "tonalRamp": ["#163c32", "#285c4d", "#3e806b", "#5bab91", "#8bd0bb", "#a8ddcc", "#c5e9dc", "#e4f6ef"] }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Page headline", "purpose": "Top-level page title." },
+      "title": { "displayName": "Section title", "purpose": "Settings and account section headings." },
+      "body": { "displayName": "Interface body", "purpose": "Default application copy." },
+      "label": { "displayName": "Compact label", "purpose": "Metadata and list headings." }
+    },
+    "shadows": [
+      { "name": "overlay", "value": "0 8px 24px #132d2924", "purpose": "Floating menus and dialogs." }
+    ],
+    "motion": [
+      { "name": "row-hover", "value": "background 140ms ease-out", "purpose": "Brief file-row hover feedback; removed when reduced motion is requested." }
+    ],
+    "breakpoints": [
+      { "name": "compact-sidebar", "value": "1000px" },
+      { "name": "mobile-navigation", "value": "620px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary action for uploads, account changes and confirmations.",
+      "html": "<button class=\"ds-btn-primary\">Create account</button>",
+      "css": ".ds-btn-primary { min-height: 44px; padding: 0 10px; border: 1px solid transparent; border-radius: 5px; background: var(--primary); color: var(--primary-foreground); font: 500 14px system-ui, sans-serif; transition: background 140ms ease-out, transform 140ms ease-out; } .ds-btn-primary:hover { background: color-mix(in srgb, var(--primary) 80%, transparent); } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Secondary and reversible actions beside primary controls.",
+      "html": "<button class=\"ds-btn-outline\">Cancel</button>",
+      "css": ".ds-btn-outline { min-height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--background); color: var(--foreground); font: 500 14px system-ui, sans-serif; transition: background 140ms ease-out; } .ds-btn-outline:hover { background: var(--muted); } .ds-btn-outline:active { transform: translateY(1px); } .ds-btn-outline:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Account, password and settings form field.",
+      "html": "<input class=\"ds-input\" aria-label=\"Account name\" placeholder=\"Account name\">",
+      "css": ".ds-input { width: 100%; min-height: 43px; padding: 0 10px; border: 1px solid var(--input); border-radius: 5px; background: var(--background); color: var(--foreground); font: 400 14px system-ui, sans-serif; transition: border-color 140ms ease-out; } .ds-input::placeholder { color: var(--muted-foreground); opacity: 1; } .ds-input:focus-visible { border-color: var(--ring); outline: 2px solid var(--ring); outline-offset: 3px; } .ds-input:disabled { opacity: .5; }"
+    },
+    {
+      "name": "Active Navigation",
+      "kind": "nav",
+      "refersTo": "nav-active",
+      "description": "Current destination in the desktop rail or mobile navigation strip.",
+      "html": "<a class=\"ds-nav-active\" href=\"#files\" aria-current=\"page\">Files</a>",
+      "css": ".ds-nav-active { display: inline-flex; min-height: 44px; align-items: center; padding: 11px 14px; border-radius: 5px; background: var(--accent); color: var(--primary); font: 500 14px system-ui, sans-serif; text-decoration: none; } .ds-nav-active:hover { background: var(--secondary); } .ds-nav-active:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }"
+    },
+    {
+      "name": "File Row",
+      "kind": "custom",
+      "description": "Open workspace row with stable name, size and action columns.",
+      "html": "<div class=\"ds-file-row\"><span>Project notes.pdf</span><small>248 KB</small><button class=\"ds-row-action\" aria-label=\"Options\">•••</button></div>",
+      "css": ".ds-file-row { display: grid; grid-template-columns: minmax(0,1fr) 116px 44px; align-items: center; column-gap: 16px; min-height: 59px; padding: 0 7px 0 12px; border-bottom: 1px solid var(--border); color: var(--foreground); font: 400 14px system-ui, sans-serif; transition: background 140ms ease-out; } .ds-file-row:hover, .ds-file-row:focus-within { background: var(--muted); } .ds-file-row small { color: var(--muted-foreground); text-align: right; font-size: 13px; } .ds-row-action { min-height: 44px; border: 0; border-radius: 5px; background: transparent; color: var(--foreground); } .ds-row-action svg { width: 18px; height: 18px; fill: currentColor; } .ds-row-action:hover { background: var(--muted); } .ds-row-action:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet File Desk",
+    "overview": "Sylux gives stored files the visual priority. A slim header and compact destination navigation frame a broad working area; file names align in rows, while thin separators and restrained tonal shifts provide grouping. The result is familiar and low-noise for occasional file and account tasks.\n\nThe interface uses system sans-serif type, small control corners and a muted teal accent for actions and current locations. Light and dark themes share the same semantic roles. Copy stays short and factual, with consequences stated near account or file actions. The production design reflects the accepted file-manager direction; prototype documentation remains historical and separate.",
+    "keyCharacteristics": [
+      "Files occupy open, aligned rows instead of a large enclosing panel.",
+      "Teal marks primary actions and active destinations; neutral planes carry the rest.",
+      "The same shell supports file work, personal account details and administrator settings."
+    ],
+    "rules": [
+      { "name": "The One Accent Rule", "body": "Reserve teal for primary actions, links and the current destination; keep routine file surfaces neutral.", "section": "colors" },
+      { "name": "The System Face Rule", "body": "Use the platform sans-serif stack throughout; hierarchy comes from size and weight rather than a decorative face.", "section": "typography" },
+      { "name": "The Open Workspace Rule", "body": "Let rows and section separators organize content; avoid enclosing the full file workspace in a card.", "section": "layout" }
+    ],
+    "dos": [
+      "Do keep file names visually dominant and actions grouped in the toolbar or row menu.",
+      "Do use teal for primary actions and the current location.",
+      "Do keep account and administrator settings in the same restrained workspace shell.",
+      "Do state account and file consequences in concise nearby copy."
+    ],
+    "donts": [
+      "Don't wrap the main file workspace in a large enclosing card.",
+      "Don't add promotional sign-in copy, fake capacity figures or unsupported security claims.",
+      "Don't add shadows to ordinary resting surfaces."
+    ]
+  }
+}

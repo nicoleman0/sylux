@@ -3,6 +3,9 @@
   import { onMount, tick } from 'svelte';
   import MoonIcon from '@lucide/svelte/icons/moon';
   import SunIcon from '@lucide/svelte/icons/sun';
+  import SettingsIcon from '@lucide/svelte/icons/settings';
+  import TrashIcon from '@lucide/svelte/icons/trash-2';
+  import FolderOpenIcon from '@lucide/svelte/icons/folder-open';
   import UserRoundIcon from '@lucide/svelte/icons/user-round';
   import LogOutIcon from '@lucide/svelte/icons/log-out';
   import EntryOptions from './lib/EntryOptions.svelte';
@@ -13,14 +16,11 @@
   import PlusIcon from '@lucide/svelte/icons/plus';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
   import * as Alert from '$lib/components/ui/alert/index.js';
-  import { Badge } from '$lib/components/ui/badge/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
-  import * as Card from '$lib/components/ui/card/index.js';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
   import { Progress } from '$lib/components/ui/progress/index.js';
-  import * as Tabs from '$lib/components/ui/tabs/index.js';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
   import { ListingApi, type Entry, type Folder, type DeletedEntry } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
@@ -63,10 +63,106 @@
       if (followsSystem) applyTheme(event.matches);
     };
     preference.addEventListener('change', onChange);
-    return () => preference.removeEventListener('change', onChange);
+    void loadInstance();
+    window.addEventListener('popstate', restoreNavigation);
+    return () => { preference.removeEventListener('change', onChange); window.removeEventListener('popstate', restoreNavigation); };
   });
   let user = $state<User | null>(null);
   let accountView = $state(false);
+  let settingsView = $state(false);
+  let settingsTab = $state<'accounts' | 'instance'>('accounts');
+  let instanceName = $state('Sylux');
+  let instanceDraft = $state('Sylux');
+  let instanceBusy = $state(false);
+  let instanceLoading = $state(false);
+  let instanceError = $state('');
+  let instanceNotice = $state('');
+  let instanceRequest = 0;
+  let createAccountOpen = $state(false);
+  let changePasswordOpen = $state(false);
+  let passwordDialogTrigger: HTMLElement | null = null;
+  let disableTarget = $state<Account | null>(null);
+  let accountDialogTrigger: HTMLElement | null = null;
+  const navigationPaths = new Map<string, Folder[]>();
+
+  async function loadInstance(): Promise<void> {
+    const request = ++instanceRequest;
+    instanceLoading = true; instanceError = '';
+    try {
+      const result = await client.request<{ name: string }>('/instance');
+      if (request !== instanceRequest) return;
+      if (!result || typeof result.name !== 'string' || !result.name.trim()) throw new Error('Invalid instance name response');
+      instanceName = result.name; instanceDraft = result.name;
+    } catch { if (request === instanceRequest) instanceError = 'Could not load the instance name. Try again.'; }
+    finally { if (request === instanceRequest) instanceLoading = false; }
+  }
+
+  async function saveInstance(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    if (instanceBusy || !instanceDraft.trim()) return;
+    const generation = sessionGeneration;
+    instanceBusy = true; instanceError = ''; instanceNotice = '';
+    try {
+      const result = await client.request<{ name: string }>('/instance', { method: 'PATCH', body: { name: instanceDraft.trim() } });
+      if (generation !== sessionGeneration) return;
+      if (!result || typeof result.name !== 'string' || !result.name.trim()) throw new Error('Invalid instance name response');
+      instanceName = result.name; instanceDraft = result.name; instanceNotice = 'Instance name saved.';
+    } catch { if (generation === sessionGeneration) instanceError = 'Could not save the instance name. Try again.'; }
+    finally { if (generation === sessionGeneration) instanceBusy = false; }
+  }
+
+  function recordNavigation(): void {
+    const destination = settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : 'files';
+    const hash = `#${destination}${destination === 'files' && currentFolder.id ? '/' + encodeURIComponent(currentFolder.id) : ''}`;
+    if (window.location.hash !== hash) {
+      const key = crypto.randomUUID();
+      navigationPaths.set(key, JSON.parse(JSON.stringify(folderPath)));
+      window.history.pushState({ sylux: key, destination }, '', hash);
+    }
+  }
+
+  async function navigate(destination: 'files' | 'trash' | 'account' | 'settings', record = true): Promise<void> {
+    if (!user) { view = 'login'; return; }
+    if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
+    accountView = destination === 'account'; settingsView = destination === 'settings'; showTrash = destination === 'trash';
+    if (destination !== 'files') selectedFileName = '';
+    accountNotice = '';
+    if (record) recordNavigation();
+    if (showTrash) await loadTrash();
+    if (settingsView) { await loadAccounts(); await loadInstance(); }
+    await tick();
+    document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title')?.focus();
+  }
+
+  async function restoreNavigation(event: PopStateEvent): Promise<void> {
+    if (!user) return;
+    const generation = sessionGeneration;
+    const state = event.state;
+    const destination = window.location.hash.slice(1).split('/')[0];
+    const target = ['trash', 'account', 'settings'].includes(destination) ? destination as 'trash' | 'account' | 'settings' : 'files';
+    const savedPath = typeof state?.sylux === 'string' ? navigationPaths.get(state.sylux) : undefined;
+    if (target === 'files' && savedPath?.length) {
+      folderPath = savedPath; currentFolder = folderPath[folderPath.length - 1]; await refresh();
+    } else if (target === 'files' && folders[0]) {
+      folderPath = [folders[0]]; currentFolder = folders[0]; await refresh();
+    }
+    if (generation !== sessionGeneration) return;
+    await navigate(target, false);
+  }
+
+  async function home(event: MouseEvent): Promise<void> {
+    event.preventDefault();
+    if (!user) { view = 'login'; return; }
+    if (folders[0]) await openFolder(folders[0]);
+    await navigate('files');
+  }
+
+  function formatSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes / 1024; let index = 0;
+    while (value >= 1024 && index < units.length - 1) { value /= 1024; index++; }
+    return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${units[index]}`;
+  }
   let sessionGeneration = 0;
   let loggingOut = $state(false);
   let accounts = $state<Account[]>([]);
@@ -137,7 +233,6 @@
   let moveRequest = 0;
   let moveTrigger: HTMLElement | null = null;
   let replacementPrompt = $state<{ file: File; folder: Folder; target: { id: string; name: string; etag: string } } | null>(null);
-  let replacementTrigger: HTMLElement | null = null;
   let uploadReplacement = $state(false);
   let transferName = $state('');
   let progress = $state(0);
@@ -160,7 +255,7 @@
     if (generation !== sessionGeneration || !user) return;
     sessionGeneration++; clearAccountForms(); clearWorkspace();
     client.setSessionExpiredHandler(null); client.setCsrfToken(null);
-    user = null; accountView = false; view = 'login';
+    user = null; accountView = false; settingsView = false; view = 'login';
     notice = 'Your session ended. Sign in again to continue.';
     void tick().then(() => document.getElementById('handle')?.focus());
   }
@@ -273,6 +368,7 @@
       }
       client.setSessionExpiredHandler(() => expireSession(generation));
       await refresh();
+      await navigate('files');
     } catch {
       if (generation !== sessionGeneration) return;
       notice = authView === 'setup' ? 'Setup could not be completed. Check the authorization and account details, then try again.' : 'Sign-in could not be completed. Check the details and try again.';
@@ -280,10 +376,6 @@
     } finally { if (generation === sessionGeneration) authBusy = false; }
   }
 
-  async function openAccounts(): Promise<void> {
-    accountView = true; accountNotice = '';
-    if (user?.role === 'administrator') await loadAccounts();
-  }
   async function loadAccounts(): Promise<void> {
     const generation = sessionGeneration;
     const request = ++accountsRequest;
@@ -300,18 +392,17 @@
     try {
       await session.createAccount(accountHandle, accountPassword);
       if (generation !== sessionGeneration) return;
-      accountHandle = ''; accountPassword = ''; accountNotice = 'Account created. Share the password through a private channel.';
+      createAccountOpen = false; accountHandle = ''; accountPassword = ''; accountNotice = 'Account created. Share the password through a private channel.';
       await loadAccounts();
     } catch { if (generation === sessionGeneration) accountNotice = 'Account could not be created. Check the name and password, then try again.'; }
     finally { if (generation === sessionGeneration) accountBusy = false; }
   }
   async function disableAccount(account: Account): Promise<void> {
-    if (!window.confirm(`Disable ${account.handle}? All their sessions will be signed out.`)) return;
     const generation = sessionGeneration; accountBusy = true; accountNotice = '';
     try {
       await session.disableAccount(account.account_id);
       if (generation !== sessionGeneration) return;
-      accountNotice = 'Account disabled and sessions signed out.';
+      disableTarget = null; accountNotice = 'Account disabled and sessions signed out.';
       await loadAccounts();
       if (generation === sessionGeneration) { await tick(); document.getElementById('accounts-heading')?.focus(); }
     } catch { if (generation === sessionGeneration) accountNotice = 'Account could not be disabled. Try again.'; }
@@ -328,6 +419,7 @@
     finally { if (generation === sessionGeneration) accountBusy = false; }
   }
   function clearWorkspace(): void {
+    navigationPaths.clear();
     controller?.abort(); controller = null;
     replacementPrompt = null; uploadReplacement = false; selectedFileName = '';
     transfers.invalidate(); transfers = new TransferApi(client, mutations);
@@ -342,6 +434,7 @@
     trashRequest++; deletedItems = []; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false;
   }
   function clearAccountForms(): void {
+    changePasswordOpen = false; createAccountOpen = false; disableTarget = null; instanceBusy = false; instanceNotice = '';
     accountHandle = ''; accountPassword = ''; currentPassword = ''; newPassword = '';
     resetId = ''; resetPassword = ''; accounts = []; accountNotice = ''; accountBusy = false; accountsLoading = false; accountsError = ''; accountsRequest++;
   }
@@ -351,7 +444,7 @@
       await session.changePassword(currentPassword, newPassword);
       if (generation !== sessionGeneration) return;
       sessionGeneration++; clearAccountForms(); clearWorkspace(); client.setSessionExpiredHandler(null);
-      user = null; accountView = false; client.setCsrfToken(null); notice = 'Password changed. Sign in again.';
+      user = null; accountView = false; settingsView = false; client.setCsrfToken(null); notice = 'Password changed. Sign in again.';
     } catch (error) {
       if (generation !== sessionGeneration) return;
       // The password route also uses 401 for an incorrect current password.
@@ -369,7 +462,7 @@
 
   async function signOut(): Promise<void> {
     if (loggingOut) return;
-    loggingOut = true; client.setSessionExpiredHandler(null); sessionGeneration++; clearAccountForms(); clearWorkspace(); accountView = false; user = null;
+    loggingOut = true; client.setSessionExpiredHandler(null); sessionGeneration++; clearAccountForms(); clearWorkspace(); accountView = false; settingsView = false; user = null;
     let logoutFailed = false;
     try { await session.logout(); } catch { logoutFailed = true; }
     sessionGeneration++; clearAccountForms(); clearWorkspace();
@@ -590,9 +683,7 @@
     } finally { if (request === trashRequest && user?.id === accountId) trashLoading = false; }
   }
   async function openTrash(): Promise<void> {
-    showTrash = !showTrash;
-    if (showTrash) await loadTrash();
-    else { trashRequest++; deletedItems = []; trashError = ''; trashLoading = false; }
+    await navigate('trash');
   }
   async function deleteEntry(): Promise<void> {
     const target = trashTarget;
@@ -658,7 +749,6 @@
     const input = document.querySelector<HTMLInputElement>('#upload-file');
     const file = input?.files?.[0];
     if (!file || transferBusy || unresolvedUploadId) return;
-    replacementTrigger = event.submitter as HTMLElement | null;
     await startUpload(file, input);
   }
 
@@ -871,94 +961,111 @@
   async function openFolder(folder: Folder): Promise<void> {
     const index = folderPath.findIndex((item) => item.id === folder.id);
     folderPath = index >= 0 ? folderPath.slice(0, index + 1) : [...folderPath, folder];
-    currentFolder = folder; await refresh();
+    const generation = sessionGeneration;
+    currentFolder = folder; accountView = false; settingsView = false; showTrash = false; recordNavigation(); await refresh();
+    if (generation !== sessionGeneration) return;
+    await tick(); document.getElementById('folder-title')?.focus();
   }
 </script>
 
 <svelte:window ondragover={externalDrag} ondrop={externalDrag} />
-
 <svelte:head>
-  <title>Sylux — private files</title>
-  <meta name="description" content="Private file storage proof of concept" />
+  <title>{instanceName} · Private files</title>
+  <meta name="description" content="Private file storage" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 </svelte:head>
 
-<div class="flex min-h-screen flex-col">
-  <header class="border-b">
-    <div class="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-      <a class="rounded-sm text-lg font-semibold tracking-tight" href="#home" aria-label="Sylux home">Sylux</a>
-      <div class="flex flex-wrap items-center justify-end gap-3">
-        <HeaderIconButton label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} pressed={darkMode} onclick={toggleTheme}>{#if darkMode}<SunIcon />{:else}<MoonIcon />{/if}</HeaderIconButton>
-        {#if user && !loggingOut}<span class="text-muted-foreground text-sm break-all">{user.handle}</span><HeaderIconButton label="Account" disabled={loggingOut} onclick={openAccounts}><UserRoundIcon /></HeaderIconButton><HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>{/if}
-      </div>
+<div class="app-shell">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header class="app-header">
+    <a class="brand" href="#files" onclick={home}><FolderOpenIcon /><span>{instanceName}</span></a>
+    <div class="header-actions">
+      <HeaderIconButton label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} pressed={darkMode} onclick={toggleTheme}>{#if darkMode}<SunIcon />{:else}<MoonIcon />{/if}</HeaderIconButton>
+      {#if user && !loggingOut}<HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>{/if}
     </div>
   </header>
   {#if loggingOut}
-    <main class="mx-auto flex w-full max-w-6xl flex-1 items-center px-4 py-8"><p role="status">Signing out…</p></main>
+    <main id="main-content" class="signin-main"><p role="status">Signing out…</p></main>
   {:else if !user}
-    <main class="mx-auto grid w-full max-w-6xl flex-1 items-center gap-8 px-4 py-8 md:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
-      <section class="flex flex-col gap-3">
-        <p class="text-muted-foreground text-sm font-medium">Your private space</p>
-        <h1 class="text-4xl font-semibold tracking-tight">Files, in their<br />own place.</h1>
-        <p>A focused home for the things you want to keep close.</p>
-        <p class="text-muted-foreground text-sm">Private by default. Your files stay yours.</p>
+    <main id="main-content" class="signin-main">
+      <section class="signin-form" aria-labelledby="auth-heading">
+        <h1 id="auth-heading">{view === 'setup' ? 'Set up ' + instanceName : 'Sign in to ' + instanceName}</h1>
+        <p class="signin-intro">{view === 'setup' ? 'Create the first administrator account.' : 'Private file storage.'}</p>
+        <form class="grid gap-5" onsubmit={signIn}>
+          {#if view === 'setup'}<div class="grid gap-2"><Label for="setup-auth">One-use setup authorization</Label><p id="setup-help" class="text-muted-foreground text-sm">Read <code class="break-all">secrets/setup.authorization</code> in the initialized state directory, or ask your server operator.</p><Input aria-describedby="setup-help" id="setup-auth" type="password" bind:value={setupAuthorization} autocomplete="off" required /></div>{/if}
+          <div class="grid gap-2"><Label for="handle">Account name</Label><Input id="handle" bind:value={handle} autocomplete="username" pattern={view === 'setup' ? '[a-z0-9][a-z0-9._-]*' : undefined} maxlength={64} required />{#if view === 'setup'}<p class="text-muted-foreground text-xs">Lowercase letters, numbers, dots, underscores or hyphens. Start with a letter or number.</p>{/if}</div>
+          <div class="grid gap-2"><Label for="password">Password</Label><Input id="password" type="password" bind:value={password} autocomplete={view === 'setup' ? 'new-password' : 'current-password'} minlength={view === 'setup' ? 15 : undefined} maxlength={view === 'setup' ? 128 : undefined} required />{#if view === 'setup'}<p class="text-muted-foreground text-xs">Use 15 to 128 characters.</p>{/if}</div>
+          <Button type="submit" disabled={authBusy}>{authBusy ? (view === 'setup' ? 'Setting up…' : 'Signing in…') : (view === 'setup' ? 'Create administrator' : 'Sign in')}</Button>
+        </form>
+        {#if notice}<p class="form-notice" role="status">{notice}</p>{/if}
+        <Button class="setup-link" type="button" variant="link" disabled={authBusy} onclick={() => { view = view === 'setup' ? 'login' : 'setup'; notice = ''; }}>{view === 'setup' ? 'Back to sign in' : 'First-time setup'}</Button>
       </section>
-      <Card.Root>
-        <section class="flex flex-col gap-6 px-6" aria-labelledby="auth-heading">
-          <Tabs.Root bind:value={view}>
-            <Tabs.List class="w-full" aria-label="Account access"><Tabs.Trigger value="login" disabled={authBusy}>Sign in</Tabs.Trigger><Tabs.Trigger value="setup" disabled={authBusy}>First-time setup</Tabs.Trigger></Tabs.List>
-          <Tabs.Content value={view} class="flex flex-col gap-6 pt-4">
-          <div class="flex flex-col gap-1"><h2 class="text-base font-medium" id="auth-heading">{view === 'setup' ? 'Create your account' : 'Welcome back'}</h2><p class="text-muted-foreground text-sm">{view === 'setup' ? 'Set up the first administrator account. Other users should ask their administrator for an account.' : 'Sign in to continue to your files.'}</p></div>
-          <form class="flex flex-col gap-4" onsubmit={signIn}>
-            {#if view === 'setup'}<div class="grid gap-2"><Label for="setup-auth">One-use setup authorization</Label><p id="setup-help" class="text-muted-foreground text-sm">The server operator reads this from <code class="break-all">secrets/setup.authorization</code> inside the initialized Sylux state directory. Ask your operator if you do not have it. Keep it private.</p><Input aria-describedby="setup-help" id="setup-auth" type="password" bind:value={setupAuthorization} autocomplete="off" required /></div>{/if}
-            <div class="grid gap-2"><Label for="handle">Account name</Label><Input id="handle" bind:value={handle} autocomplete="username" pattern={view === 'setup' ? '[a-z0-9][a-z0-9._-]*' : undefined} maxlength={64} required />{#if view === 'setup'}<p class="text-muted-foreground text-xs">Use lowercase letters, numbers, dots, underscores or hyphens. Start with a letter or number.</p>{/if}</div>
-            <div class="grid gap-2"><Label for="password">Password</Label><Input id="password" type="password" bind:value={password} autocomplete={view === 'setup' ? 'new-password' : 'current-password'} minlength={view === 'setup' ? 15 : undefined} maxlength={view === 'setup' ? 128 : undefined} required />{#if view === 'setup'}<p class="text-muted-foreground text-xs">Use 15 to 128 characters.</p>{/if}</div>
-            <Button type="submit" disabled={authBusy}>{authBusy ? (view === 'setup' ? 'Setting up…' : 'Sign in…') : (view === 'setup' ? 'Set up account' : 'Sign in')}</Button>
-          </form>
-          </Tabs.Content>
-          </Tabs.Root>
-          {#if notice}<Alert.Root role="status"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
-          <p class="text-muted-foreground text-xs">Credentials are sent only through this session.</p>
-        </section>
-      </Card.Root>
-    </main>
-  {:else if accountView}
-    <main class="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-4 py-6">
-      <div><Button variant="link" class="h-auto p-0" onclick={() => { accountView = false; }}>Back to files</Button><h1 class="mt-3 text-2xl font-semibold">Account</h1></div>
-      {#if accountNotice}<Alert.Root role="status"><Alert.Description>{accountNotice}</Alert.Description></Alert.Root>{/if}
-      <Card.Root><section class="grid gap-4 px-6"><h2 class="text-lg font-semibold">Change password</h2><p class="text-muted-foreground text-sm">Changing your password signs out all your sessions. Use 15 to 128 characters.</p><form class="grid gap-3" onsubmit={changePassword}><Label for="current-password">Current password</Label><Input id="current-password" type="password" autocomplete="current-password" bind:value={currentPassword} required /><Label for="new-password">New password</Label><Input id="new-password" type="password" autocomplete="new-password" minlength={15} maxlength={128} bind:value={newPassword} required /><Button type="submit" disabled={accountBusy}>Change password</Button></form></section></Card.Root>
-      {#if user.role === 'administrator'}
-      <Card.Root><section class="grid gap-4 px-6"><div class="flex flex-wrap items-center justify-between gap-2"><h2 class="text-lg font-semibold" id="accounts-heading" tabindex="-1">Accounts</h2><Button variant="outline" size="sm" disabled={accountsLoading || accountBusy} onclick={loadAccounts}>Refresh accounts</Button></div><p class="text-muted-foreground text-sm">Each account has private files. Disabling an account signs out its sessions.</p>
-        {#if accountsLoading}<p role="status">Loading accounts…</p>{:else if accountsError}<p role="alert">{accountsError}</p>{:else if accounts.length === 0}<p>No accounts to show.</p>{/if}
-        {#each accounts as account (account.account_id)}<div class="flex flex-wrap items-center justify-between gap-2 border-b py-2"><div><strong>{account.handle}</strong><p class="text-muted-foreground text-sm">{account.role} · {account.enabled ? 'Active' : 'Disabled'}</p></div>{#if account.role === 'user' && account.enabled}<div class="flex gap-2"><Button variant="outline" size="sm" disabled={accountBusy} onclick={() => { resetId = account.account_id; resetPassword = ''; }}>Reset password</Button><Button variant="outline" size="sm" disabled={accountBusy} onclick={() => disableAccount(account)}>Disable</Button></div>{/if}</div>{/each}
-        {#if resetId}<form class="grid gap-3 rounded border p-4" onsubmit={resetAccount}><h3 class="font-medium">Reset password for {accounts.find((a) => a.account_id === resetId)?.handle}</h3><p class="text-muted-foreground text-sm">This signs out all their sessions. Share the new password through a private channel.</p><Label for="reset-password">New password</Label><Input id="reset-password" type="password" autocomplete="new-password" minlength={15} maxlength={128} bind:value={resetPassword} required /><div class="flex gap-2"><Button type="submit" disabled={accountBusy}>Reset password</Button><Button type="button" variant="outline" onclick={() => { resetId = ''; resetPassword = ''; }}>Cancel</Button></div></form>{/if}
-        <form class="grid gap-3" onsubmit={createAccount}><h3 class="font-medium">Create account</h3><p class="text-muted-foreground text-sm">Use 15 to 128 characters for the password. Share it through a private channel.</p><Label for="account-handle">Account name</Label><Input id="account-handle" bind:value={accountHandle} pattern="[a-z0-9][a-z0-9._-]*" maxlength={64} required /><Label for="account-password">Password</Label><Input id="account-password" type="password" autocomplete="new-password" minlength={15} maxlength={128} bind:value={accountPassword} required /><Button type="submit" disabled={accountBusy}>Create account</Button></form>
-      </section></Card.Root>{/if}
     </main>
   {:else}
-    <main class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6">
-      <div class="grid items-start gap-4 md:grid-cols-[11rem_minmax(0,1fr)] md:gap-6">
-        <aside class="flex flex-wrap gap-2 md:flex-col" aria-label="Workspace navigation">
-          <Button variant={showTrash ? 'ghost' : 'secondary'} class={`justify-start ${dropTarget === folders[0]?.id ? 'drop-active' : ''}`} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={() => { showTrash = false; folders[0] && openFolder(folders[0]); }}>Files</Button>
-          <Button variant={showTrash ? 'secondary' : 'outline'} class="justify-start" aria-expanded={showTrash} onclick={openTrash}>Trash</Button>
-          {#if entries.some((entry) => entry.kind === 'folder')}<nav class="hidden flex-col gap-1 md:flex" aria-label="Folders"><p class="text-muted-foreground px-2 text-xs">Folders</p>{#each entries.filter((entry): entry is Folder => entry.kind === 'folder') as folder (folder.id)}<Button variant="ghost" class={`h-auto min-h-11 justify-start py-1.5 text-left break-all whitespace-normal ${dropTarget === folder.id ? 'drop-active' : ''}`} data-drop-target={folder.id} data-drop-active={dropTarget === folder.id} ondragover={(event) => dragOver(event, folder)} ondragleave={(event) => dragLeave(event, folder)} ondrop={(event) => dropEntry(event, folder)} onclick={() => openFolder(folder)}>{folder.name}</Button>{/each}</nav>{/if}
-        </aside>
-        <Card.Root class="min-w-0">
-          <section class="flex flex-col gap-4 px-6" aria-labelledby="folder-title">
-            {#if showTrash}<section class="grid gap-2 rounded-lg border p-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h2 id="trash-heading" tabindex="-1" class="font-semibold">Trash</h2><p class="text-sm">Items stay here until restored. Permanent removal is not available yet. Restore a parent folder before its children.</p><Button variant="outline" size="sm" disabled={trashLoading || trashBusy} onclick={loadTrash}>Refresh trash</Button>{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore {item.name}</Button></li>{/each}</ul>{/if}</section>{/if}
+    <div class="workspace-layout">
+      <aside class="workspace-sidebar" aria-label="Workspace navigation">
+        <nav class="nav-group" aria-label="Files">
+          <Button variant="ghost" class={`nav-link ${!showTrash && !accountView && !settingsView ? 'active' : ''} ${dropTarget === folders[0]?.id ? 'drop-active' : ''}`} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={async () => { if (folders[0]) await openFolder(folders[0]); await navigate('files'); }}><FolderIcon />Files</Button>
+          <Button variant="ghost" class={`nav-link ${showTrash ? 'active' : ''}`} aria-current={showTrash ? 'page' : undefined} onclick={openTrash}><TrashIcon />Trash</Button>
+        </nav>
+        <nav class="nav-group nav-bottom" aria-label="Account">
+          <Button variant="ghost" class={`nav-link ${accountView ? 'active' : ''}`} aria-current={accountView ? 'page' : undefined} onclick={() => navigate('account')}><UserRoundIcon /><span>Account</span></Button>
+          {#if user.role === 'administrator'}<Button variant="ghost" class={`nav-link ${settingsView ? 'active' : ''}`} aria-current={settingsView ? 'page' : undefined} onclick={() => navigate('settings')}><SettingsIcon /><span>Settings</span></Button>{/if}
+        </nav>
+        <p class="sidebar-note">Sylux beta</p>
+      </aside>
+      <main id="main-content" class="workspace-main">
+        {#if accountView}
+          <section class="account-content">
+            <h1 id="account-title" tabindex="-1">Account</h1>
+            <section class="settings-section"><h2>Your account</h2><dl class="account-details"><dt>Account name</dt><dd>{user.handle}</dd><dt>Role</dt><dd>{user.role === 'administrator' ? 'Administrator' : 'User'}</dd></dl></section>
+            <section class="settings-section account-setting-row"><div><h2>Password</h2><p class="section-description">Change the password you use to sign in.</p></div><Button variant="outline" onclick={(event) => { passwordDialogTrigger = event.currentTarget; accountNotice = ''; currentPassword = ''; newPassword = ''; changePasswordOpen = true; }}>Change password</Button></section>
+            <section class="settings-section account-setting-row"><div><h2>Session</h2><p class="section-description">Sign out of this browser.</p></div><Button variant="outline" disabled={loggingOut} onclick={signOut}>Sign out</Button></section>
+            {#if accountNotice && !changePasswordOpen}<p role="status" class="form-notice">{accountNotice}</p>{/if}
+          </section>
+        {:else if settingsView && user.role === 'administrator'}
+          <section class="settings-content">
+            <h1 id="settings-title" tabindex="-1">Settings</h1>
+            <nav class="settings-tabs" aria-label="Settings"><Button variant="ghost" class={settingsTab === 'accounts' ? 'active' : ''} aria-current={settingsTab === 'accounts' ? 'page' : undefined} onclick={() => settingsTab = 'accounts'}>Accounts</Button><Button variant="ghost" class={settingsTab === 'instance' ? 'active' : ''} aria-current={settingsTab === 'instance' ? 'page' : undefined} onclick={() => settingsTab = 'instance'}>Instance</Button></nav>
+            {#if settingsTab === 'accounts'}
+              <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files.</p></div><div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={accountsLoading || accountBusy} onclick={loadAccounts}>Refresh</Button><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
+                {#if accountsLoading}<p role="status">Loading accounts…</p>{:else if accountsError}<p role="alert">{accountsError}</p>{:else if accounts.length === 0}<p>No accounts to show.</p>{/if}
+                <div class="account-list">{#each accounts as account (account.account_id)}<div class="account-row"><div class="account-identity"><strong>{account.handle}</strong><span class="account-role">{account.role === 'administrator' ? 'Administrator' : 'User'}</span></div><span class:enabled={account.enabled} class="status-label">{account.enabled ? 'Active' : 'Disabled'}</span><div class="account-actions">{#if account.role === 'user' && account.enabled}<Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; resetId = account.account_id; resetPassword = ''; }}>Reset password</Button><Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; disableTarget = account; }}>Disable</Button>{/if}</div></div>{/each}</div>
+              </section>
+              {#if accountNotice && !createAccountOpen && !resetId && !disableTarget}<p role="status" class="form-notice">{accountNotice}</p>{/if}
+            {:else}
+              <section class="settings-section"><h2>Instance</h2><p class="section-description">The instance name appears for everyone, including on sign in.</p><form class="settings-form grid gap-3" onsubmit={saveInstance}><Label for="instance-name">Instance name</Label><Input id="instance-name" bind:value={instanceDraft} maxlength={40} disabled={instanceBusy || instanceLoading} required /><Button type="submit" class="justify-self-start mt-2" disabled={instanceBusy || instanceLoading || !instanceDraft.trim()}>{instanceBusy ? 'Saving…' : 'Save changes'}</Button></form>{#if instanceError}<p class="form-notice" role="alert">{instanceError}</p><Button variant="link" disabled={instanceLoading} onclick={loadInstance}>Reload instance name</Button>{/if}{#if instanceNotice}<p class="form-notice" role="status">{instanceNotice}</p>{/if}</section>
+            {/if}
+          </section>
+        {:else if showTrash}
+            <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h1 id="trash-heading" tabindex="-1">Trash</h1><p class="text-sm">Restore a parent folder before its children. Permanent removal is not available yet.</p><Button variant="outline" size="sm" disabled={trashLoading || trashBusy} onclick={loadTrash}>Refresh trash</Button>{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore</Button></li>{/each}</ul>{/if}</section>
+
+        {:else}
+          <section class="files-content" aria-labelledby="folder-title">
             {#if unresolvedUploadId}<Alert.Root variant="destructive"><Alert.Title>Upload status needs checking</Alert.Title><Alert.Description><p>{unresolvedUploadName} may have been saved. Check its status before uploading it again.</p><div class="mt-2 flex flex-wrap gap-2"><Button variant="outline" size="sm" onclick={reconcileUpload} disabled={transferBusy}>Check upload status</Button>{#if unresolvedCancel}<Button variant="outline" size="sm" onclick={retryCancel} disabled={transferBusy}>Retry cancellation</Button>{/if}</div></Alert.Description></Alert.Root>{/if}
-            <div class="flex flex-wrap items-end justify-between gap-3"><div class="min-w-0">{#if folderPath.length > 1}<nav class="text-muted-foreground flex flex-wrap items-center gap-1 text-sm" aria-label="Folder path">{#each folderPath.slice(0, -1) as folder (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" onclick={() => openFolder(folder)}>{folder.name}</Button><span aria-hidden="true">/</span>{/each}</nav>{/if}<h1 class="text-2xl font-semibold break-all" id="folder-title" tabindex="-1">{currentFolder.name}</h1></div><div class="flex gap-2"><Button variant="outline" disabled={folderBusy || !currentFolder.id} onclick={(event) => beginCreate(event.currentTarget as HTMLElement)}><PlusIcon /><span>Create</span></Button><Button variant="outline" disabled={loading} onclick={refresh} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button></div></div>
-            <section class="bg-muted/50 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-dashed p-4" aria-label="Upload files"><div class="flex flex-col"><strong class="font-medium">Bring a file in</strong><span class="text-muted-foreground text-sm">Choose a file to add to this folder</span></div><form class="flex min-w-0 flex-1 basis-full flex-wrap items-center gap-2 sm:basis-72" onsubmit={upload}><Input class="sr-only size-px border-0 p-0" id="upload-file" type="file" tabindex={-1} aria-label="Choose a file to upload" disabled={transferBusy || !!unresolvedUploadId} onchange={(event) => { selectedFileName = event.currentTarget.files?.[0]?.name ?? ''; }} /><Button variant="outline" type="button" disabled={transferBusy || !!unresolvedUploadId} onclick={() => document.getElementById('upload-file')?.click()}>Choose file</Button><Button type="submit" disabled={transferBusy || !!unresolvedUploadId || !!replacementPrompt || !currentFolder.id}>Upload</Button><span class="text-muted-foreground basis-full break-all text-sm" aria-live="polite">{selectedFileName || 'No file chosen'}</span></form>
+
+            <div class="page-heading">
+              {#if folderPath.length > 1}<nav class="breadcrumb" aria-label="Folder path">{#each folderPath.slice(0, -1) as folder (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" onclick={() => openFolder(folder)}>{folder.name}</Button><span aria-hidden="true">/</span>{/each}</nav>{/if}
+              <h1 id="folder-title" tabindex="-1">{currentFolder.name}</h1>
+            </div>
+            <section class="upload-toolbar" aria-label="Upload files">
+              <Button variant="outline" disabled={folderBusy || !currentFolder.id} onclick={(event) => beginCreate(event.currentTarget as HTMLElement)}><PlusIcon />New folder</Button>
+              <form class="upload-form" onsubmit={upload}>
+                <Input class="sr-only size-px border-0 p-0" id="upload-file" type="file" tabindex={-1} aria-label="Choose a file to upload" disabled={transferBusy || !!unresolvedUploadId} onchange={(event) => { selectedFileName = event.currentTarget.files?.[0]?.name ?? ''; }} />
+                <Button id="choose-file" variant="outline" type="button" disabled={transferBusy || !!unresolvedUploadId} onclick={() => document.getElementById('upload-file')?.click()}>Choose file</Button>
+                <Button type="submit" disabled={transferBusy || !!unresolvedUploadId || !!replacementPrompt || !currentFolder.id || !selectedFileName}>Upload</Button>
+              </form>
+              <Button variant="outline" disabled={loading} onclick={refresh} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
+              <span class="chosen-file" aria-live="polite">{selectedFileName}</span>
               {#if transferBusy || progress > 0}<div class="grid basis-full justify-items-start gap-2" role="status"><div class="grid w-full gap-1 text-sm"><span class="break-all">{transferName}</span><div class="flex justify-between gap-3"><span>{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span>{progress}% transferred</span></div></div><Progress value={progress} max={100} aria-label="Upload progress" />{#if transferBusy}<Button variant="link" class="h-auto p-0" onclick={() => { if (uploadCancelable) controller?.abort(); }} disabled={!uploadCancelable}>Cancel upload</Button>{/if}</div>{/if}
+
             </section>
-            <div class="flex items-end justify-between gap-3"><h3 class="text-sm font-medium">Items</h3><span class="text-muted-foreground text-xs">{loading ? 'Loading…' : `${entries.length} shown`}</span></div>
-            {#if loading}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading your files…</strong><p class="text-muted-foreground text-sm">This should only take a moment.</p></div>
-            {:else if listingError}<Alert.Root variant="destructive" role="alert"><Alert.Title>We couldn’t open this folder</Alert.Title><Alert.Description><p>{listingError}</p><Button variant="outline" size="sm" class="mt-2" onclick={refresh}>Try again</Button></Alert.Description></Alert.Root>
-            {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">Nothing here just yet</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder to get started.</p></div>
-            {:else}<div class="divide-y border-y">{#each entries as entry (entry.id)}
-              <article aria-label={entry.name} draggable={!dropPending && !moveBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`flex items-center gap-3 rounded-sm py-2 ${dropTarget === entry.id ? 'drop-active' : ''}`}>
-                <span class="text-muted-foreground shrink-0" aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon class="size-4" />{:else}<FileIcon class="size-4" />{/if}</span>
-                <div class="flex min-w-0 flex-1 flex-col"><button type="button" class="item-name min-h-9 text-left font-medium break-all" aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}>{entry.name}</button><span class="text-muted-foreground text-xs">{entry.kind === 'folder' ? 'Folder' : `${entry.size} bytes`}</span></div>
+            {#if loading}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
+            {:else if listingError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Could not open this folder</Alert.Title><Alert.Description><p>{listingError}</p><Button variant="outline" size="sm" class="mt-2" onclick={refresh}>Try again</Button></Alert.Description></Alert.Root>
+            {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
+            {:else}<div class="file-list"><div class="list-head"><span>Name</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>{#each entries as entry (entry.id)}
+              <article aria-label={entry.name} draggable={!dropPending && !moveBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row ${dropTarget === entry.id ? 'drop-active' : ''}`}>
+                <button type="button" class="item-name" aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="filename">{entry.name}</span></button><span class="file-size">{entry.kind === 'folder' ? '—' : formatSize(entry.size)}</span>
                 <EntryOptions {entry} disabled={!!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
               </article>
             {/each}</div>{/if}
@@ -966,10 +1073,12 @@
             {#if dropError}<p role="alert">{dropError}</p>{/if}
             {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading}>Next page</Button>{/if}</div>{/if}
             {#if notice}<Alert.Root role="status"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
+
+            <p class="list-summary">{loading ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
           </section>
-        </Card.Root>
-      </div>
-    </main>
+        {/if}
+      </main>
+    </div>
     <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client} onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }} />
     <Dialog.Root open={createOpen} onOpenChange={(open) => { if (!folderBusy) createOpen = open; }}>
       <Dialog.Content showCloseButton={!folderBusy} onOpenAutoFocus={(event) => { event.preventDefault(); folderInput?.focus(); }} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(createTrigger); createTrigger = null; }}>
@@ -993,7 +1102,7 @@
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!replacementPrompt} onOpenChange={(open) => { if (!open) replacementPrompt = null; }}>
-      <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); replacementTrigger?.focus(); replacementTrigger = null; }}>
+      <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); const choose = document.getElementById('choose-file') as HTMLButtonElement | null; restoreFocus(choose && !choose.disabled ? choose : null); }}>
         <Dialog.Header><Dialog.Title>Replace {replacementPrompt?.target.name}?</Dialog.Title><Dialog.Description>A file with this name already exists in {replacementPrompt?.folder.name}. The previous file will move to trash and stay there until restored. Rename the current file before restoring it. If this upload fails or is canceled before saving, the previous file stays unchanged.</Dialog.Description></Dialog.Header>
         <Dialog.Footer><Button variant="outline" onclick={() => replacementPrompt = null}>Keep existing file</Button><Button onclick={confirmReplacement}>Replace file</Button></Dialog.Footer>
       </Dialog.Content>
@@ -1011,15 +1120,19 @@
         <form class="grid gap-6" onsubmit={renameEntry}><div class="grid gap-2"><Label for="rename-name">New name</Label><Input id="rename-name" bind:ref={renameInput} bind:value={renameName} disabled={renameBusy} maxlength={255} aria-invalid={!!renameError} aria-describedby={renameError ? 'rename-error' : undefined} required /></div>{#if renameError}<p id="rename-error" role="alert">{renameError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={renameBusy} onclick={closeRename}>Cancel</Button><Button type="submit" disabled={renameBusy}>{renameBusy ? 'Saving…' : 'Save name'}</Button></Dialog.Footer></form>
       </Dialog.Content>
     </Dialog.Root>
+
+    <Dialog.Root open={changePasswordOpen} onOpenChange={(open) => { if (!accountBusy) { changePasswordOpen = open; if (!open) { currentPassword = ''; newPassword = ''; accountNotice = ''; } } }}><Dialog.Content showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(passwordDialogTrigger, 'account-title'); }}><Dialog.Header><Dialog.Title>Change password</Dialog.Title><Dialog.Description>This signs out all your sessions. Use 15 to 128 characters.</Dialog.Description></Dialog.Header><form class="grid gap-4" onsubmit={changePassword}><div class="grid gap-2"><Label for="current-password">Current password</Label><Input id="current-password" type="password" autocomplete="current-password" bind:value={currentPassword} disabled={accountBusy} required /></div><div class="grid gap-2"><Label for="new-password">New password</Label><Input id="new-password" type="password" autocomplete="new-password" minlength={15} maxlength={128} bind:value={newPassword} disabled={accountBusy} required /></div>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={accountBusy} onclick={() => { changePasswordOpen = false; currentPassword = ''; newPassword = ''; accountNotice = ''; }}>Cancel</Button><Button type="submit" disabled={accountBusy}>{accountBusy ? 'Changing…' : 'Change password'}</Button></Dialog.Footer></form></Dialog.Content></Dialog.Root>
+    <Dialog.Root open={createAccountOpen} onOpenChange={(open) => { if (!accountBusy) { createAccountOpen = open; if (!open) accountPassword = ''; } }}>
+      <Dialog.Content showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title>Create account</Dialog.Title><Dialog.Description>Use 15 to 128 characters for the password. Share it through a private channel.</Dialog.Description></Dialog.Header><form class="grid gap-4" onsubmit={createAccount}><div class="grid gap-2"><Label for="account-handle">Account name</Label><Input id="account-handle" bind:value={accountHandle} pattern="[a-z0-9][a-z0-9._-]*" maxlength={64} disabled={accountBusy} required /><p class="text-muted-foreground text-xs">Lowercase letters, numbers, dots, underscores or hyphens.</p></div><div class="grid gap-2"><Label for="account-password">Password</Label><Input id="account-password" type="password" autocomplete="new-password" minlength={15} maxlength={128} bind:value={accountPassword} disabled={accountBusy} required /></div>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={accountBusy} onclick={() => { createAccountOpen = false; accountPassword = ''; }}>Cancel</Button><Button type="submit" disabled={accountBusy}>{accountBusy ? 'Creating…' : 'Create account'}</Button></Dialog.Footer></form></Dialog.Content>
+    </Dialog.Root>
+    <Dialog.Root open={!!resetId} onOpenChange={(open) => { if (!open && !accountBusy) { resetId = ''; resetPassword = ''; } }}><Dialog.Content showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title>Reset password for {accounts.find((account) => account.account_id === resetId)?.handle}</Dialog.Title><Dialog.Description>This signs out all their sessions. Share the new password through a private channel.</Dialog.Description></Dialog.Header><form class="grid gap-4" onsubmit={resetAccount}><div class="grid gap-2"><Label for="reset-password">New password</Label><Input id="reset-password" type="password" autocomplete="new-password" minlength={15} maxlength={128} bind:value={resetPassword} disabled={accountBusy} required /><p class="text-muted-foreground text-xs">Use 15 to 128 characters.</p></div>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={accountBusy} onclick={() => { resetId = ''; resetPassword = ''; }}>Cancel</Button><Button type="submit" disabled={accountBusy}>{accountBusy ? 'Resetting…' : 'Reset password'}</Button></Dialog.Footer></form></Dialog.Content></Dialog.Root>
+    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title>Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. Re-enabling accounts is not available yet.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
   {/if}
-  <footer class="border-t"><div class="text-muted-foreground mx-auto flex w-full max-w-6xl flex-wrap items-center gap-3 px-4 py-4 text-xs"><span>Sylux · private file storage</span><Badge variant="outline">PoC</Badge><span>Durability not qualified. Keep another copy of important files.</span></div></footer>
+  <footer class="beta-notice">Beta · Durability not qualified. Keep independent copies.</footer>
 </div>
 
 <style>
-  .item-name { border-radius: .2rem; text-underline-offset: .2em; }
-  .item-name:hover { color: var(--primary); text-decoration: underline; }
-  .item-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-  :global(.drop-active) { background: var(--accent); outline: 2px solid var(--primary); outline-offset: 2px; }
+  :global(.drop-active) { background: var(--accent); outline: 2px solid var(--primary); outline-offset: -2px; }
   :global(.refreshing) { animation: refresh-turn 1s linear infinite; }
   @keyframes refresh-turn { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { :global(.refreshing) { animation: none; } }

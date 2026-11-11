@@ -27,10 +27,20 @@ export function collectWebNotices(moduleIds) {
     if (files.length === 0) {
       throw new Error(`No root license or notice file for bundled package ${manifest.name}@${manifest.version}`);
     }
+    // PDF fonts and decoders carry notices separate from the renderer license.
+    if (manifest.name === 'pdfjs-dist') {
+      for (const directory of ['standard_fonts', 'wasm', 'cmaps']) {
+        const nested = path.join(root, directory);
+        if (!fs.existsSync(nested)) continue;
+        files.push(...fs.readdirSync(nested, { withFileTypes: true })
+          .filter((item) => item.isFile() && noticeName.test(item.name))
+          .map((item) => `${directory}/${item.name}`).sort());
+      }
+    }
     entries.push({ name: manifest.name, version: manifest.version, root, files });
   }
   entries.sort((a, b) => `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`));
-  let output = 'Third-party notices for bundled web JavaScript\n';
+  let output = 'Third-party notices for bundled web assets\n';
   for (const entry of entries) {
     for (const file of entry.files) {
       output += `\n=== ${entry.name}@${entry.version} / ${file} ===\n`;

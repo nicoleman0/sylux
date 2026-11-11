@@ -78,7 +78,7 @@ for (const width of [1280, 390]) {
     await page.screenshot({ path: test.info().outputPath(`replacement-${width}.png`), fullPage: true, animations: 'disabled' });
     await page.getByRole('button', { name: 'Keep existing file' }).click();
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Choose file', exact: true })).toBeFocused();
     expect(backend.sent()).toBe(0);
     await backend.choose();
     await page.getByRole('button', { name: 'Replace file', exact: true }).click();
@@ -114,6 +114,8 @@ test('changed replacement target explains failure and allows a fresh upload', as
   await page.getByRole('button', { name: 'Replace file', exact: true }).click();
   await expect(page.getByText('Replacement was not saved because the file or folder changed.', { exact: false })).toBeVisible();
   await expect(page.getByText('Upload status needs checking')).toHaveCount(0);
+  await expect(page.getByLabel('Choose a file to upload')).toBeEnabled();
+  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'fresh.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('fresh bytes') });
   await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeEnabled();
   await expect(page.getByText('same.bin', { exact: true })).toBeVisible();
   expect(backend.sent()).toBe(1);

@@ -22,7 +22,7 @@ fn main() {
             .unwrap_or("")
         {
             "html" => "text/html; charset=utf-8",
-            "js" => "text/javascript; charset=utf-8",
+            "js" | "mjs" => "text/javascript; charset=utf-8",
             "css" => "text/css; charset=utf-8",
             "svg" => "image/svg+xml",
             "json" => "application/json",
@@ -31,6 +31,8 @@ fn main() {
             "ico" => "image/x-icon",
             "woff" => "font/woff",
             "woff2" => "font/woff2",
+            "ttf" => "font/ttf",
+            "wasm" => "application/wasm",
             "txt" => "text/plain; charset=utf-8",
             _ => "application/octet-stream",
         };

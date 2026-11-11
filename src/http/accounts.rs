@@ -42,7 +42,7 @@ fn valid_handle(handle: &str) -> bool {
                 || (i > 0 && matches!(b, b'.' | b'_' | b'-'))
         })
 }
-fn credentials(
+pub(super) fn credentials(
     headers: &HeaderMap,
     state: &AuthState,
     mutation: bool,
@@ -68,7 +68,7 @@ fn credentials(
     };
     Ok((cookie, csrf))
 }
-fn authorize(
+pub(super) fn authorize(
     db: &Connection,
     cookie: &SessionCookie,
     csrf: Option<&[u8; 32]>,

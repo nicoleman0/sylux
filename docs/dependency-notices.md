@@ -27,6 +27,12 @@ unmodified MPL-2.0 build dependency; its covered compiler files are not copied
 into the runtime image. Distributing the build tools separately needs their
 own notices and source-availability review.
 
+PDF.js installs `@napi-rs/canvas` as an optional Node canvas backend. Its
+Linux x86_64 glibc binding is included in the build-host archive and binary
+hash checks, and the native smoke test draws a synthetic pixel. This binding
+is not copied into the server image or browser assets. Redistributing these
+build tools requires review of the canvas and embedded Skia components too.
+
 Sources: [SPDX license expressions](https://spdx.github.io/spdx-spec/v2.3/SPDX-license-expressions/),
 [SQLite copyright](https://www.sqlite.org/copyright.html),
 [Mozilla MPL FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/).
