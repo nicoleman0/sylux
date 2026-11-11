@@ -405,9 +405,11 @@ test('delete confirmation and restore work at mobile width', async ({ page }) =>
   await expect(page.getByRole('dialog')).toContainText('Permanent removal is not available');
   await page.getByRole('button', { name: 'Move to trash' }).click();
   await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toHaveCount(0);
+  await page.locator('[data-slot=sidebar-trigger]').click();
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await page.getByRole('button', { name: 'Restore Welcome.txt' }).click();
   await expect(page.getByRole('heading', { name: 'Trash', exact: true })).toBeVisible();
+  await page.locator('[data-slot=sidebar-trigger]').click();
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
   expect(await page.locator('body').evaluate((body) => body.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -1045,10 +1047,12 @@ test('mobile delete failure, cancellation, confirmation and restore keep focus r
   await page.unroute('**/entries/file-1');
   await trigger.click(); await page.getByRole('menuitem', { name: 'Delete', exact: true }).click(); await page.getByRole('button', { name: 'Move to trash' }).click();
   await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeFocused();
+  await page.locator('[data-slot=sidebar-trigger]').click();
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await page.getByRole('button', { name: 'Restore Welcome.txt' }).click();
   await expect(page.getByRole('heading', { name: 'Trash' })).toBeFocused();
   await expect(page.getByRole('article', { name: 'Welcome.txt', exact: true })).toHaveCount(0);
+  await page.locator('[data-slot=sidebar-trigger]').click();
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
 });
@@ -1273,4 +1277,61 @@ test('browser history cannot reveal a previous account folder after reload', asy
   await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
   await expect(page.getByRole('article', { name: 'Bob notes.txt', exact: true })).toBeVisible();
   await expect(page.getByText(privateName, { exact: true })).toHaveCount(0);
+});
+
+
+test('sidebar collapses to named icons and preserves navigation', async ({ page }) => {
+  await login(page);
+  const sidebar = page.locator('[data-slot="sidebar"]').first();
+  const iconSpread = () => sidebar.locator('[data-sidebar="menu-button"] > svg').evaluateAll((icons) => {
+    const centers = icons.map((icon) => { const rect = icon.getBoundingClientRect(); return rect.x + rect.width / 2; });
+    return Math.max(...centers) - Math.min(...centers);
+  });
+  expect(await iconSpread()).toBeLessThan(1);
+  const workspace = await page.locator('[data-slot="sidebar-inset"]').boundingBox();
+  const footer = await page.locator('.beta-notice').boundingBox();
+  expect(footer!.x).toBeCloseTo(workspace!.x, 0);
+  expect(footer!.width).toBeCloseTo(workspace!.width, 0);
+  expect(footer!.y + footer!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+
+  await page.locator('[data-slot=sidebar-trigger]').click();
+  await expect(sidebar).toHaveAttribute('data-state', 'collapsed');
+  await expect(page.getByRole('button', { name: 'Files', exact: true })).toHaveAttribute('data-active', 'true');
+  await expect(page.locator('.sidebar-brand')).toBeHidden();
+  await expect(page.locator('.sidebar-account')).toBeHidden();
+  await expect.poll(iconSpread).toBeLessThan(1);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  const accountRow = await page.locator('.account-row').first().boundingBox();
+  expect(accountRow!.width).toBeLessThanOrEqual(680);
+  expect(accountRow!.height).toBeLessThanOrEqual(64);
+
+  await page.getByRole('button', { name: 'Account', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Account', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
+  const newFolder = page.getByRole('button', { name: 'New folder', exact: true });
+  expect((await newFolder.boundingBox())!.height).toBeLessThan(40);
+  await page.locator('[data-slot=sidebar-trigger]').focus();
+  await page.keyboard.press('Enter');
+  await expect(sidebar).toHaveAttribute('data-state', 'expanded');
+});
+
+test('mobile sidebar closes after navigation and keeps touch targets usable', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const page = await context.newPage();
+  await login(page);
+  expect((await page.getByRole('button', { name: 'New folder', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  await page.locator('[data-slot=sidebar-trigger]').click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.body.scrollWidth <= innerWidth)).toBeTruthy();
+  await page.locator('[data-slot=sidebar-trigger]').click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Sylux', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await context.close();
 });

@@ -43,18 +43,18 @@
 </script>
 
 <Dialog.Root open={!!entry} onOpenChange={(open) => { if (!open) onclose(); }}>
-  <Dialog.Content class="max-h-[90dvh] overflow-y-auto sm:max-w-3xl" showCloseButton={false} onCloseAutoFocus={(event) => event.preventDefault()}>
-    <Dialog.Header>
+  <Dialog.Content class="!max-w-[calc(100vw-1rem)] w-[calc(100vw-1rem)] h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] overflow-hidden flex flex-col gap-4 p-4 sm:!max-w-[min(92vw,1400px)] sm:w-[92vw] sm:h-[88dvh] sm:max-h-[88dvh] sm:gap-6 sm:p-6" showCloseButton={false} onCloseAutoFocus={(event) => event.preventDefault()}>
+    <Dialog.Header class="shrink-0">
       <Dialog.Title class="break-all">Preview {entry?.name}</Dialog.Title>
-      <Dialog.Description>PDF up to 20 MiB and 500 pages. Text and images up to 2 MiB; images up to 16 megapixels.</Dialog.Description>
+      <Dialog.Description>Read-only preview.</Dialog.Description>
     </Dialog.Header>
-    <div class="min-h-24 min-w-0" aria-busy={!preview && !error}>
+    <div class="min-h-0 min-w-0 flex-1 overflow-auto" aria-busy={!preview && !error}>
       {#if error}
         <div class="grid gap-3"><p role="alert">{error}</p><Button variant="outline" class="justify-self-start" onclick={() => attempt++}>Retry preview</Button></div>
       {:else if preview?.kind === 'text'}
-        <pre class="bg-muted max-h-[55dvh] overflow-auto rounded-md p-4 font-mono text-sm whitespace-pre-wrap break-words">{preview.text || 'This file is empty.'}</pre>
+        <pre class="bg-muted max-h-full overflow-auto rounded-md p-4 font-mono text-sm whitespace-pre-wrap break-words">{preview.text || 'This file is empty.'}</pre>
       {:else if preview?.kind === 'image'}
-        <img src={imageUrl} alt={entry?.name ?? 'File preview'} class="mx-auto max-h-[55dvh] max-w-full object-contain" onerror={() => { error = 'This image could not be displayed. Download the file to open it.'; }} />
+        <img src={imageUrl} alt={entry?.name ?? 'File preview'} class="mx-auto max-h-full max-w-full object-contain" onerror={() => { error = 'This image could not be displayed. Download the file to open it.'; }} />
       {:else if preview?.kind === 'pdf'}
         {#await import('./PdfPreview.svelte')}
           <p role="status">Opening PDF…</p>
@@ -69,6 +69,6 @@
         <p role="status">Loading preview…</p>
       {/if}
     </div>
-    <Dialog.Footer><Button variant="outline" onclick={onclose}>Close preview</Button><Button onclick={ondownload}>Download file</Button></Dialog.Footer>
+    <Dialog.Footer class="shrink-0"><Button variant="outline" onclick={onclose}>Close preview</Button><Button onclick={ondownload}>Download file</Button></Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>

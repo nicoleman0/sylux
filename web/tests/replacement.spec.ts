@@ -84,6 +84,7 @@ for (const width of [1280, 390]) {
     await page.getByRole('button', { name: 'Replace file', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: 'Replacement complete.' })).toContainText('Replacement complete. The previous file is in trash.');
     expect(backend.sent()).toBe(1);
+    if (width < 768) await page.locator('[data-slot=sidebar-trigger]').click();
     await page.getByRole('button', { name: 'Trash', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Restore same.bin' })).toBeVisible();
   });

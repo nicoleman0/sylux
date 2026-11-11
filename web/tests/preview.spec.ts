@@ -180,9 +180,34 @@ for (const width of [1280, 390]) {
     const fixture = readFileSync(new URL('./fixtures/three-pages.pdf', import.meta.url));
     await pdfHarness(page, () => fixture);
     const dialog = page.getByRole('dialog');
+    const expectedWidth = width === 390 ? width - 16 : Math.min(width * 0.92, 1400);
+    const expectedHeight = width === 390 ? 900 - 16 : 900 * 0.88;
+    await expect.poll(async () => {
+      const box = await dialog.boundingBox();
+      return !!box && Math.abs(box.width - expectedWidth) <= 2 && Math.abs(box.height - expectedHeight) <= 2;
+    }).toBe(true);
+    const geometry = await dialog.evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      const body = element.querySelector<HTMLElement>('[aria-busy]')!;
+      const footer = element.querySelector<HTMLElement>('[data-slot="dialog-footer"]')!;
+      return {
+        width: rect.width,
+        height: rect.height,
+        bodyHeight: body.getBoundingClientRect().height,
+        bodyOverflow: getComputedStyle(body).overflowY,
+        footerVisible: footer.getBoundingClientRect().bottom <= innerHeight,
+      };
+    });
+    expect(Math.abs(geometry.width - expectedWidth)).toBeLessThanOrEqual(2);
+    expect(Math.abs(geometry.height - expectedHeight)).toBeLessThanOrEqual(2);
+    expect(geometry.bodyHeight).toBeGreaterThan(0);
+    expect(geometry.bodyOverflow).toBe('auto');
+    expect(geometry.footerVisible).toBe(true);
     const canvas = dialog.locator('canvas');
     await expect(canvas).toBeVisible();
     await expect(dialog.getByText('Page 1 of 3', { exact: true })).toBeVisible();
+    const pdfPaneHeight = await dialog.locator('.pdf-page').evaluate(element => element.getBoundingClientRect().height);
+    expect(pdfPaneHeight).toBeGreaterThan(geometry.bodyHeight * 0.3);
     const firstPixels = await canvas.evaluate(element => (element as HTMLCanvasElement).toDataURL());
     await dialog.getByRole('button', { name: 'Next page', exact: true }).click();
     await expect(dialog.getByText('Page 2 of 3', { exact: true })).toBeVisible();
