@@ -26,7 +26,7 @@ async function signIn(): Promise<void> {
   await page.getByLabel('Account name').fill(fixtures.handle);
   await page.getByLabel('Password').fill(password);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
 }
 
 function markListingProgress(marker: string): void {
@@ -71,7 +71,7 @@ test('desktop and narrow viewport keep folder browsing and upload controls usabl
 
   // Playwright mobile viewport emulation only; this is not a physical-device claim.
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeInViewport();
   await expect(page.getByRole('button', { name: 'Log out' })).toBeInViewport();
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -98,21 +98,21 @@ test('loading, empty, and recoverable listing error are distinguishable', { anno
   release();
   await page.unrouteAll({ behavior: 'ignoreErrors' });
 
-  await page.getByRole('navigation', { name: 'Folder path' }).getByRole('button', { name: 'My files' }).click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await page.getByRole('navigation', { name: 'Folder path' }).getByRole('button', { name: 'Files' }).click();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   markListingProgress('returned-to-root');
   await folders.getByRole('button', { name: new RegExp(fixtures.folder) }).click();
   await page.getByRole('article').filter({ hasText: fixtures.nested }).getByRole('button', { name: 'Open' }).click();
   await expect(page.getByText(fixtures.file, { exact: true })).toBeVisible();
   markListingProgress('nested-file-visible');
   const breadcrumb = page.getByRole('navigation', { name: 'Folder path' });
-  await expect(breadcrumb.getByRole('button', { name: 'My files' })).not.toHaveAttribute('aria-current', 'page');
+  await expect(breadcrumb.getByRole('button', { name: 'Files' })).not.toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('heading', { name: fixtures.nested, level: 1 })).toBeVisible();
   await expect(breadcrumb.getByRole('button', { name: fixtures.nested })).toHaveCount(0);
   await breadcrumb.getByRole('button', { name: fixtures.folder }).click();
   await expect(page.getByRole('heading', { name: fixtures.folder })).toBeVisible();
-  await breadcrumb.getByRole('button', { name: 'My files' }).click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await breadcrumb.getByRole('button', { name: 'Files' }).click();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   markListingProgress('breadcrumb-roundtrip-complete');
   await page.route(`**/folders/${fixtures.folder_id}/children**`, route => route.abort('failed'));
   await folders.getByRole('button', { name: new RegExp(fixtures.folder) }).click();
@@ -122,14 +122,15 @@ test('loading, empty, and recoverable listing error are distinguishable', { anno
 
   // Use an actual empty folder, created through the UI and real mutation routes.
   const emptyName = `empty-${phase}-${Date.now()}`;
-  await page.getByLabel('New folder').fill(emptyName);
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.getByLabel('Folder name', { exact: true }).fill(emptyName);
   await page.getByRole('button', { name: 'Create folder' }).click();
   await page.getByRole('article').filter({ hasText: emptyName }).getByRole('button', { name: 'Open' }).click();
   await expect(page.getByText('Nothing here just yet')).toBeVisible();
   markListingProgress('empty-folder-complete');
 
-  await page.getByRole('navigation', { name: 'Folder path' }).getByRole('button', { name: 'My files' }).click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await page.getByRole('navigation', { name: 'Folder path' }).getByRole('button', { name: 'Files' }).click();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
 
   await page.getByLabel('Folders').getByRole('button', { name: new RegExp(fixtures.folder) }).click();
   await expect(page.getByRole('heading', { name: fixtures.folder })).toBeVisible();
@@ -218,7 +219,8 @@ test('Unicode, zero-byte, and binary files round-trip through real upload and do
     const savedItem = page.getByRole('article').filter({ has: page.getByText(item.name, { exact: true }) });
     await expect(savedItem.getByText(item.name, { exact: true })).toBeVisible({ timeout: 15_000 });
     const downloadPromise = page.waitForEvent('download');
-    await savedItem.getByRole('button', { name: 'Download' }).click();
+    await savedItem.getByRole('button', { name: `Options for ${item.name}`, exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Download', exact: true }).click();
     const download = await downloadPromise;
     expect(download.suggestedFilename()).toBe(item.name);
     const stream = await download.createReadStream();

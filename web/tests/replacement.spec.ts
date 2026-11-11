@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { test, expect, type Page } from '@playwright/test';
 
 async function replacementBackend(page: Page, outcome: 'confirmed' | 'lost-response' | 'uncertain' | 'changed' = 'confirmed') {
-  const root = { id: 'root', parent_id: null, name: 'My files', kind: 'folder', etag: '"root:1"' };
+  const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
   const original = { id: 'old', parent_id: 'root', name: 'same.bin', kind: 'file', size: 9, etag: '"old:1"' };
   let active: Array<Record<string, unknown>> = [original];
   let deleted: Array<Record<string, unknown>> = [];
@@ -73,7 +73,7 @@ for (const width of [1280, 390]) {
     await backend.choose();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('Replace same.bin?');
-    await expect(dialog).toContainText('previous file will move to deleted items');
+    await expect(dialog).toContainText('previous file will move to trash');
     expect(backend.sent()).toBe(0);
     await page.screenshot({ path: test.info().outputPath(`replacement-${width}.png`), fullPage: true, animations: 'disabled' });
     await page.getByRole('button', { name: 'Keep existing file' }).click();
@@ -82,9 +82,9 @@ for (const width of [1280, 390]) {
     expect(backend.sent()).toBe(0);
     await backend.choose();
     await page.getByRole('button', { name: 'Replace file', exact: true }).click();
-    await expect(page.getByRole('status').filter({ hasText: 'Replacement complete.' })).toContainText('Replacement complete. The previous file is in deleted items.');
+    await expect(page.getByRole('status').filter({ hasText: 'Replacement complete.' })).toContainText('Replacement complete. The previous file is in trash.');
     expect(backend.sent()).toBe(1);
-    await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
+    await page.getByRole('button', { name: 'Trash', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Restore same.bin' })).toBeVisible();
   });
 }
@@ -93,7 +93,7 @@ test('lost replacement response is resolved through upload status', async ({ pag
   const backend = await replacementBackend(page, 'lost-response');
   await backend.choose();
   await page.getByRole('button', { name: 'Replace file', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Replacement complete.' })).toContainText('Replacement complete. The previous file is in deleted items.');
+  await expect(page.getByRole('status').filter({ hasText: 'Replacement complete.' })).toContainText('Replacement complete. The previous file is in trash.');
   await expect(page.getByText('Upload status needs checking')).toHaveCount(0);
 });
 
