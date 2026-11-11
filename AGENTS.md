@@ -21,6 +21,9 @@
 - After self-review and relevant checks, agents may commit, push a feature
   branch and open a PR without further permission. Leave the PR open for
   the owner's review; merge or enable auto-merge only with explicit approval.
+- Use the owner's configured Git identity for commits. The public contact
+  address in the README is not a commit identity; do not override author or
+  committer identity with Corvus Dev or its contact address.
 
 ## Where to start
 
