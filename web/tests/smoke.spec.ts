@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 
 async function installBackend(page: import('@playwright/test').Page): Promise<void> {
-  const root = { id: 'root-1', parent_id: null, name: 'My files', kind: 'folder', generation: 1, etag: 'root-1:1' };
+  const root = { id: 'root-1', parent_id: null, name: 'Files', kind: 'folder', generation: 1, etag: 'root-1:1' };
   const entries: Array<Record<string, unknown>> = [
     { id: 'file-1', parent_id: 'root-1', name: 'Welcome.txt', kind: 'file', size: 13, generation: 1, etag: '"g1"' },
   ];
@@ -77,7 +77,7 @@ async function login(page: import('@playwright/test').Page): Promise<void> {
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
-  await expect(page.getByRole('heading', { level: 1, name: 'My files' })).toBeVisible();
+  await expect(page.getByRole('heading', { level: 1, name: 'Files' })).toBeVisible();
   await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
 }
 
@@ -98,10 +98,12 @@ test('setup is explicit and returns to login rather than creating a session', as
 test('login, folder create/rename, and upload work with mocked API', async ({ page }) => {
   await login(page);
   await expect(page.getByText('Welcome.txt')).toBeVisible();
-  await page.getByLabel('New folder').fill('Research');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.getByLabel('Folder name', { exact: true }).fill('Research');
   await page.getByRole('button', { name: 'Create folder' }).click();
   await expect(page.getByRole('article').filter({ hasText: 'Research' })).toBeVisible();
-  await page.getByRole('button', { name: 'Rename' }).first().click();
+  await page.getByRole('button', { name: 'Options for Welcome.txt', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.getByLabel('New name').fill('Notes');
   await page.getByRole('button', { name: 'Save name' }).click();
   await expect(page.getByText('Notes')).toBeVisible();
@@ -110,7 +112,9 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
   await page.getByRole('button', { name: 'Upload', exact: true }).click();
   await expect(page.getByRole('article').filter({ hasText: 'fixture.txt' })).toBeVisible({ timeout: 8000 });
   await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Download Notes' })).toBeVisible();
+  await page.getByRole('button', { name: 'Options for Notes', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Log out' }).click();
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
 });
@@ -126,7 +130,7 @@ test('narrow viewport keeps sign-in and durability warning visible', async ({ pa
 test('dark mode follows the system until changed and persists across reloads', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.goto('/');
-  const toggle = page.getByRole('button', { name: 'Dark mode' });
+  const toggle = page.getByRole('button', { name: /Switch to (dark|light) mode/ });
   await expect(toggle).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('html')).toHaveClass(/dark/);
 
@@ -153,9 +157,10 @@ test('keyboard sign-in and rename dialog restore focus', async ({ page }) => {
   await page.keyboard.press('Tab');
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeFocused();
   await page.keyboard.press('Enter');
-  const rename = page.getByRole('button', { name: 'Rename Welcome.txt' });
+  const rename = page.getByRole('button', { name: 'Options for Welcome.txt', exact: true });
   await rename.focus();
   await page.keyboard.press('Enter');
+  await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await expect(page.getByLabel('New name')).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(rename).toBeFocused();
@@ -164,11 +169,12 @@ test('keyboard sign-in and rename dialog restore focus', async ({ page }) => {
 test('delete confirmation and restore work at mobile width', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
-  await page.getByRole('button', { name: 'Delete Welcome.txt' }).click();
+  await page.getByRole('button', { name: 'Options for Welcome.txt', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await expect(page.getByRole('dialog')).toContainText('Permanent removal is not available');
-  await page.getByRole('button', { name: 'Move to deleted items' }).click();
+  await page.getByRole('button', { name: 'Move to trash' }).click();
   await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await page.getByRole('button', { name: 'Restore Welcome.txt' }).click();
   await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
   expect(await page.locator('body').evaluate((body) => body.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -197,26 +203,26 @@ test('deleted names stay with their session when a request finishes late', async
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Restore Private A' })).toBeVisible();
-  await page.getByRole('button', { name: 'Refresh deleted items' }).click();
+  await page.getByRole('button', { name: 'Refresh trash' }).click();
   await requested;
   await page.getByRole('button', { name: 'Log out' }).click();
   await page.getByLabel('Account name').fill('second');
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Deleted items' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
-  await expect(page.getByText('No deleted items.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Trash' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
+  await expect(page.getByText('Trash is empty.')).toBeVisible();
   const lateResponse = page.waitForResponse((response) => response.url().endsWith('/trash'));
   release();
   await lateResponse;
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   await expect(page.getByRole('button', { name: 'Restore Private A' })).toHaveCount(0);
-  await expect(page.getByText('No deleted items.')).toBeVisible();
+  await expect(page.getByText('Trash is empty.')).toBeVisible();
 });
 
-test('deleted items show their original folders for duplicate names', async ({ page }) => {
+test('trash entries show their original folders for duplicate names', async ({ page }) => {
   await installBackend(page);
   await page.route('**/trash', (route) => route.fulfill({ json: { items: [
     { id: 'a', name: 'notes.txt', kind: 'file', parent_id: 'a-folder', etag: 'a', original_path: ['Work'] },
@@ -226,10 +232,10 @@ test('deleted items show their original folders for duplicate names', async ({ p
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await expect(page.getByRole('listitem').filter({ hasText: 'notes.txt' })).toHaveCount(2);
-  await expect(page.getByRole('listitem').filter({ hasText: 'My files / Work' })).toBeVisible();
-  await expect(page.getByRole('listitem').filter({ hasText: 'My files / Home' })).toBeVisible();
+  await expect(page.getByRole('listitem').filter({ hasText: 'Files / Work' })).toBeVisible();
+  await expect(page.getByRole('listitem').filter({ hasText: 'Files / Home' })).toBeVisible();
 });
 
 
@@ -250,20 +256,20 @@ test('sign out hides account controls until the logout request finishes', async 
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Restore Private A' })).toBeVisible();
   await page.getByRole('button', { name: 'Log out' }).click();
   await requested;
   await expect(page.getByText('Signing out…')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Deleted items', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Trash', exact: true })).toHaveCount(0);
   await expect(page.getByLabel('Account name')).toHaveCount(0);
   release();
   await expect(page.getByLabel('Account name')).toBeVisible();
   await page.getByLabel('Account name').fill('second');
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
-  await expect(page.getByText('No deleted items.')).toBeVisible();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
+  await expect(page.getByText('Trash is empty.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Restore Private A' })).toHaveCount(0);
 });
 
@@ -277,7 +283,7 @@ test('identical deleted names and paths have distinct references', async ({ page
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await expect(page.getByRole('listitem').filter({ hasText: 'Item reference: older-entry' })).toBeVisible();
   await expect(page.getByRole('listitem').filter({ hasText: 'Item reference: newer-entry' })).toBeVisible();
   await expect(page.getByRole('button', { name: /Restore notes.txt.*item reference older-entry/ })).toBeVisible();
@@ -387,12 +393,12 @@ test('late password change cannot end the next session', async ({ page }) => {
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password', { exact: true }).fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   const oldResponse = page.waitForResponse((response) => response.url().endsWith('/me/password'));
   release();
   await oldResponse;
   await page.evaluate(() => new Promise(requestAnimationFrame));
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
 });
 
 test('late sign-in root cannot replace the next session workspace', async ({ page }) => {
@@ -467,7 +473,7 @@ test('late upload ticket cannot continue in the next session', async ({ page }) 
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   const response = page.waitForResponse((r) => new URL(r.url()).pathname === '/mutation-tickets');
   release(); await response; await page.evaluate(() => new Promise(requestAnimationFrame));
   expect(admissions).toBe(0);
@@ -488,7 +494,7 @@ test('late upload content cannot commit after logout', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   release(); await page.evaluate(() => new Promise(requestAnimationFrame));
   expect(commits).toBe(0);
   await expect(page.getByText('old-content.txt')).toHaveCount(0);
@@ -522,7 +528,7 @@ test('unresolved upload state is cleared on logout', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   await expect(page.getByText('Upload status needs checking')).toHaveCount(0);
   await expect(page.getByText('unresolved-private.txt')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeEnabled();
@@ -537,17 +543,19 @@ test('late folder creation cannot change the next session', async ({ page }) => 
     if (route.request().method() === 'GET') { roots++; return route.fallback(); }
     started(); await gate; await route.fulfill({ status: 201, json: { id: 'old', parent_id: 'root-1', name: 'old-private-folder', kind: 'folder', etag: 'g1' } });
   });
-  await page.getByLabel('New folder').fill('old-private-folder');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.getByLabel('Folder name', { exact: true }).fill('old-private-folder');
   await page.getByRole('button', { name: 'Create folder' }).click(); await waiting;
-  await page.getByRole('button', { name: 'Log out' }).click();
+  await page.getByRole('button', { name: 'Log out' }).evaluate((button: HTMLButtonElement) => button.click());
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
-  await page.getByLabel('New folder').fill('new-session-input');
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.getByLabel('Folder name', { exact: true }).fill('new-session-input');
   const response = page.waitForResponse((r) => new URL(r.url()).pathname === '/folders/children' && r.request().method() === 'POST');
   release(); await response; await page.evaluate(() => new Promise(requestAnimationFrame));
-  await expect(page.getByLabel('New folder')).toHaveValue('new-session-input');
+  await expect(page.getByLabel('Folder name', { exact: true })).toHaveValue('new-session-input');
   await expect(page.getByText('Folder created.')).toHaveCount(0);
   expect(roots).toBe(1);
 });
@@ -560,18 +568,20 @@ test('pending logout hides the workspace and prevents new actions', async ({ pag
   await page.route('**/auth/logout', async (route) => { started(); await gate; await route.fulfill({ status: 204 }); });
   await page.getByRole('button', { name: 'Log out' }).click(); await waiting;
   await expect(page.getByRole('status')).toHaveText('Signing out…');
-  await expect(page.getByLabel('New folder')).toHaveCount(0);
+  await expect(page.getByLabel('Folder name', { exact: true })).toHaveCount(0);
   await expect(page.getByLabel('Choose a file to upload')).toHaveCount(0);
   await expect(page.getByLabel('Account name')).toHaveCount(0);
   release();
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
-  await expect(page.getByLabel('New folder')).toHaveValue('');
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(page.getByLabel('Folder name', { exact: true })).toHaveValue('');
+  await page.keyboard.press('Escape');
 });
 
-test('password change clears deleted items before the next session', async ({ page }) => {
+test('password change clears trash before the next session', async ({ page }) => {
   await installBackend(page);
   let actor = 'owner';
   await page.route('**/auth/local', (route) => {
@@ -582,7 +592,7 @@ test('password change clears deleted items before the next session', async ({ pa
   await page.goto('/');
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Restore Private A' })).toBeVisible();
   await page.getByRole('button', { name: 'Account', exact: true }).click();
   await page.getByLabel('Current password').fill('old long password');
@@ -591,8 +601,8 @@ test('password change clears deleted items before the next session', async ({ pa
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
   await page.getByLabel('Account name').fill('second'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
-  await expect(page.getByText('No deleted items.')).toBeVisible();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
+  await expect(page.getByText('Trash is empty.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Restore Private A' })).toHaveCount(0);
 });
 
@@ -626,10 +636,13 @@ test('confirmed folder creation survives a failed refresh without encouraging an
     if (route.request().method() === 'POST') { creates++; return route.fallback(); }
     return route.fulfill({ status: 503 });
   });
-  await page.getByLabel('New folder').fill('Research');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.getByLabel('Folder name', { exact: true }).fill('Research');
   await page.getByRole('button', { name: 'Create folder' }).click();
   await expect(page.getByRole('status')).toContainText('Folder created. Refresh your files to see it.');
-  await expect(page.getByLabel('New folder')).toHaveValue('');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(page.getByLabel('Folder name', { exact: true })).toHaveValue('');
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Refresh folder' }).click();
   await expect(page.getByRole('article').filter({ hasText: 'Research' })).toBeVisible();
   expect(creates).toBe(1);
@@ -638,8 +651,9 @@ test('confirmed folder creation survives a failed refresh without encouraging an
 test('rename errors retain the name and focus inside the dialog, then cancel restores focus', async ({ page }) => {
   await login(page);
   await page.route('**/entries/file-1', (route) => route.fulfill({ status: 409 }));
-  const trigger = page.getByRole('button', { name: 'Rename Welcome.txt' });
+  const trigger = page.getByRole('button', { name: 'Options for Welcome.txt', exact: true });
   await trigger.click();
+  await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.getByLabel('New name').fill('Already used.txt');
   await page.getByRole('button', { name: 'Save name' }).click();
   await expect(page.getByRole('dialog').getByRole('alert')).toContainText('An item already has this name');
@@ -652,13 +666,14 @@ test('rename errors retain the name and focus inside the dialog, then cancel res
 test('confirmed rename reports a refresh failure separately and restores focus to the folder', async ({ page }) => {
   await login(page);
   await page.route((url) => url.pathname === '/folders/root-1/children', (route) => route.fulfill({ status: 503 }));
-  await page.getByRole('button', { name: 'Rename Welcome.txt' }).click();
+  await page.getByRole('button', { name: 'Options for Welcome.txt', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.getByLabel('New name').fill('Saved name.txt');
   await page.getByRole('button', { name: 'Save name' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('status')).toContainText('Name updated. Refresh your files to see it.');
   await expect(page.getByRole('alert')).toContainText('Could not load this folder');
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeFocused();
 });
 
 for (const resource of ['accounts', 'trash'] as const) {
@@ -667,29 +682,31 @@ for (const resource of ['accounts', 'trash'] as const) {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     await page.route(`**/${resource}`, async (route) => { await gate; await route.fulfill({ status: 503 }); });
-    await page.getByRole('button', { name: resource === 'accounts' ? 'Account' : 'Deleted items', exact: true }).click();
-    await expect(page.getByRole('status').filter({ hasText: resource === 'accounts' ? 'Loading accounts' : 'Loading deleted items' })).toBeVisible();
-    await expect(page.getByText(resource === 'accounts' ? 'No accounts to show.' : 'No deleted items.', { exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: resource === 'accounts' ? 'Account' : 'Trash', exact: true }).click();
+    await expect(page.getByRole('status').filter({ hasText: resource === 'accounts' ? 'Loading accounts' : 'Loading trash' })).toBeVisible();
+    await expect(page.getByText(resource === 'accounts' ? 'No accounts to show.' : 'Trash is empty.', { exact: true })).toHaveCount(0);
     release();
-    await expect(page.getByRole('alert')).toContainText(resource === 'accounts' ? 'Could not load accounts' : 'Could not load deleted items');
-    await expect(page.getByText(resource === 'accounts' ? 'No accounts to show.' : 'No deleted items.', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('alert')).toContainText(resource === 'accounts' ? 'Could not load accounts' : 'Could not load trash');
+    await expect(page.getByText(resource === 'accounts' ? 'No accounts to show.' : 'Trash is empty.', { exact: true })).toHaveCount(0);
     await page.unroute(`**/${resource}`);
-    await page.getByRole('button', { name: resource === 'accounts' ? 'Refresh accounts' : 'Refresh deleted items' }).click();
+    await page.getByRole('button', { name: resource === 'accounts' ? 'Refresh accounts' : 'Refresh trash' }).click();
     if (resource === 'accounts') await expect(page.getByText('administrator · Active')).toBeVisible();
-    else await expect(page.getByText('No deleted items.', { exact: true })).toBeVisible();
+    else await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
   });
 }
 
 test('expired session clears private UI and directs keyboard focus to sign-in', async ({ page }) => {
   await login(page);
-  await page.getByLabel('New folder').fill('Private unsaved name');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.getByLabel('Folder name', { exact: true }).fill('Private unsaved name');
+  await page.keyboard.press('Escape');
   await page.route((url) => url.pathname === '/folders/root-1/children', (route) => route.fulfill({ status: 401, json: { code: 'unauthorized' } }));
   await page.getByRole('button', { name: 'Refresh folder' }).click();
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
   await expect(page.getByRole('status')).toContainText('Your session ended. Sign in again');
   await expect(page.getByLabel('Account name')).toBeFocused();
   await expect(page.getByText('Welcome.txt', { exact: true })).toHaveCount(0);
-  await expect(page.getByLabel('New folder')).toHaveCount(0);
+  await expect(page.getByLabel('Folder name', { exact: true })).toHaveCount(0);
 });
 
 test('an old unauthorized response cannot end the next session', async ({ page }) => {
@@ -735,17 +752,18 @@ test('mobile delete failure, cancellation, confirmation and restore keep focus r
   await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
   await page.route('**/entries/file-1', (route) => route.fulfill({ status: 503 }));
-  const trigger = page.getByRole('button', { name: 'Delete Welcome.txt' });
+  const trigger = page.getByRole('button', { name: 'Options for Welcome.txt', exact: true });
   await trigger.click();
-  await page.getByRole('button', { name: 'Move to deleted items' }).click();
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await page.getByRole('button', { name: 'Move to trash' }).click();
   await expect(page.getByRole('dialog').getByRole('alert')).toContainText('Could not delete this item');
   await page.keyboard.press('Escape'); await expect(trigger).toBeFocused();
   await page.unroute('**/entries/file-1');
-  await trigger.click(); await page.getByRole('button', { name: 'Move to deleted items' }).click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeFocused();
-  await page.getByRole('button', { name: 'Deleted items', exact: true }).click();
+  await trigger.click(); await page.getByRole('menuitem', { name: 'Delete', exact: true }).click(); await page.getByRole('button', { name: 'Move to trash' }).click();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeFocused();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await page.getByRole('button', { name: 'Restore Welcome.txt' }).click();
-  await expect(page.getByRole('heading', { name: 'Deleted items' })).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Trash' })).toBeFocused();
   await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
 });
 
@@ -759,7 +777,7 @@ for (const width of [1280, 390]) {
     await page.getByRole('button', { name: 'Upload', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: longName }).getByText('Saved', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0);
-    await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toHaveCount(1);
+    await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await expect(page.locator('[data-slot=progress-indicator]')).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
     await page.screenshot({ path: test.info().outputPath(`layout-${width}.png`), fullPage: true });
@@ -777,3 +795,76 @@ test('expired session during password change is distinguished from a wrong passw
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
   await expect(page.getByRole('status')).toContainText('Your session ended');
 });
+
+test('options menu supports keyboard dismissal and create dialog restores focus', async ({ page }) => {
+  await login(page);
+  const options = page.getByRole('button', { name: 'Options for Welcome.txt', exact: true });
+  await options.focus();
+  await page.keyboard.press('Enter');
+  const download = page.getByRole('menuitem', { name: 'Download', exact: true });
+  await expect(download).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(options).toBeFocused();
+  const create = page.getByRole('button', { name: 'Create', exact: true });
+  await create.click();
+  await expect(page.getByRole('dialog', { name: 'Create folder', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Folder name', { exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(create).toBeFocused();
+});
+
+for (const reducedMotion of ['reduce', 'no-preference'] as const) {
+  test(`refresh signals pending state with ${reducedMotion} motion`, async ({ page }) => {
+    await page.emulateMedia({ reducedMotion });
+    await login(page);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    await page.route('**/folders/root-1/children*', async route => { await gate; await route.fallback(); });
+    const refresh = page.getByRole('button', { name: 'Refresh folder', exact: true });
+    await refresh.click();
+    await expect(refresh).toBeDisabled();
+    await expect(refresh).toHaveAttribute('aria-busy', 'true');
+    const icon = refresh.locator('[data-refreshing=true]');
+    await expect(icon).toBeVisible();
+    if (reducedMotion === 'reduce') await expect(icon).toHaveCSS('animation-name', 'none');
+    else await expect(icon).not.toHaveCSS('animation-name', 'none');
+    release();
+    await expect(refresh).toBeEnabled();
+    await expect(refresh).toHaveAttribute('aria-busy', 'false');
+  });
+}
+
+for (const mode of ['text', 'unsupported', 'error'] as const) {
+  test(`filename preview handles ${mode} content and restores focus`, async ({ page }) => {
+    await login(page);
+    let requests = 0;
+    const name = mode === 'unsupported' ? 'Unsafe.html' : 'Welcome.txt';
+    if (mode === 'unsupported') {
+      await page.route('**/folders/root-1/children*', route => route.fulfill({ json: { items: [{ id: 'file-1', parent_id: 'root-1', name, kind: 'file', size: 13, etag: 'g1' }], next_cursor: null, has_more: false } }));
+      await page.getByRole('button', { name: 'Refresh folder' }).click();
+    }
+    await page.route('**/entries/file-1/content', route => {
+      requests++;
+      return mode === 'error' ? route.fulfill({ status: 503 }) : route.fulfill({ contentType: 'text/plain', body: '<script>private text</script>' });
+    });
+    const trigger = page.getByRole('button', { name: `Preview ${name}`, exact: true });
+    await trigger.click();
+    const dialog = page.getByRole('dialog', { name: `Preview ${name}`, exact: true });
+    if (mode === 'text') {
+      await expect(dialog.locator('pre')).toHaveText('<script>private text</script>');
+      await expect(dialog.locator('script')).toHaveCount(0);
+    } else if (mode === 'unsupported') {
+      await expect(dialog).toContainText('Preview is not available for this file type');
+      expect(requests).toBe(0);
+    } else {
+      await expect(dialog.getByRole('alert')).toContainText('Could not load this preview');
+      await expect(dialog.getByRole('button', { name: 'Retry preview', exact: true })).toBeVisible();
+    }
+    await expect(dialog.getByRole('button', { name: 'Download file', exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(trigger).toBeFocused();
+  });
+}

@@ -15,7 +15,7 @@ class RecordingTransport implements ApiTransport {
     }
     if (path.startsWith('/folders/children')) {
       if (options.method === 'POST') return { id: 'folder-created', parent_id: 'root', name: 'Research', kind: 'folder', generation: 1, etag: '"g1"' } as T;
-      return { items: [], root: { id: 'root', parent_id: null, name: 'My files', kind: 'folder', generation: 1, etag: '"root:1"' }, next_cursor: null, has_more: false } as T;
+      return { items: [], root: { id: 'root', parent_id: null, name: 'Files', kind: 'folder', generation: 1, etag: '"root:1"' }, next_cursor: null, has_more: false } as T;
     }
     if (path === '/folders/root/children') {
       return { items: [], next_cursor: null, has_more: false } as T;
@@ -78,7 +78,7 @@ test('roots lists the private root through the backend collection route', async 
 
   await expect(listing.roots()).resolves.toMatchObject({
     items: [],
-    root: { id: 'root', parent_id: null, name: 'My files', kind: 'folder', generation: 1, etag: '"root:1"' },
+    root: { id: 'root', parent_id: null, name: 'Files', kind: 'folder', generation: 1, etag: '"root:1"' },
     next_cursor: null,
     has_more: false,
   });
@@ -94,5 +94,46 @@ test('malformed error JSON preserves unauthorized status and expires the session
   try {
     await expect(client.request('/folders/root/children')).rejects.toMatchObject({ name: 'HttpError', status: 401 });
     expect(expired).toBe(true);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+for (const declaredLength of [false, true]) {
+  test(`bounded content rejects ${declaredLength ? 'declared' : 'streamed'} oversized data and cancels reading`, async () => {
+    const originalFetch = globalThis.fetch;
+    let cancelled = false;
+    let reads = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) { reads++; controller.enqueue(new Uint8Array(4)); },
+      cancel() { cancelled = true; },
+    });
+    globalThis.fetch = async () => new Response(stream, { headers: declaredLength ? { 'content-length': '100' } : {} });
+    try {
+      await expect(new HttpTransport().request('/entries/file/content', { maxResponseBytes: 3 })).rejects.toMatchObject({ name: 'ResponseTooLargeError' });
+      expect(cancelled).toBe(true);
+      expect(reads).toBeLessThanOrEqual(2);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+}
+
+test('bounded JSON file content remains a Blob rather than parsed API data', async () => {
+  const originalFetch = globalThis.fetch;
+  const content = '{"private":"file content"}';
+  globalThis.fetch = async () => new Response(content, { headers: { 'content-type': 'application/json' } });
+  try {
+    const result = await new HttpTransport().request<Blob>('/entries/file/content', { maxResponseBytes: 100 });
+    expect(result).toBeInstanceOf(Blob);
+    expect(await result.text()).toBe(content);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('bounded error responses preserve status without reading their bodies', async () => {
+  const originalFetch = globalThis.fetch;
+  let cancelled = false;
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    cancel() { cancelled = true; },
+  }), { status: 503, headers: { 'content-type': 'application/json' } });
+  try {
+    await expect(new HttpTransport().request('/entries/file/content', { maxResponseBytes: 3 })).rejects.toMatchObject({ name: 'HttpError', status: 503 });
+    expect(cancelled).toBe(true);
   } finally { globalThis.fetch = originalFetch; }
 });

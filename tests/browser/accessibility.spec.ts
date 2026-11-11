@@ -19,7 +19,7 @@ async function signIn(): Promise<void> {
   await page.getByLabel('Account name').fill(fixture.handle);
   await page.getByLabel('Password').fill(process.env.S1_BROWSER_PASSWORD!);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
 }
 
 test.beforeAll(async ({}, workerInfo) => {
@@ -74,21 +74,25 @@ test('keyboard-only sign-in exposes named fields and a visible focus indicator',
   await page.keyboard.press('Tab');
   await expect(page.getByRole('button', { name: /sign in/i })).toBeFocused();
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('heading', { name: 'My files', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
 });
 
 test('folder, upload, rename, and logout controls have accessible names', { annotation: { type: 'harness_case', description: 'accessibility_control_names' } }, async () => {
   await signIn();
   await expect(page.getByLabel('Folders')).toBeVisible();
-  await expect(page.getByLabel('New folder')).toBeVisible();
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(page.getByLabel('Folder name', { exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
   await expect(page.getByLabel('Choose a file to upload')).toBeAttached();
   await expect(page.getByRole('button', { name: 'Refresh folder' })).toBeVisible();
   const folders = page.getByLabel('Folders');
   await folders.getByRole('button', { name: new RegExp(fixture.folder) }).click();
   await page.getByRole('article').filter({ hasText: fixture.nested }).getByRole('button', { name: 'Open' }).click();
   const item = page.getByRole('article').filter({ hasText: fixture.file });
-  await expect(item.getByRole('button', { name: 'Download' })).toBeVisible();
-  await expect(item.getByRole('button', { name: 'Rename' })).toBeVisible();
+  await item.getByRole('button', { name: `Options for ${fixture.file}`, exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
 });
 
@@ -97,8 +101,9 @@ test('rename dialog supports Escape and restores focus to its invoking control',
   const folders = page.getByLabel('Folders');
   await folders.getByRole('button', { name: new RegExp(fixture.folder) }).click();
   await page.getByRole('article').filter({ hasText: fixture.nested }).getByRole('button', { name: 'Open' }).click();
-  const rename = page.getByRole('article').filter({ hasText: fixture.file }).getByRole('button', { name: 'Rename' });
+  const rename = page.getByRole('article').filter({ hasText: fixture.file }).getByRole('button', { name: `Options for ${fixture.file}`, exact: true });
   await rename.click();
+  await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: /rename/i });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('textbox', { name: /new name/i })).toBeFocused();

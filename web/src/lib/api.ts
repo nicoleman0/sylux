@@ -4,11 +4,16 @@ export class HttpError extends Error {
   get code(): string | undefined { return this.details?.code; }
 }
 
+export class ResponseTooLargeError extends Error {
+  constructor() { super('This file is too large to preview. Download it instead.'); this.name = 'ResponseTooLargeError'; }
+}
+
 export type RequestOptions = {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
   body?: unknown;
   headers?: Record<string, string>;
   signal?: AbortSignal;
+  maxResponseBytes?: number;
   onUploadProgress?: (loaded: number, total: number) => void;
 };
 
@@ -20,6 +25,9 @@ export interface ApiTransport {
 /** Same-origin transport: cookies remain browser-managed and are never persisted by JS. */
 export class HttpTransport implements ApiTransport {
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    if (options.maxResponseBytes !== undefined && (!Number.isSafeInteger(options.maxResponseBytes) || options.maxResponseBytes <= 0)) {
+      throw new Error('maxResponseBytes must be a positive safe integer');
+    }
     const method = options.method ?? 'GET';
     const headers = new Headers(options.headers);
     let body: BodyInit | undefined;
@@ -76,6 +84,10 @@ export class HttpTransport implements ApiTransport {
       cache: 'no-store', redirect: 'error',
     });
     if (!response.ok) {
+      if (options.maxResponseBytes !== undefined) {
+        await response.body?.cancel();
+        throw new HttpError(response.status);
+      }
       let details: ApiError | undefined;
       if (response.headers.get('content-type')?.includes('application/json')) {
         try { details = await response.json() as ApiError; }
@@ -85,6 +97,32 @@ export class HttpTransport implements ApiTransport {
     }
     if (response.status === 204) return undefined as T;
     const contentType = response.headers.get('content-type') ?? '';
+    if (options.maxResponseBytes !== undefined) {
+      const limit = options.maxResponseBytes;
+      if (Number(response.headers.get('content-length')) > limit) {
+        await response.body?.cancel();
+        throw new ResponseTooLargeError();
+      }
+      const reader = response.body?.getReader();
+      const chunks: Uint8Array<ArrayBuffer>[] = [];
+      let size = 0;
+      if (reader) {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            size += value.byteLength;
+            if (size > limit) {
+              await reader.cancel();
+              throw new ResponseTooLargeError();
+            }
+            chunks.push(new Uint8Array(value));
+          }
+        } finally { reader.releaseLock(); }
+      }
+      // Preview callers need bytes even when the file itself contains JSON.
+      return new Blob(chunks, { type: contentType }) as T;
+    }
     return (contentType.includes('application/json') ? await response.json() : await response.blob()) as T;
   }
 }

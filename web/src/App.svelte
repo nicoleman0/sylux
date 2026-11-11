@@ -1,6 +1,13 @@
 <script lang="ts">
   import './app.css';
   import { onMount, tick } from 'svelte';
+  import MoonIcon from '@lucide/svelte/icons/moon';
+  import SunIcon from '@lucide/svelte/icons/sun';
+  import UserRoundIcon from '@lucide/svelte/icons/user-round';
+  import LogOutIcon from '@lucide/svelte/icons/log-out';
+  import EntryOptions from './lib/EntryOptions.svelte';
+  import HeaderIconButton from './lib/HeaderIconButton.svelte';
+  import FilePreview from './lib/FilePreview.svelte';
   import FileIcon from '@lucide/svelte/icons/file';
   import FolderIcon from '@lucide/svelte/icons/folder';
   import PlusIcon from '@lucide/svelte/icons/plus';
@@ -77,7 +84,7 @@
   let handle = $state('');
   let password = $state('');
   let setupAuthorization = $state('');
-  const emptyRoot: Folder = { id: '', parent_id: null, name: 'My files', kind: 'folder', etag: '"g1"' };
+  const emptyRoot: Folder = { id: '', parent_id: null, name: 'Files', kind: 'folder', etag: '"g1"' };
   let currentFolder = $state<Folder>(emptyRoot);
   let folders = $state<Folder[]>([]);
   let entries = $state<Entry[]>([]);
@@ -92,6 +99,19 @@
   let notice = $state('');
   let folderName = $state('');
   let folderBusy = $state(false);
+  let createOpen = $state(false);
+  let folderError = $state('');
+  let folderInput = $state<HTMLInputElement | null>(null);
+  let createTrigger: HTMLElement | null = null;
+  let previewEntry = $state<Entry | null>(null);
+  let previewTrigger: HTMLElement | null = null;
+  let draggedEntry = $state<Entry | null>(null);
+  let dropTarget = $state('');
+  let dropPending = $state<{ entry: Entry; destination: Folder } | null>(null);
+  let dropError = $state('');
+  let moveNeedsRefresh = $state(false);
+  const dragType = 'application/x-sylux-entry';
+  const knownParents = new Map<string, string | null>();
   let trashTarget = $state<Entry | null>(null);
   let trashTrigger: HTMLElement | null = null;
   let deletedItems = $state<DeletedEntry[]>([]);
@@ -149,9 +169,10 @@
     const generation = sessionGeneration;
     const listingData = await listing.roots();
     if (generation !== sessionGeneration) return false;
-    const root = { ...listingData.root, name: 'My files' };
+    const root = { ...listingData.root, name: 'Files' };
     const descriptors = [root, ...listingData.items.filter((entry): entry is Folder => entry.kind === 'folder')];
     folders = descriptors;
+    for (const folder of descriptors) knownParents.set(folder.id, folder.parent_id);
     const current = descriptors.find((folder) => folder.id === currentFolder.id);
     if (current) currentFolder = current;
     return true;
@@ -171,7 +192,10 @@
       }
       const page = await listing.children(folderId);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return false;
-      entries = page.items; pageCursors = [null]; pageIndex = 0; nextCursor = page.next_cursor; hasMore = page.has_more;
+      entries = page.items;
+      for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
+      moveNeedsRefresh = false;
+      pageCursors = [null]; pageIndex = 0; nextCursor = page.next_cursor; hasMore = page.has_more;
       return true;
     }
     catch { if (generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest) listingError = 'Could not load this folder. Try again.'; return false; }
@@ -189,7 +213,9 @@
       const page = await listing.children(folderId, cursor);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || nextCursor !== cursor || requestId !== listingRequest) return;
       pageCursors = [...pageCursors.slice(0, pageIndex + 1), nextCursor];
-      pageIndex += 1; entries = page.items; nextCursor = page.next_cursor; hasMore = page.has_more;
+      pageIndex += 1; entries = page.items;
+      for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
+      nextCursor = page.next_cursor; hasMore = page.has_more;
     } catch (error) {
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
       if (error instanceof HttpError && error.status === 409) {
@@ -210,7 +236,9 @@
     try {
       const page = await listing.children(folderId, pageCursors[target]);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
-      pageIndex = target; entries = page.items; nextCursor = page.next_cursor; hasMore = page.has_more;
+      pageIndex = target; entries = page.items;
+      for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
+      nextCursor = page.next_cursor; hasMore = page.has_more;
     } catch (error) {
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
       if (error instanceof HttpError && error.status === 409) {
@@ -307,7 +335,9 @@
     uploadId = ''; unresolvedUploadId = ''; unresolvedUploadName = ''; unresolvedCancel = false; notice = '';
     listingRequest++; currentFolder = emptyRoot; folders = []; entries = []; folderPath = [emptyRoot];
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false; loading = false; listingError = '';
-    folderName = ''; folderBusy = false; renameId = ''; renameName = ''; renameError = ''; renameBusy = false;
+    folderName = ''; folderBusy = false; createOpen = false; folderError = ''; previewEntry = null; previewTrigger = null;
+    draggedEntry = null; dropTarget = ''; dropPending = null; dropError = ''; moveNeedsRefresh = false; knownParents.clear();
+    renameId = ''; renameName = ''; renameError = ''; renameBusy = false;
     closeMove(); moveBusy = false;
     trashRequest++; deletedItems = []; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false;
   }
@@ -348,15 +378,28 @@
     loggingOut = false;
   }
 
+  function beginCreate(trigger: HTMLElement): void {
+    createTrigger = trigger; folderName = ''; folderError = ''; createOpen = true;
+  }
+
   async function createFolder(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    if (!folderName.trim() || folderBusy || !currentFolder.id) return;
+    if (folderBusy || !currentFolder.id) return;
+    const name = folderName.trim();
+    if (!name || name === '.' || name === '..' || /[\/\\\x00-\x1f\x7f]/.test(name)) {
+      folderError = 'Enter a folder name without slashes or control characters.';
+      await tick(); folderInput?.focus(); return;
+    }
     const generation = sessionGeneration;
-    folderBusy = true; notice = '';
+    const parent = currentFolder;
+    folderBusy = true; folderError = ''; notice = '';
     try {
-      await listing.createFolder(currentFolder.id, folderName.trim(), currentFolder.etag);
-    } catch {
-      if (generation === sessionGeneration) { notice = 'Folder could not be created. Check its name, refresh the folder and try again.'; folderBusy = false; }
+      await listing.createFolder(parent.id, name, parent.etag);
+    } catch (error) {
+      if (generation === sessionGeneration) {
+        folderError = error instanceof HttpError && error.status === 409 ? 'An item already has this name. Choose another name.' : 'Folder could not be created. Check its name and try again.';
+        folderBusy = false; await tick(); folderInput?.focus();
+      }
       return;
     }
     if (generation !== sessionGeneration) return;
@@ -366,7 +409,7 @@
       if (generation !== sessionGeneration) return;
       if (!await refresh()) notice = 'Folder created. Refresh your files to see it.';
     } catch { if (generation === sessionGeneration) notice = 'Folder created. Refresh your files to see it.'; }
-    finally { if (generation === sessionGeneration) folderBusy = false; }
+    finally { if (generation === sessionGeneration) { folderBusy = false; createOpen = false; } }
   }
 
   // The dialog moves focus itself: to the name field on open, back to the trigger on close.
@@ -411,6 +454,7 @@
     try {
       const page = await listing.children(destination.id, cursor);
       if (request !== moveRequest || generation !== sessionGeneration || !moveTarget) return;
+      for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       movePath = path;
       const children = page.items.filter((entry): entry is Folder => entry.kind === 'folder');
       moveFolders = cursor ? [...moveFolders, ...children] : children;
@@ -421,6 +465,7 @@
     } finally { if (request === moveRequest) moveLoading = false; }
   }
   async function beginMove(entry: Entry, trigger: HTMLElement): Promise<void> {
+    if (dropPending || moveNeedsRefresh) return;
     closeMove(); moveTarget = entry; moveTrigger = trigger;
     const root = folders[0];
     if (root) await loadMoveFolder([root]);
@@ -434,16 +479,11 @@
     moveBusy = true; moveError = '';
     try {
       await listing.move(target.id, destination.id, target.etag);
+      if (generation === sessionGeneration) knownParents.set(target.id, destination.id);
     } catch (error) {
       if (generation !== sessionGeneration) return;
-      if (error instanceof HttpError) {
-        if (error.code === 'name_conflict') moveError = 'An item with this name is already there. Choose another folder, or cancel and rename your item.';
-        else if (error.code === 'invalid_destination') moveError = 'Choose a different folder. A folder cannot be moved into itself or its children.';
-        else if (error.code === 'depth_limit') moveError = 'This destination would nest folders too deeply. Choose a folder closer to My files.';
-        else if (error.status === 404) moveError = 'The item or destination is no longer available. Choose another folder, or close and refresh your files.';
-        else if (error.status === 412) moveError = 'This item changed. Close this dialog, refresh your files and try again.';
-        else moveError = 'Move could not be confirmed. Close this dialog and refresh your files before trying again.';
-      } else moveError = 'Move could not be confirmed. Close this dialog and refresh your files before trying again.';
+      moveError = moveFailure(error);
+      if (moveOutcomeUncertain(error)) moveNeedsRefresh = true;
       moveBusy = false;
       return;
     }
@@ -456,6 +496,87 @@
     } catch { if (generation === sessionGeneration) notice = `${target.name} moved to ${destination.name}. Refresh your files to update the folder list.`; }
   }
 
+  function moveFailure(error: unknown): string {
+    if (error instanceof HttpError) {
+      if (error.code === 'name_conflict') return 'An item with this name is already there. Choose another folder, or rename your item.';
+      if (error.code === 'invalid_destination') return 'Choose a different folder. A folder cannot be moved into itself or its children.';
+      if (error.code === 'depth_limit') return 'This destination would nest folders too deeply. Choose a folder closer to Files.';
+      if (error.status === 404) return 'The item or destination is no longer available. Refresh your files.';
+      if (error.status === 412) return 'This item changed. Refresh your files and try again.';
+    }
+    return 'Move could not be confirmed. Close any open dialog and refresh your files before trying again.';
+  }
+
+  function moveOutcomeUncertain(error: unknown): boolean {
+    return !(error instanceof HttpError) || error.status >= 500;
+  }
+
+  function canDrop(entry: Entry | null, destination: Folder): boolean {
+    if (!entry || dropPending || moveBusy || moveNeedsRefresh || destination.id === entry.id || destination.id === entry.parent_id) return false;
+    const seen = new Set<string>();
+    let ancestor: string | null | undefined = destination.id;
+    while (ancestor) {
+      if (ancestor === entry.id || seen.has(ancestor)) return false;
+      seen.add(ancestor); ancestor = knownParents.get(ancestor);
+    }
+    return true;
+  }
+
+  function startDrag(event: DragEvent, entry: Entry): void {
+    if (!event.dataTransfer || dropPending || moveBusy || moveNeedsRefresh) { event.preventDefault(); return; }
+    draggedEntry = entry; dropError = '';
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData(dragType, entry.id);
+  }
+
+  function endDrag(): void { draggedEntry = null; dropTarget = ''; }
+
+  function dragOver(event: DragEvent, destination: Folder): void {
+    if (!event.dataTransfer?.types.includes(dragType) || !canDrop(draggedEntry, destination)) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = 'move'; dropTarget = destination.id;
+  }
+
+  function dragLeave(event: DragEvent, destination: Folder): void {
+    if (event.currentTarget instanceof HTMLElement && event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+    if (dropTarget === destination.id) dropTarget = '';
+  }
+
+  async function dropEntry(event: DragEvent, destination: Folder): Promise<void> {
+    const target = draggedEntry;
+    if (!event.dataTransfer?.types.includes(dragType) || !canDrop(target, destination) || !target) return;
+    event.preventDefault(); event.stopPropagation(); endDrag();
+    const generation = sessionGeneration;
+    dropPending = { entry: target, destination }; dropError = ''; notice = '';
+    try {
+      await listing.move(target.id, destination.id, target.etag);
+      if (generation === sessionGeneration) knownParents.set(target.id, destination.id);
+      if (generation !== sessionGeneration) return;
+      notice = `${target.name} moved to ${destination.name}.`;
+      try { await refreshRoot(); if (generation === sessionGeneration) await refresh(); }
+      catch { if (generation === sessionGeneration) notice += ' Refresh your files to update the folder list.'; }
+    } catch (error) { if (generation === sessionGeneration) { dropError = moveFailure(error); if (moveOutcomeUncertain(error)) moveNeedsRefresh = true; } }
+    finally { if (generation === sessionGeneration) dropPending = null; }
+  }
+
+  function externalDrag(event: DragEvent): void {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    event.preventDefault();
+    if (event.type === 'dragover') event.dataTransfer.dropEffect = 'none';
+    else if (user) notice = 'Use Choose file and Upload to add a file. Dragging here moves files already in Sylux.';
+  }
+
+  function openPreview(entry: Entry, trigger: HTMLElement): void { previewTrigger = trigger; previewEntry = entry; }
+  function closePreview(): void {
+    previewEntry = null;
+    void tick().then(() => { restoreFocus(previewTrigger); previewTrigger = null; });
+  }
+  function entryAction(action: 'download' | 'rename' | 'move' | 'delete', entry: Entry, trigger: HTMLElement): void {
+    if (action === 'download') void download(entry);
+    else if (action === 'rename') beginRename(entry, trigger);
+    else if (action === 'move') void beginMove(entry, trigger);
+    else { trashError = ''; trashTarget = entry; trashTrigger = trigger; }
+  }
+
   async function loadTrash(): Promise<void> {
     const accountId = user?.id;
     if (!accountId) return;
@@ -465,7 +586,7 @@
       const result = await listing.deleted();
       if (request === trashRequest && user?.id === accountId && showTrash) deletedItems = result.items;
     } catch {
-      if (request === trashRequest && user?.id === accountId && showTrash) trashError = 'Could not load deleted items. Try again.';
+      if (request === trashRequest && user?.id === accountId && showTrash) trashError = 'Could not load trash. Try again.';
     } finally { if (request === trashRequest && user?.id === accountId) trashLoading = false; }
   }
   async function openTrash(): Promise<void> {
@@ -481,10 +602,10 @@
     try {
       await listing.trash(target.id, target.etag);
       if (sessionVersion !== sessionGeneration) return;
-      notice = `${target.name} moved to deleted items.`;
+      notice = `${target.name} moved to trash.`;
       await refresh();
       if (sessionVersion !== sessionGeneration) return;
-      trashTrigger = null; trashTarget = null;
+      trashTarget = null;
       try { await refreshRoot(); } catch { /* The deletion was confirmed. */ }
       if (sessionVersion === sessionGeneration && showTrash) await loadTrash();
     } catch (error) {
@@ -509,7 +630,7 @@
       if (sessionVersion === sessionGeneration) { await refresh(); await tick(); if (sessionVersion === sessionGeneration) document.getElementById('trash-heading')?.focus(); }
     } catch (error) {
       if (sessionVersion !== sessionGeneration) return;
-      trashError = error instanceof HttpError && error.status === 409 ? 'Restore its parent folder first, or rename the item occupying its original name.' : 'Could not restore this item. Refresh deleted items and try again.';
+      trashError = error instanceof HttpError && error.status === 409 ? 'Restore its parent folder first, or rename the item occupying its original name.' : 'Could not restore this item. Refresh trash and try again.';
     } finally { if (sessionVersion === sessionGeneration) trashBusy = false; }
   }
 
@@ -526,7 +647,7 @@
   async function showCommittedUpload(): Promise<void> {
     const generation = sessionGeneration;
     progress = 100; transferPhase = 'complete';
-    notice = uploadReplacement ? 'Replacement complete. The previous file is in deleted items. Rename the current file before restoring the previous one.' : 'Upload complete.';
+    notice = uploadReplacement ? 'Replacement complete. The previous file is in trash. Rename the current file before restoring the previous one.' : 'Upload complete.';
     try { if (!await refreshRoot()) return; } catch { /* Keep the confirmed commit outcome visible. */ }
     if (generation !== sessionGeneration) return;
     await refresh();
@@ -754,6 +875,8 @@
   }
 </script>
 
+<svelte:window ondragover={externalDrag} ondrop={externalDrag} />
+
 <svelte:head>
   <title>Sylux — private files</title>
   <meta name="description" content="Private file storage proof of concept" />
@@ -765,8 +888,8 @@
     <div class="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
       <a class="rounded-sm text-lg font-semibold tracking-tight" href="#home" aria-label="Sylux home">Sylux</a>
       <div class="flex flex-wrap items-center justify-end gap-3">
-        <Button variant="outline" size="sm" aria-pressed={darkMode} onclick={toggleTheme}>Dark mode</Button>
-        {#if user && !loggingOut}<span class="text-muted-foreground text-sm break-all">{user.handle}</span><Button variant="outline" size="sm" disabled={loggingOut} onclick={openAccounts}>Account</Button><Button variant="outline" size="sm" disabled={loggingOut} onclick={signOut}>Log out</Button>{/if}
+        <HeaderIconButton label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} pressed={darkMode} onclick={toggleTheme}>{#if darkMode}<SunIcon />{:else}<MoonIcon />{/if}</HeaderIconButton>
+        {#if user && !loggingOut}<span class="text-muted-foreground text-sm break-all">{user.handle}</span><HeaderIconButton label="Account" disabled={loggingOut} onclick={openAccounts}><UserRoundIcon /></HeaderIconButton><HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>{/if}
       </div>
     </div>
   </header>
@@ -816,16 +939,15 @@
     <main class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6">
       <div class="grid items-start gap-4 md:grid-cols-[11rem_minmax(0,1fr)] md:gap-6">
         <aside class="flex flex-wrap gap-2 md:flex-col" aria-label="Workspace navigation">
-          <Button variant={showTrash ? 'ghost' : 'secondary'} class="justify-start" onclick={() => { showTrash = false; folders[0] && openFolder(folders[0]); }}>My files</Button>
-          <Button variant={showTrash ? 'secondary' : 'outline'} class="justify-start" aria-expanded={showTrash} onclick={openTrash}>{showTrash ? 'Hide deleted items' : 'Deleted items'}</Button>
-          {#if entries.some((entry) => entry.kind === 'folder')}<nav class="hidden flex-col gap-1 md:flex" aria-label="Folders"><p class="text-muted-foreground px-2 text-xs">Folders in this folder</p>{#each entries.filter((entry): entry is Folder => entry.kind === 'folder') as folder (folder.id)}<Button variant="ghost" class="h-auto min-h-9 justify-start py-1.5 text-left break-all whitespace-normal" onclick={() => openFolder(folder)}>{folder.name}</Button>{/each}</nav>{/if}
+          <Button variant={showTrash ? 'ghost' : 'secondary'} class={`justify-start ${dropTarget === folders[0]?.id ? 'drop-active' : ''}`} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={() => { showTrash = false; folders[0] && openFolder(folders[0]); }}>Files</Button>
+          <Button variant={showTrash ? 'secondary' : 'outline'} class="justify-start" aria-expanded={showTrash} onclick={openTrash}>Trash</Button>
+          {#if entries.some((entry) => entry.kind === 'folder')}<nav class="hidden flex-col gap-1 md:flex" aria-label="Folders"><p class="text-muted-foreground px-2 text-xs">Folders</p>{#each entries.filter((entry): entry is Folder => entry.kind === 'folder') as folder (folder.id)}<Button variant="ghost" class={`h-auto min-h-11 justify-start py-1.5 text-left break-all whitespace-normal ${dropTarget === folder.id ? 'drop-active' : ''}`} data-drop-target={folder.id} data-drop-active={dropTarget === folder.id} ondragover={(event) => dragOver(event, folder)} ondragleave={(event) => dragLeave(event, folder)} ondrop={(event) => dropEntry(event, folder)} onclick={() => openFolder(folder)}>{folder.name}</Button>{/each}</nav>{/if}
         </aside>
         <Card.Root class="min-w-0">
           <section class="flex flex-col gap-4 px-6" aria-labelledby="folder-title">
-            {#if showTrash}<section class="grid gap-2 rounded-lg border p-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h2 id="trash-heading" tabindex="-1" class="font-semibold">Deleted items</h2><p class="text-sm">Items stay here until restored. Permanent removal is not available yet. Restore a parent folder before its children.</p><Button variant="outline" size="sm" disabled={trashLoading || trashBusy} onclick={loadTrash}>Refresh deleted items</Button>{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading deleted items…</p>{:else if !trashError && deletedItems.length === 0}<p>No deleted items.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: My files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from My files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore {item.name}</Button></li>{/each}</ul>{/if}</section>{/if}
+            {#if showTrash}<section class="grid gap-2 rounded-lg border p-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h2 id="trash-heading" tabindex="-1" class="font-semibold">Trash</h2><p class="text-sm">Items stay here until restored. Permanent removal is not available yet. Restore a parent folder before its children.</p><Button variant="outline" size="sm" disabled={trashLoading || trashBusy} onclick={loadTrash}>Refresh trash</Button>{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore {item.name}</Button></li>{/each}</ul>{/if}</section>{/if}
             {#if unresolvedUploadId}<Alert.Root variant="destructive"><Alert.Title>Upload status needs checking</Alert.Title><Alert.Description><p>{unresolvedUploadName} may have been saved. Check its status before uploading it again.</p><div class="mt-2 flex flex-wrap gap-2"><Button variant="outline" size="sm" onclick={reconcileUpload} disabled={transferBusy}>Check upload status</Button>{#if unresolvedCancel}<Button variant="outline" size="sm" onclick={retryCancel} disabled={transferBusy}>Retry cancellation</Button>{/if}</div></Alert.Description></Alert.Root>{/if}
-            <div class="flex flex-wrap items-end justify-between gap-3"><div class="min-w-0">{#if folderPath.length > 1}<nav class="text-muted-foreground flex flex-wrap items-center gap-1 text-sm" aria-label="Folder path">{#each folderPath.slice(0, -1) as folder (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" onclick={() => openFolder(folder)}>{folder.name}</Button><span aria-hidden="true">/</span>{/each}</nav>{/if}<h1 class="text-2xl font-semibold break-all" id="folder-title" tabindex="-1">{currentFolder.name}</h1></div><Button variant="outline" size="sm" disabled={loading} onclick={refresh} aria-label="Refresh folder"><RefreshCwIcon /><span>Refresh</span></Button></div>
-            <form class="grid gap-2" onsubmit={createFolder}><Label for="new-folder">New folder</Label><div class="flex gap-2"><Input id="new-folder" bind:value={folderName} disabled={folderBusy || !currentFolder.id} placeholder="Folder name" maxlength={255} required /><Button variant="outline" disabled={folderBusy || !currentFolder.id} aria-label="Create folder" type="submit"><PlusIcon /><span>{folderBusy ? 'Creating…' : 'Create'}</span></Button></div></form>
+            <div class="flex flex-wrap items-end justify-between gap-3"><div class="min-w-0">{#if folderPath.length > 1}<nav class="text-muted-foreground flex flex-wrap items-center gap-1 text-sm" aria-label="Folder path">{#each folderPath.slice(0, -1) as folder (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" onclick={() => openFolder(folder)}>{folder.name}</Button><span aria-hidden="true">/</span>{/each}</nav>{/if}<h1 class="text-2xl font-semibold break-all" id="folder-title" tabindex="-1">{currentFolder.name}</h1></div><div class="flex gap-2"><Button variant="outline" disabled={folderBusy || !currentFolder.id} onclick={(event) => beginCreate(event.currentTarget as HTMLElement)}><PlusIcon /><span>Create</span></Button><Button variant="outline" disabled={loading} onclick={refresh} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button></div></div>
             <section class="bg-muted/50 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-dashed p-4" aria-label="Upload files"><div class="flex flex-col"><strong class="font-medium">Bring a file in</strong><span class="text-muted-foreground text-sm">Choose a file to add to this folder</span></div><form class="flex min-w-0 flex-1 basis-full flex-wrap items-center gap-2 sm:basis-72" onsubmit={upload}><Input class="sr-only size-px border-0 p-0" id="upload-file" type="file" tabindex={-1} aria-label="Choose a file to upload" disabled={transferBusy || !!unresolvedUploadId} onchange={(event) => { selectedFileName = event.currentTarget.files?.[0]?.name ?? ''; }} /><Button variant="outline" type="button" disabled={transferBusy || !!unresolvedUploadId} onclick={() => document.getElementById('upload-file')?.click()}>Choose file</Button><Button type="submit" disabled={transferBusy || !!unresolvedUploadId || !!replacementPrompt || !currentFolder.id}>Upload</Button><span class="text-muted-foreground basis-full break-all text-sm" aria-live="polite">{selectedFileName || 'No file chosen'}</span></form>
               {#if transferBusy || progress > 0}<div class="grid basis-full justify-items-start gap-2" role="status"><div class="grid w-full gap-1 text-sm"><span class="break-all">{transferName}</span><div class="flex justify-between gap-3"><span>{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span>{progress}% transferred</span></div></div><Progress value={progress} max={100} aria-label="Upload progress" />{#if transferBusy}<Button variant="link" class="h-auto p-0" onclick={() => { if (uploadCancelable) controller?.abort(); }} disabled={!uploadCancelable}>Cancel upload</Button>{/if}</div>{/if}
             </section>
@@ -833,13 +955,28 @@
             {#if loading}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading your files…</strong><p class="text-muted-foreground text-sm">This should only take a moment.</p></div>
             {:else if listingError}<Alert.Root variant="destructive" role="alert"><Alert.Title>We couldn’t open this folder</Alert.Title><Alert.Description><p>{listingError}</p><Button variant="outline" size="sm" class="mt-2" onclick={refresh}>Try again</Button></Alert.Description></Alert.Root>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">Nothing here just yet</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder to get started.</p></div>
-            {:else}<div class="divide-y border-y">{#each entries as entry (entry.id)}<article class="flex flex-wrap items-center gap-x-3 gap-y-1 py-2"><span class="text-muted-foreground shrink-0" aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon class="size-4" />{:else}<FileIcon class="size-4" />{/if}</span><div class="flex min-w-0 flex-1 basis-40 flex-col"><strong class="font-medium break-all">{entry.name}</strong><span class="text-muted-foreground text-xs">{entry.kind === 'folder' ? 'Folder' : `${entry.size} bytes`}</span></div><div class="flex flex-wrap gap-1">{#if entry.kind === 'folder'}<Button variant="ghost" size="sm" aria-label={`Open ${entry.name}`} onclick={() => openFolder(entry as Folder)}>Open</Button>{:else}<Button variant="ghost" size="sm" aria-label={`Download ${entry.name}`} onclick={() => download(entry)}>Download</Button>{/if}<Button variant="ghost" size="sm" aria-label={`Rename ${entry.name}`} onclick={(event) => beginRename(entry, event.currentTarget as HTMLElement)}>Rename</Button><Button variant="ghost" size="sm" aria-label={`Move ${entry.name}`} onclick={(event) => beginMove(entry, event.currentTarget as HTMLElement)}>Move</Button><Button variant="ghost" size="sm" aria-label={`Delete ${entry.name}`} onclick={(event) => { trashError = ''; trashTarget = entry; trashTrigger = event.currentTarget as HTMLElement; }}>Delete</Button></div></article>{/each}</div>{/if}
+            {:else}<div class="divide-y border-y">{#each entries as entry (entry.id)}
+              <article aria-label={entry.name} draggable={!dropPending && !moveBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`flex items-center gap-3 rounded-sm py-2 ${dropTarget === entry.id ? 'drop-active' : ''}`}>
+                <span class="text-muted-foreground shrink-0" aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon class="size-4" />{:else}<FileIcon class="size-4" />{/if}</span>
+                <div class="flex min-w-0 flex-1 flex-col"><button type="button" class="item-name min-h-9 text-left font-medium break-all" aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}>{entry.name}</button><span class="text-muted-foreground text-xs">{entry.kind === 'folder' ? 'Folder' : `${entry.size} bytes`}</span></div>
+                <EntryOptions {entry} disabled={!!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
+              </article>
+            {/each}</div>{/if}
+            {#if dropPending}<p role="status">Moving {dropPending.entry.name} to {dropPending.destination.name}…</p>{/if}
+            {#if dropError}<p role="alert">{dropError}</p>{/if}
             {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading}>Next page</Button>{/if}</div>{/if}
             {#if notice}<Alert.Root role="status"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
         </Card.Root>
       </div>
     </main>
+    <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client} onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }} />
+    <Dialog.Root open={createOpen} onOpenChange={(open) => { if (!folderBusy) createOpen = open; }}>
+      <Dialog.Content showCloseButton={!folderBusy} onOpenAutoFocus={(event) => { event.preventDefault(); folderInput?.focus(); }} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(createTrigger); createTrigger = null; }}>
+        <Dialog.Header><Dialog.Title>Create folder</Dialog.Title><Dialog.Description>Add a folder to {currentFolder.name}.</Dialog.Description></Dialog.Header>
+        <form class="grid gap-6" aria-busy={folderBusy} onsubmit={createFolder}><div class="grid gap-2"><Label for="new-folder">Folder name</Label><Input id="new-folder" bind:ref={folderInput} bind:value={folderName} disabled={folderBusy} maxlength={255} aria-invalid={!!folderError} aria-describedby={folderError ? 'folder-error' : undefined} required /></div>{#if folderError}<p id="folder-error" role="alert">{folderError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={folderBusy} onclick={() => createOpen = false}>Cancel</Button><Button type="submit" disabled={folderBusy}>{folderBusy ? 'Creating…' : 'Create folder'}</Button></Dialog.Footer></form>
+      </Dialog.Content>
+    </Dialog.Root>
     <Dialog.Root open={!!moveTarget} onOpenChange={(open) => { if (!open && !moveBusy) closeMove(); }}>
       <Dialog.Content class="max-h-[85dvh] overflow-y-auto" onCloseAutoFocus={(event) => { event.preventDefault(); if (moveTrigger?.isConnected) moveTrigger.focus(); else document.getElementById('folder-title')?.focus(); moveTrigger = null; }}>
         <Dialog.Header><Dialog.Title>Move {moveTarget?.name}</Dialog.Title><Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.</Dialog.Description></Dialog.Header>
@@ -851,21 +988,21 @@
         </div>
         <p class="text-sm break-all">Destination: {movePath.map((folder) => folder.name).join(' / ') || 'Choose a folder'}</p>
         {#if movePath.at(-1)?.id === moveTarget?.parent_id}<p class="text-muted-foreground text-sm">This item is already here. Open another folder or choose an ancestor above.</p>{/if}
-        {#if moveError}<p role="alert">{moveError}</p><Button variant="outline" disabled={moveBusy || moveLoading} onclick={() => loadMoveFolder(movePath.length ? movePath : folders.slice(0, 1))}>Refresh destinations</Button>{/if}
-        <Dialog.Footer><Button variant="outline" disabled={moveBusy} onclick={closeMove}>Cancel</Button><Button disabled={moveBusy || moveLoading || !moveDestinationReady || !movePath.length || movePath.at(-1)?.id === moveTarget?.parent_id} onclick={moveEntry}>{moveBusy ? 'Moving...' : 'Move here'}</Button></Dialog.Footer>
+        {#if moveError}<p role="alert">{moveError}</p>{#if moveNeedsRefresh}<Button variant="outline" onclick={async () => { closeMove(); await refresh(); }}>Close and refresh files</Button>{:else}<Button variant="outline" disabled={moveBusy || moveLoading} onclick={() => loadMoveFolder(movePath.length ? movePath : folders.slice(0, 1))}>Refresh destinations</Button>{/if}{/if}
+        <Dialog.Footer><Button variant="outline" disabled={moveBusy} onclick={closeMove}>Cancel</Button><Button disabled={moveBusy || moveNeedsRefresh || moveLoading || !moveDestinationReady || !movePath.length || movePath.at(-1)?.id === moveTarget?.parent_id} onclick={moveEntry}>{moveBusy ? 'Moving...' : 'Move here'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!replacementPrompt} onOpenChange={(open) => { if (!open) replacementPrompt = null; }}>
       <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); replacementTrigger?.focus(); replacementTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Replace {replacementPrompt?.target.name}?</Dialog.Title><Dialog.Description>A file with this name already exists in {replacementPrompt?.folder.name}. The previous file will move to deleted items and stay there until restored. Rename the current file before restoring it. If this upload fails or is canceled before saving, the previous file stays unchanged.</Dialog.Description></Dialog.Header>
+        <Dialog.Header><Dialog.Title>Replace {replacementPrompt?.target.name}?</Dialog.Title><Dialog.Description>A file with this name already exists in {replacementPrompt?.folder.name}. The previous file will move to trash and stay there until restored. Rename the current file before restoring it. If this upload fails or is canceled before saving, the previous file stays unchanged.</Dialog.Description></Dialog.Header>
         <Dialog.Footer><Button variant="outline" onclick={() => replacementPrompt = null}>Keep existing file</Button><Button onclick={confirmReplacement}>Replace file</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!trashTarget} onOpenChange={(open) => { if (!open && !trashBusy) trashTarget = null; }}>
       <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(trashTrigger); trashTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Delete {trashTarget?.name}?</Dialog.Title><Dialog.Description>Move this item to deleted items. You can restore it later. Folders must be empty. Permanent removal is not available yet.</Dialog.Description></Dialog.Header>
+        <Dialog.Header><Dialog.Title>Delete {trashTarget?.name}?</Dialog.Title><Dialog.Description>Move this item to trash. You can restore it later. Folders must be empty. Permanent removal is not available yet.</Dialog.Description></Dialog.Header>
         {#if trashError}<p role="alert">{trashError}</p>{/if}
-        <Dialog.Footer><Button variant="outline" disabled={trashBusy} onclick={() => trashTarget = null}>Cancel</Button><Button disabled={trashBusy} onclick={deleteEntry}>Move to deleted items</Button></Dialog.Footer>
+        <Dialog.Footer><Button variant="outline" disabled={trashBusy} onclick={() => trashTarget = null}>Cancel</Button><Button disabled={trashBusy} onclick={deleteEntry}>Move to trash</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!renameId} onOpenChange={(open) => { if (!open && !renameBusy) closeRename(); }}>
@@ -877,3 +1014,13 @@
   {/if}
   <footer class="border-t"><div class="text-muted-foreground mx-auto flex w-full max-w-6xl flex-wrap items-center gap-3 px-4 py-4 text-xs"><span>Sylux · private file storage</span><Badge variant="outline">PoC</Badge><span>Durability not qualified. Keep another copy of important files.</span></div></footer>
 </div>
+
+<style>
+  .item-name { border-radius: .2rem; text-underline-offset: .2em; }
+  .item-name:hover { color: var(--primary); text-decoration: underline; }
+  .item-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+  :global(.drop-active) { background: var(--accent); outline: 2px solid var(--primary); outline-offset: 2px; }
+  :global(.refreshing) { animation: refresh-turn 1s linear infinite; }
+  @keyframes refresh-turn { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { :global(.refreshing) { animation: none; } }
+</style>
