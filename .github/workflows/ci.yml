@@ -40,7 +40,19 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@11.19.1
 
+      - name: Identify runner image
+        id: runner-image
+        run: echo "version=${ImageVersion:?runner image version is missing}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cargo-deny
+        id: cargo-deny-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-${{ hashFiles('.github/workflows/ci.yml', 'rust-toolchain.toml') }}
+
       - name: Install pinned cargo-deny
+        if: steps.cargo-deny-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-deny --version 0.20.2 --locked --root "$RUNNER_TEMP/cargo-deny"
 
       - name: Run documented checks
