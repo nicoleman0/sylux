@@ -53,7 +53,7 @@
 - Plain `cargo test --locked` skips feature-gated suites.
   For contract, integration and fault tests, use
   `cargo test --locked --features test-harness --no-fail-fast`.
-- For full beta verification, follow `.github/workflows/ci.yml`:
+- For full beta verification, follow `.github/workflows/beta-release.yml`:
   run `scripts/check.sh`, install its browser prerequisites, then
   run `scripts/check-beta.sh` on Linux x86_64.
 - Treat web smoke tests, real TLS browser tests and container
