@@ -7,6 +7,7 @@
 //! blocking worker. No network I/O may happen inside those SQL closures or
 //! their transactions.
 
+pub mod instance;
 pub mod ownership;
 pub mod payload;
 pub mod reconcile;

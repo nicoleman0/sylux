@@ -28,6 +28,7 @@ const MAX_TICKET_LENGTH: usize = 4096;
 pub enum StorageOpenError {
     Payload(PayloadError),
     MutationKey,
+    InstanceSettings,
 }
 
 impl From<PayloadError> for StorageOpenError {

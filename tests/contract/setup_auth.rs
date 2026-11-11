@@ -83,7 +83,11 @@ impl TestFixture {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let origin = format!("http://{address}");
-        let app = http::router(AuthState::new(workers.clone(), origin.clone()));
+        let mut state = AuthState::new(workers.clone(), origin.clone());
+        state.instance_settings = Some(Arc::new(
+            sylux::persistence::instance::InstanceSettings::open(&product).unwrap(),
+        ));
+        let app = http::router(state);
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -139,7 +143,7 @@ impl TestFixture {
         if let Some(csrf) = csrf {
             request.push_str(&format!("X-CSRF-Token: {csrf}\r\n"));
         }
-        if method == "POST" {
+        if method == "POST" || method == "PATCH" {
             request.push_str("Content-Type: application/json\r\n");
         }
         request.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
@@ -621,4 +625,156 @@ async fn me_rechecks_enabled_epoch_revocation_and_both_expiries() {
         assert_eq!(fixture.me(&auth.cookie).await.status, 401, "case {case}");
         fixture.close().await;
     }
+}
+
+#[tokio::test]
+async fn instance_name_is_public_but_only_admin_can_save_with_csrf() {
+    let fixture = TestFixture::new("instance-name").await;
+    let response = fixture
+        .request("GET", "/instance", None, None, None, None)
+        .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.header("cache-control"), Some("no-store"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response.body).unwrap(),
+        serde_json::json!({"name":"Sylux"})
+    );
+    let body = Some(serde_json::json!({"name":"Private files"}).to_string());
+    assert_eq!(
+        fixture
+            .request(
+                "PATCH",
+                "/instance",
+                None,
+                Some(&fixture.origin),
+                None,
+                body.clone()
+            )
+            .await
+            .status,
+        401
+    );
+    let auth = fixture.authenticated().await;
+    assert_eq!(
+        fixture
+            .request(
+                "PATCH",
+                "/instance",
+                Some(&auth.cookie),
+                Some(&fixture.origin),
+                None,
+                body.clone()
+            )
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "PATCH",
+                "/instance",
+                Some(&auth.cookie),
+                Some("https://untrusted.test"),
+                Some(&auth.csrf),
+                body.clone()
+            )
+            .await
+            .status,
+        403
+    );
+    for name in ["", "   ", "line\nfeed", "control\u{0000}", &"x".repeat(41)] {
+        let response = fixture
+            .request(
+                "PATCH",
+                "/instance",
+                Some(&auth.cookie),
+                Some(&fixture.origin),
+                Some(&auth.csrf),
+                Some(serde_json::json!({"name":name}).to_string()),
+            )
+            .await;
+        assert_eq!(response.status, 400);
+    }
+    let response = fixture
+        .request(
+            "PATCH",
+            "/instance",
+            Some(&auth.cookie),
+            Some(&fixture.origin),
+            Some(&auth.csrf),
+            Some(serde_json::json!({"name":"  Private files  "}).to_string()),
+        )
+        .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response.body).unwrap(),
+        serde_json::json!({"name":"Private files"})
+    );
+    let reopened =
+        sylux::persistence::instance::InstanceSettings::open(&fixture.owner.path().join("product"))
+            .unwrap();
+    assert_eq!(reopened.name().unwrap(), "Private files");
+    let response = fixture
+        .request("GET", "/instance", None, None, None, None)
+        .await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response.body).unwrap(),
+        serde_json::json!({"name":"Private files"})
+    );
+    fixture
+        .db()
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE account SET role='user' WHERE account_id=?1",
+            [ACCOUNT_ID],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .request(
+                "PATCH",
+                "/instance",
+                Some(&auth.cookie),
+                Some(&fixture.origin),
+                Some(&auth.csrf),
+                body
+            )
+            .await
+            .status,
+        403
+    );
+    assert_eq!(reopened.name().unwrap(), "Private files");
+    fixture.close().await;
+}
+
+#[test]
+fn instance_settings_reject_symlinks_and_corrupt_persisted_names() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let directory = std::env::temp_dir().join(format!("sylux-instance-{}", common::unique_token()));
+    fs::create_dir(&directory).unwrap();
+    fs::create_dir(directory.join("metadata")).unwrap();
+    let store = sylux::persistence::instance::InstanceSettings::open(&directory).unwrap();
+    assert_eq!(store.name().unwrap(), "Sylux");
+    store.save("Files").unwrap();
+    let path = directory.join("metadata/instance.json");
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    fs::write(&path, br#"{"name":""}"#).unwrap();
+    assert!(sylux::persistence::instance::InstanceSettings::open(&directory).is_err());
+    fs::remove_file(&path).unwrap();
+    symlink("outside", &path).unwrap();
+    assert!(store.name().is_err());
+    store.save("Restored").unwrap();
+    assert!(
+        !fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(store.name().unwrap(), "Restored");
+    fs::remove_dir_all(directory).unwrap();
 }
