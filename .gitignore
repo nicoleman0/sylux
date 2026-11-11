@@ -29,3 +29,6 @@ docs/project-status.md
 # Transient provenance and runtime evidence output
 **/evidence/
 BUILD-HANDOFF.md
+.impeccable/review/
+.impeccable/critique/
+/test-results/
