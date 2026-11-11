@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { expect, test } from '@playwright/test';
+import { MockTransport } from '../src/lib/mock-transport';
 
 async function installBackend(page: import('@playwright/test').Page): Promise<void> {
   const root = { id: 'root-1', parent_id: null, name: 'Files', kind: 'folder', generation: 1, etag: 'root-1:1' };
@@ -128,6 +129,225 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
   await page.keyboard.press('Escape');
   await signOut(page);
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
+});
+
+test('search opens nested results and clearing keeps the browsing folder', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+  const work = { id: 'folder-1', parent_id: 'root-1', name: 'Work', kind: 'folder' as const, etag: 'work:1' };
+  const nested = { id: 'file-nested', parent_id: work.id, name: 'Report%_.txt', kind: 'file' as const, etag: 'nested:1', size: 42 };
+  const result = { entry: nested, location: [{ id: 'root-1', parent_id: null, name: '', kind: 'folder', etag: 'root-1:1' }, work] };
+  await page.route('**/folders/folder-1/children**', (route) => route.fulfill({ json: { items: [nested], next_cursor: null, has_more: false } }));
+  await page.route('**/entries/file-nested/content', (route) => route.fulfill({ status: 200, contentType: 'text/plain', body: 'report' }));
+  await page.route('**/entries/search**', (route) => route.fulfill({ json: { items: [new URL(route.request().url()).searchParams.get('q') === 'Work' ? { entry: work, location: result.location.slice(0, 1) } : result], next_cursor: null, has_more: false } }));
+  await page.getByRole('button', { name: 'New folder', exact: true }).click();
+  await page.getByLabel('Folder name', { exact: true }).fill('Work');
+  await page.getByRole('button', { name: 'Create folder' }).click();
+  await page.getByRole('button', { name: 'Open Work' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Work' })).toBeVisible();
+  const search = page.getByLabel('Search files and folders');
+  await search.fill('report%_');
+  await expect(page.getByRole('button', { name: 'Preview Report%_.txt' })).toBeVisible();
+  await expect(page.locator('.search-location')).toContainText('Files / Work');
+  await page.getByRole('button', { name: 'Preview Report%_.txt' }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Clear search' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Work' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview Report%_.txt' })).toBeVisible();
+  await search.fill('Report');
+  await page.getByRole('button', { name: 'Open containing folder for Report%_.txt' }).click();
+  await expect(search).toHaveValue('');
+  await expect(page.getByRole('heading', { level: 1, name: 'Work' })).toBeVisible();
+  await search.fill('Work');
+  await page.getByRole('button', { name: 'Open Work' }).click();
+  await expect(search).toHaveValue('');
+  await expect(page.getByRole('heading', { level: 1, name: 'Work' })).toBeVisible();
+  expect(await page.locator('body').evaluate((body) => body.scrollWidth <= window.innerWidth)).toBeTruthy();
+});
+
+test('search retries, pages, and ignores an obsolete response', async ({ page }) => {
+  await login(page);
+  const root = { id: 'root-1', parent_id: null, name: '', kind: 'folder', etag: 'root-1:1' };
+  const hit = (id: string, name: string) => ({ entry: { id, parent_id: root.id, name, kind: 'folder', etag: `${id}:1` }, location: [root] });
+  let fail = true;
+  let failNext = true;
+  let staleNext = false;
+  let fresh = false;
+  let release!: () => void;
+  let started!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const requested = new Promise<void>((resolve) => { started = resolve; });
+  let lateRelease!: () => void;
+  let lateStarted!: () => void;
+  const lateHeld = new Promise<void>((resolve) => { lateRelease = resolve; });
+  const lateRequested = new Promise<void>((resolve) => { lateStarted = resolve; });
+  await page.route('**/entries/search**', async (route) => {
+    const url = new URL(route.request().url());
+    const q = url.searchParams.get('q');
+    if (q === 'old') { started(); await held; return route.fulfill({ json: { items: [hit('old', 'Old result')], next_cursor: null, has_more: false } }); }
+    if (q === 'late') { lateStarted(); await lateHeld; return route.fulfill({ json: { items: [hit('late', 'Late result')], next_cursor: null, has_more: false } }); }
+    if (q === 'zz') return route.fulfill({ json: { items: [], next_cursor: null, has_more: false } });
+    if (fail) { fail = false; return route.fulfill({ status: 500, json: { code: 'internal_error' } }); }
+    if (url.searchParams.has('cursor')) {
+      if (failNext) { failNext = false; return route.fulfill({ status: 500, json: { code: 'internal_error' } }); }
+      if (staleNext) { staleNext = false; fresh = true; return route.fulfill({ status: 409, json: { code: 'listing_changed' } }); }
+      return route.fulfill({ json: { items: [hit('second', 'Second result')], next_cursor: null, has_more: false } });
+    }
+    if (fresh) return route.fulfill({ json: { items: [hit('fresh', 'Fresh result')], next_cursor: null, has_more: false } });
+    return route.fulfill({ json: { items: [hit('first', 'First result')], next_cursor: 'next', has_more: true } });
+  });
+  const search = page.getByLabel('Search files and folders');
+  await search.focus();
+  await page.keyboard.type('first');
+  await expect(page.getByText('Search failed')).toBeVisible();
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByRole('button', { name: 'Open First result' })).toBeVisible();
+  await page.getByRole('button', { name: 'Next page' }).click();
+  await expect(page.getByText('Search failed')).toBeVisible();
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByRole('button', { name: 'Open Second result' })).toBeVisible();
+  await page.getByRole('button', { name: 'Previous page' }).click();
+  await expect(page.getByRole('button', { name: 'Open First result' })).toBeVisible();
+  staleNext = true;
+  await page.getByRole('button', { name: 'Next page' }).click();
+  await expect(page.getByRole('button', { name: 'Open Fresh result' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Previous page' })).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: 'Search results have been restarted' })).toBeVisible();
+  await search.fill('old');
+  await requested;
+  await search.fill('new');
+  await expect(page.getByRole('button', { name: 'Open Fresh result' })).toBeVisible();
+  release();
+  await expect(page.getByRole('button', { name: 'Open Old result' })).toHaveCount(0);
+  await search.fill('zz');
+  await expect(page.getByText('No matching files or folders.')).toBeVisible();
+  await search.fill('late');
+  await lateRequested;
+  await expect(page.getByText('Searching…')).toBeVisible();
+  await page.getByRole('button', { name: 'Clear search' }).click();
+  lateRelease();
+  await expect(page.getByRole('button', { name: 'Open Late result' })).toHaveCount(0);
+  await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
+});
+
+test('clearing search after a rename restores the previous browsing page with fresh entries', async ({ page }) => {
+  await login(page);
+  let name = 'Later.txt';
+  let version = 1;
+  const later = () => ({ id: 'page-two', parent_id: 'root-1', name, kind: 'file', etag: `page-two:${version}`, size: 4 });
+  await page.route('**/folders/root-1/children**', (route) => {
+    const second = new URL(route.request().url()).searchParams.has('cursor');
+    return route.fulfill({ json: { items: second ? [later()] : [{ id: 'first', parent_id: 'root-1', name: 'First.txt', kind: 'file', etag: 'first:1', size: 4 }], next_cursor: second ? null : 'page-2', has_more: !second } });
+  });
+  await page.route('**/entries/page-two', (route) => {
+    if (route.request().method() === 'PATCH') {
+      if (route.request().headers()['if-match'] !== later().etag) return route.fulfill({ status: 412, json: { code: 'stale_etag' } });
+      name = (route.request().postDataJSON() as { name: string }).name;
+      version++;
+    }
+    return route.fulfill({ json: later() });
+  });
+  await page.route('**/entries/search**', (route) => route.fulfill({ json: { items: name.toLowerCase().includes('later') ? [{ entry: later(), location: [{ id: 'root-1', parent_id: null, name: '', kind: 'folder', etag: 'root-1:1' }] }] : [], next_cursor: null, has_more: false } }));
+  await page.getByRole('button', { name: 'Refresh folder' }).click();
+  await page.getByRole('button', { name: 'Next page' }).click();
+  await expect(page.getByRole('button', { name: 'Preview Later.txt' })).toBeVisible();
+  await page.getByLabel('Search files and folders').fill('Later');
+  await page.getByRole('button', { name: 'Options for Later.txt' }).click();
+  await page.getByRole('menuitem', { name: 'Rename' }).click();
+  await page.getByLabel('New name').fill('Later revised.txt');
+  await page.getByRole('button', { name: 'Save name' }).click();
+  await expect(page.getByRole('button', { name: 'Preview Later revised.txt' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Name updated.' })).toBeVisible();
+  await page.getByRole('button', { name: 'Options for Later revised.txt' }).click();
+  await page.getByRole('menuitem', { name: 'Rename' }).click();
+  await page.getByLabel('New name').fill('Updated.txt');
+  await page.getByRole('button', { name: 'Save name' }).click();
+  await expect(page.getByText('No matching files or folders.')).toBeVisible();
+  await page.getByRole('button', { name: 'Clear search' }).click();
+  await expect(page.getByRole('button', { name: 'Preview Updated.txt' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Previous page' })).toBeVisible();
+});
+
+test('late search responses cannot appear after navigation or sign-out', async ({ page }) => {
+  await login(page);
+  let navigationRelease!: () => void;
+  let navigationStarted!: () => void;
+  const navigationHeld = new Promise<void>((resolve) => { navigationRelease = resolve; });
+  const navigationRequested = new Promise<void>((resolve) => { navigationStarted = resolve; });
+  let logoutRelease!: () => void;
+  let logoutStarted!: () => void;
+  const logoutHeld = new Promise<void>((resolve) => { logoutRelease = resolve; });
+  const logoutRequested = new Promise<void>((resolve) => { logoutStarted = resolve; });
+  await page.route('**/entries/search**', async (route) => {
+    const query = new URL(route.request().url()).searchParams.get('q');
+    if (query === 'navigation') { navigationStarted(); await navigationHeld; }
+    if (query === 'logout') { logoutStarted(); await logoutHeld; }
+    return route.fulfill({ json: { items: [{ entry: { id: query, parent_id: 'root-1', name: 'Private result', kind: 'folder', etag: 'g1' }, location: [{ id: 'root-1', parent_id: null, name: '', kind: 'folder', etag: 'root-1:1' }] }], next_cursor: null, has_more: false } });
+  });
+  const search = page.getByLabel('Search files and folders');
+  await search.fill('navigation');
+  await navigationRequested;
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
+  navigationRelease();
+  await expect(page.getByRole('heading', { name: 'Trash', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Private result' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await search.fill('logout');
+  await logoutRequested;
+  await signOut(page);
+  logoutRelease();
+  await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Private result' })).toHaveCount(0);
+});
+
+test('search validates a long Unicode query before sending it and returns focus on clear', async ({ page }) => {
+  await login(page);
+  let requests = 0;
+  await page.route('**/entries/search**', (route) => { requests++; return route.fulfill({ json: { items: [], next_cursor: null, has_more: false } }); });
+  const search = page.getByLabel('Search files and folders');
+  await search.fill('界'.repeat(86));
+  await expect(page.getByRole('alert')).toContainText('Search is too long. Try a shorter name.');
+  expect(requests).toBe(0);
+  const clear = page.getByRole('button', { name: 'Clear search' });
+  await clear.focus();
+  await page.keyboard.press('Enter');
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue('');
+});
+
+test('mock search cursors support Unicode and reject malformed or stale pages', async () => {
+  const mock = new MockTransport();
+  await mock.request('/auth/local', { method: 'POST', body: { handle: 'owner' } });
+  const first = await mock.request<{ id: string }>('/folders/children', { method: 'POST', body: { parent_id: 'root', name: '資料📁 A' } });
+  await mock.request('/folders/children', { method: 'POST', body: { parent_id: 'root', name: '資料📁 B' } });
+  const page = await mock.request<{ items: Array<{ entry: { name: string } }>; next_cursor: string }>('/entries/search?q=%E8%B3%87%E6%96%99%F0%9F%93%81&limit=1');
+  expect(page.items).toHaveLength(1);
+  const next = await mock.request<{ items: Array<{ entry: { name: string } }> }>(`/entries/search?q=%E8%B3%87%E6%96%99%F0%9F%93%81&limit=1&cursor=${encodeURIComponent(page.next_cursor)}`);
+  expect(next.items[0]?.entry.name).toBe('資料📁 B');
+  await expect(mock.request(`/entries/search?q=%E8%B3%87%E6%96%99%F0%9F%93%81&cursor=${encodeURIComponent(btoa('null'))}`)).rejects.toMatchObject({ status: 400 });
+  await mock.request(`/entries/${first.id}`, { method: 'DELETE' });
+  await expect(mock.request(`/entries/search?q=%E8%B3%87%E6%96%99%F0%9F%93%81&cursor=${encodeURIComponent(page.next_cursor)}`)).rejects.toMatchObject({ status: 409 });
+});
+
+test('successful search refresh clears move uncertainty', async ({ page }) => {
+  await login(page);
+  await page.route('**/entries/search**', (route) => route.fulfill({ json: { items: [{ entry: { id: 'file-1', parent_id: 'root-1', name: 'Welcome.txt', kind: 'file', etag: '"g1"', size: 13 }, location: [{ id: 'root-1', parent_id: null, name: '', kind: 'folder', etag: 'root-1:1' }] }], next_cursor: null, has_more: false } }));
+  await page.route('**/folders/folder-1/children**', (route) => route.fulfill({ json: { items: [], next_cursor: null, has_more: false } }));
+  await page.route('**/entries/file-1/move', (route) => route.fulfill({ status: 500, json: { code: 'internal_error' } }));
+  await page.getByRole('button', { name: 'New folder', exact: true }).click();
+  await page.getByLabel('Folder name', { exact: true }).fill('Work');
+  await page.getByRole('button', { name: 'Create folder' }).click();
+  await page.getByLabel('Search files and folders').fill('Welcome');
+  await page.getByRole('button', { name: 'Options for Welcome.txt' }).click();
+  await page.getByRole('menuitem', { name: 'Move' }).click();
+  await page.getByLabel('Destination folders').getByRole('button', { name: 'Work' }).click();
+  await page.getByRole('button', { name: 'Move here' }).click();
+  await expect(page.getByRole('button', { name: 'Close and refresh files' })).toBeVisible();
+  await page.getByRole('button', { name: 'Close and refresh files' }).click();
+  await expect(page.getByRole('button', { name: 'Options for Welcome.txt' })).toBeVisible();
+  await page.getByRole('button', { name: 'Options for Welcome.txt' }).click();
+  await expect(page.getByRole('menuitem', { name: 'Move' })).toBeEnabled();
 });
 
 test('narrow viewport keeps sign-in and durability warning visible', async ({ page }) => {

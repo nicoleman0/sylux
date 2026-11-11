@@ -3,7 +3,7 @@ use super::names::{EntryName, NAME_KEY_VERSION};
 use super::upload::folder_etag;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-const MAX_ENTRY_DEPTH: i64 = 128;
+pub(super) const MAX_ENTRY_DEPTH: i64 = 128;
 
 #[derive(Debug)]
 pub enum NamespaceError {

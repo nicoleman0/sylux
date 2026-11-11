@@ -22,7 +22,7 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import { Progress } from '$lib/components/ui/progress/index.js';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
-  import { ListingApi, type Entry, type Folder, type DeletedEntry } from './lib/listing';
+  import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
 
@@ -124,6 +124,7 @@
   async function navigate(destination: 'files' | 'trash' | 'account' | 'settings', record = true): Promise<void> {
     if (!user) { view = 'login'; return; }
     if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
+    if (destination !== 'files') clearSearch();
     accountView = destination === 'account'; settingsView = destination === 'settings'; showTrash = destination === 'trash';
     if (destination !== 'files') selectedFileName = '';
     accountNotice = '';
@@ -136,6 +137,7 @@
 
   async function restoreNavigation(event: PopStateEvent): Promise<void> {
     if (!user) return;
+    clearSearch();
     const generation = sessionGeneration;
     const state = event.state;
     const destination = window.location.hash.slice(1).split('/')[0];
@@ -192,6 +194,22 @@
   let loading = $state(false);
   let listingError = $state('');
   let listingRequest = 0;
+  let searchInput = $state('');
+  let searchQuery = $state('');
+  let searchItems = $state<SearchHit[]>([]);
+  let searchLoading = $state(false);
+  let searchError = $state('');
+  let searchInputError = $state('');
+  let searchRetryCursor = $state<string | null>(null);
+  let searchRetryPage = $state(0);
+  let searchPageCursors = $state<(string | null)[]>([null]);
+  let searchPageIndex = $state(0);
+  let searchNextCursor = $state<string | null>(null);
+  let searchHasMore = $state(false);
+  let searchRequest = 0;
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  let searchController: AbortController | null = null;
+  let browseDirty = false;
   let notice = $state('');
   let folderName = $state('');
   let folderBusy = $state(false);
@@ -275,6 +293,7 @@
 
   async function refresh(): Promise<boolean> {
     if (!user) return false;
+    if (searchQuery) { browseDirty = true; return runSearch(); }
     const generation = sessionGeneration;
     let folderId = currentFolder.id;
     const requestId = ++listingRequest;
@@ -295,6 +314,128 @@
     }
     catch { if (generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest) listingError = 'Could not load this folder. Try again.'; return false; }
     finally { if (generation === sessionGeneration && requestId === listingRequest) loading = false; }
+  }
+
+  function clearSearch(restoreBrowse = false): void {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = null;
+    searchController?.abort(); searchController = null;
+    searchRequest++;
+    searchInput = ''; searchQuery = ''; searchItems = [];
+    searchLoading = false; searchError = ''; searchInputError = ''; searchRetryCursor = null; searchRetryPage = 0;
+    searchPageCursors = [null]; searchPageIndex = 0;
+    searchNextCursor = null; searchHasMore = false;
+    if (restoreBrowse && browseDirty && user) void restoreBrowsingPage();
+    else browseDirty = false;
+  }
+
+  async function clearSearchFromButton(): Promise<void> {
+    clearSearch(true);
+    await tick();
+    document.getElementById('file-search')?.focus();
+  }
+
+  async function restoreBrowsingPage(): Promise<void> {
+    const generation = sessionGeneration;
+    const folderId = currentFolder.id;
+    const target = pageIndex;
+    const cursor = pageCursors[target];
+    const request = ++listingRequest;
+    loading = true; listingError = '';
+    try {
+      const page = await listing.children(folderId, cursor);
+      if (generation !== sessionGeneration || request !== listingRequest || searchQuery || currentFolder.id !== folderId) return;
+      entries = page.items; nextCursor = page.next_cursor; hasMore = page.has_more; browseDirty = false;
+      for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
+    } catch (error) {
+      if (generation !== sessionGeneration || request !== listingRequest || searchQuery || currentFolder.id !== folderId) return;
+      if (error instanceof HttpError && error.status === 409) {
+        await refresh();
+        notice = 'This folder changed. The listing has been restarted.';
+      } else listingError = 'Could not load this folder. Try again.';
+    } finally { if (generation === sessionGeneration && request === listingRequest) loading = false; }
+  }
+
+  function searchChanged(): void {
+    if (!searchInput) { clearSearch(true); return; }
+    if (searchTimer) clearTimeout(searchTimer);
+    searchController?.abort(); searchController = null;
+    searchRequest++;
+    searchQuery = searchInput;
+    searchItems = []; searchError = ''; searchInputError = ''; searchRetryCursor = null; searchRetryPage = 0;
+    searchPageCursors = [null]; searchPageIndex = 0;
+    searchNextCursor = null; searchHasMore = false;
+    if (new TextEncoder().encode(searchQuery).length > 255) {
+      searchInputError = 'Search is too long. Try a shorter name.';
+      searchLoading = false;
+      return;
+    }
+    if ([...searchQuery].some((char) => /\p{Cc}/u.test(char))) {
+      searchInputError = 'Remove control characters from your search.';
+      searchLoading = false;
+      return;
+    }
+    searchLoading = true;
+    searchTimer = setTimeout(() => { searchTimer = null; void runSearch(); }, 250);
+  }
+
+  async function runSearch(cursor: string | null = null, targetPage = 0): Promise<boolean> {
+    if (!user || !searchQuery || searchInputError) return false;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = null;
+    searchController?.abort();
+    const controller = new AbortController(); searchController = controller;
+    const request = ++searchRequest;
+    const generation = sessionGeneration;
+    const query = searchQuery;
+    searchLoading = true; searchError = '';
+    try {
+      const page = await listing.search(query, cursor, controller.signal);
+      if (request !== searchRequest || generation !== sessionGeneration || query !== searchQuery || accountView || settingsView || showTrash) return false;
+      searchItems = page.items;
+      moveNeedsRefresh = false;
+      searchRetryCursor = null; searchRetryPage = 0;
+      searchPageIndex = targetPage;
+      searchPageCursors = targetPage === 0 ? [null] : [...searchPageCursors.slice(0, targetPage), cursor];
+      searchNextCursor = page.next_cursor; searchHasMore = page.has_more;
+      for (const hit of page.items) {
+        knownParents.set(hit.entry.id, hit.entry.parent_id);
+        for (const folder of hit.location) knownParents.set(folder.id, folder.parent_id);
+      }
+      return true;
+    } catch (error) {
+      if (request !== searchRequest || generation !== sessionGeneration || query !== searchQuery) return false;
+      if (error instanceof HttpError && error.status === 409) {
+        if (cursor) { await runSearch(); notice = 'Files changed. Search results have been restarted.'; }
+      } else {
+        searchRetryCursor = cursor; searchRetryPage = targetPage;
+        searchError = 'Could not search files. Try again.';
+      }
+      return false;
+    } finally {
+      if (request === searchRequest && generation === sessionGeneration) { searchLoading = false; searchController = null; }
+    }
+  }
+
+  async function searchNext(): Promise<void> {
+    if (searchHasMore && searchNextCursor && !searchLoading) await runSearch(searchNextCursor, searchPageIndex + 1);
+  }
+
+  async function searchPrevious(): Promise<void> {
+    if (searchPageIndex > 0 && !searchLoading) await runSearch(searchPageCursors[searchPageIndex - 1], searchPageIndex - 1);
+  }
+
+  async function openSearchFolder(hit: SearchHit, containing = false): Promise<void> {
+    const path = containing ? hit.location : [...hit.location, hit.entry as Folder];
+    const folder = path.at(-1);
+    if (!folder) return;
+    clearSearch();
+    folderPath = path.map((item, index) => index === 0 ? { ...item, name: 'Files' } : item);
+    currentFolder = folderPath.at(-1)!;
+    accountView = false; settingsView = false; showTrash = false;
+    recordNavigation();
+    await refresh();
+    await tick(); document.getElementById('folder-title')?.focus();
   }
 
   async function loadMore(): Promise<void> {
@@ -419,6 +560,7 @@
     finally { if (generation === sessionGeneration) accountBusy = false; }
   }
   function clearWorkspace(): void {
+    clearSearch();
     navigationPaths.clear();
     controller?.abort(); controller = null;
     replacementPrompt = null; uploadReplacement = false; selectedFileName = '';
@@ -516,7 +658,7 @@
   }
   async function renameEntry(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    const target = entries.find((entry) => entry.id === renameId);
+    const target = searchQuery ? searchItems.find((hit) => hit.entry.id === renameId)?.entry : entries.find((entry) => entry.id === renameId);
     if (!target || !renameName.trim() || renameBusy) return;
     const generation = sessionGeneration;
     renameBusy = true; renameError = '';
@@ -959,6 +1101,7 @@
   }
 
   async function openFolder(folder: Folder): Promise<void> {
+    clearSearch();
     const index = folderPath.findIndex((item) => item.id === folder.id);
     folderPath = index >= 0 ? folderPath.slice(0, index + 1) : [...folderPath, folder];
     const generation = sessionGeneration;
@@ -1048,6 +1191,32 @@
               {#if folderPath.length > 1}<nav class="breadcrumb" aria-label="Folder path">{#each folderPath.slice(0, -1) as folder (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" onclick={() => openFolder(folder)}>{folder.name}</Button><span aria-hidden="true">/</span>{/each}</nav>{/if}
               <h1 id="folder-title" tabindex="-1">{currentFolder.name}</h1>
             </div>
+            <div class="search-toolbar">
+              <Label for="file-search">Search files and folders</Label>
+              <div class="search-controls"><Input id="file-search" type="search" placeholder="Search by name" maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} />
+                {#if searchQuery}<Button variant="outline" type="button" onclick={clearSearchFromButton}>Clear search</Button>{/if}
+              </div>
+            </div>
+            {#if searchQuery}
+              <section aria-label="Search results" aria-busy={searchLoading} class="search-results">
+                {#if searchLoading}<p role="status">Searching…</p>
+                {:else if searchInputError}<p role="alert">{searchInputError}</p>
+                {:else if searchError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Search failed</Alert.Title><Alert.Description><p>{searchError}</p><Button variant="outline" size="sm" class="mt-2" onclick={() => runSearch(searchRetryCursor, searchRetryPage)}>Try again</Button></Alert.Description></Alert.Root>
+                {:else if searchItems.length === 0}<p>No matching files or folders.</p>
+                {:else}<div class="file-list"><div class="list-head"><span>Name and location</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>
+                  {#each searchItems as hit (hit.entry.id)}
+                    <article aria-label={hit.entry.name} class="file-row search-row">
+                      <div class="search-item-main"><button type="button" class="item-name" aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="filename">{hit.entry.name}</span></button>
+                        <div class="search-location"><span>Files{#each hit.location.slice(1) as folder (folder.id)}{' / '}{folder.name}{/each}</span><Button variant="link" size="sm" onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
+                      </div><span class="file-size">{hit.entry.kind === 'folder' ? '—' : typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : '—'}</span>
+                      <EntryOptions entry={hit.entry} disabled={!!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} />
+                    </article>
+                  {/each}
+                </div>{/if}
+                {#if searchPageIndex > 0 || searchHasMore}<div class="flex flex-wrap gap-2 mt-3">{#if searchPageIndex > 0}<Button variant="outline" size="sm" onclick={searchPrevious} disabled={searchLoading}>Previous page</Button>{/if}{#if searchHasMore}<Button variant="outline" size="sm" onclick={searchNext} disabled={searchLoading}>Next page</Button>{/if}</div>{/if}
+                {#if !searchLoading && !searchError && !searchInputError}<p class="list-summary">{searchItems.length} {searchItems.length === 1 ? 'result' : 'results'}{searchHasMore || searchPageIndex > 0 ? ' on this page' : ''}</p>{/if}
+              </section>
+            {:else}
             <section class="upload-toolbar" aria-label="Upload files">
               <Button variant="outline" disabled={folderBusy || !currentFolder.id} onclick={(event) => beginCreate(event.currentTarget as HTMLElement)}><PlusIcon />New folder</Button>
               <form class="upload-form" onsubmit={upload}>
@@ -1072,9 +1241,9 @@
             {#if dropPending}<p role="status">Moving {dropPending.entry.name} to {dropPending.destination.name}…</p>{/if}
             {#if dropError}<p role="alert">{dropError}</p>{/if}
             {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading}>Next page</Button>{/if}</div>{/if}
-            {#if notice}<Alert.Root role="status"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
-
             <p class="list-summary">{loading ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
+            {/if}
+            {#if notice}<Alert.Root role="status"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
         {/if}
       </main>

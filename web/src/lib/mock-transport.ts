@@ -1,6 +1,6 @@
 import { HttpError, type ApiTransport, type RequestOptions } from './api';
 import type { User, Account } from './session';
-import type { Entry, Folder } from './listing';
+import type { Entry, Folder, SearchHit } from './listing';
 import type { UploadStatus } from './transfers';
 
 const root: Folder = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root-1"' };
@@ -61,6 +61,52 @@ export class MockTransport implements ApiTransport {
       return { account_id: this.user.id, handle: this.user.handle, role: this.user.role } as T;
     }
     if (route === '/auth/logout' && method === 'POST') { this.user = null; return undefined as T; }
+    if (route === '/entries/search' && method === 'GET') {
+      if (!this.user) throw new HttpError(401);
+      const params = new URLSearchParams(path.split('?')[1]);
+      const query = params.get('q') ?? '';
+      const limit = Number(params.get('limit') ?? '100');
+      if (!query || new TextEncoder().encode(query).length > 255 || /[\u0000-\u001f\u007f]/.test(query)) throw new HttpError(400);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new HttpError(400);
+      const fold = (value: string) => value.normalize('NFC').toLowerCase().normalize('NFC');
+      const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+      const locationFor = (entry: Entry): Folder[] | null => {
+        const path: Folder[] = [];
+        let parentId: string | null = entry.parent_id;
+        const seen = new Set<string>();
+        while (parentId) {
+          if (seen.has(parentId)) return null;
+          seen.add(parentId);
+          const parent: Folder | undefined = parentId === root.id ? root : this.entries.find((item): item is Folder => item.kind === 'folder' && item.id === parentId);
+          if (!parent) return null;
+          path.unshift(parent); parentId = parent.parent_id;
+        }
+        return path[0]?.id === root.id ? path : null;
+      };
+      const hits: SearchHit[] = this.entries.flatMap((entry) => {
+        const location = locationFor(entry);
+        return location && fold(entry.name).includes(fold(query)) ? [{ entry, location }] : [];
+      }).sort((a, b) => compare(fold(a.entry.name), fold(b.entry.name)) ||
+        compare(fold(a.location.slice(1).map((part) => part.name).join('\0')), fold(b.location.slice(1).map((part) => part.name).join('\0'))) ||
+        compare(a.entry.id, b.entry.id));
+      const fingerprint = JSON.stringify(this.entries.map((entry) => [entry.id, entry.parent_id, entry.name, entry.etag]));
+      const encodeCursor = (value: object): string => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
+      const decodeCursor = (value: string): unknown => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(value), (char) => char.charCodeAt(0))));
+      let offset = 0;
+      if (params.has('cursor')) {
+        let cursor: { query: string; offset: number; fingerprint: string };
+        let parsed: unknown;
+        try { parsed = decodeCursor(params.get('cursor')!); } catch { throw new HttpError(400); }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new HttpError(400);
+        cursor = parsed as typeof cursor;
+        if (cursor.query !== query || !Number.isInteger(cursor.offset) || cursor.offset < 1) throw new HttpError(400);
+        if (cursor.fingerprint !== fingerprint) throw new HttpError(409);
+        if (cursor.offset >= hits.length) throw new HttpError(400);
+        offset = cursor.offset;
+      }
+      const end = Math.min(offset + limit, hits.length);
+      return { items: hits.slice(offset, end), next_cursor: end < hits.length ? encodeCursor({ query, offset: end, fingerprint }) : null, has_more: end < hits.length } as T;
+    }
     if (route === '/folders/children' && method === 'GET') return { root, items: [...this.entries.filter((entry) => entry.parent_id === root.id)], next_cursor: null, has_more: false } as T;
     if (route.startsWith('/folders/') && route.endsWith('/children') && method === 'GET') {
       const folderId = decodeURIComponent(route.split('/')[2]!);

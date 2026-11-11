@@ -110,6 +110,7 @@ pub fn router(state: AuthState) -> Router {
             axum::routing::patch(entries::rename).delete(entries::trash),
         )
         .route("/trash", get(entries::trash_listing))
+        .route("/entries/search", get(entries::search))
         .route("/entries/{id}/move", post(entries::move_entry))
         .route("/trash/{id}/restore", axum::routing::post(entries::restore))
         .route("/instance", get(instance::get).patch(instance::update))
