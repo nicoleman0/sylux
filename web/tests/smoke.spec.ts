@@ -1259,13 +1259,29 @@ test('browser history cannot reveal a previous account folder after reload', asy
 test('sidebar collapses to named icons and preserves navigation', async ({ page }) => {
   await login(page);
   const sidebar = page.locator('[data-slot="sidebar"]').first();
+  const iconSpread = () => sidebar.locator('[data-sidebar="menu-button"] > svg').evaluateAll((icons) => {
+    const centers = icons.map((icon) => { const rect = icon.getBoundingClientRect(); return rect.x + rect.width / 2; });
+    return Math.max(...centers) - Math.min(...centers);
+  });
+  expect(await iconSpread()).toBeLessThan(1);
+  const workspace = await page.locator('[data-slot="sidebar-inset"]').boundingBox();
+  const footer = await page.locator('.beta-notice').boundingBox();
+  expect(footer!.x).toBeCloseTo(workspace!.x, 0);
+  expect(footer!.width).toBeCloseTo(workspace!.width, 0);
+  expect(footer!.y + footer!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+
   await page.locator('[data-slot=sidebar-trigger]').click();
   await expect(sidebar).toHaveAttribute('data-state', 'collapsed');
   await expect(page.getByRole('button', { name: 'Files', exact: true })).toHaveAttribute('data-active', 'true');
   await expect(page.locator('.sidebar-brand')).toBeHidden();
   await expect(page.locator('.sidebar-account')).toBeHidden();
+  await expect.poll(iconSpread).toBeLessThan(1);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  const accountRow = await page.locator('.account-row').first().boundingBox();
+  expect(accountRow!.width).toBeLessThanOrEqual(680);
+  expect(accountRow!.height).toBeLessThanOrEqual(64);
+
   await page.getByRole('button', { name: 'Account', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Account', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Files', exact: true }).click();

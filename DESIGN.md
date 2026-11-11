@@ -46,7 +46,7 @@ typography:
     fontWeight: 400
 rounded:
   sm: "2px"
-  control: "5px"
+  control: "9px"
   dialog: "9px"
 spacing:
   xs: "4px"
@@ -138,7 +138,7 @@ Cool green-gray neutrals establish the workspace, with muted teal for actions an
 
 ## Layout
 
-The signed-in shell uses the shadcn-svelte sidebar-07 pattern: a collapsible icon rail beside an inset workspace with a 56px header. Below 768px, the header trigger opens navigation in a drawer. At 620px and below, content uses 17px side padding. File rows keep name, size and action columns aligned; the size column contracts on mobile. Account and settings sections cap at 840px. The common spacing rhythm includes 4, 8, 12, 16, 24 and 32px, with larger page insets for the main content.
+The signed-in shell uses the shadcn-svelte sidebar-07 pattern: a collapsible icon rail beside an inset workspace with a 56px header. Below 768px, the header trigger opens navigation in a drawer. At 620px and below, content uses 17px side padding. File rows keep name, size and action columns aligned; the size column contracts on mobile. Account sections cap at 840px; administrator Settings cap at 680px. The beta notice sits within the workspace and follows its content insets. The common spacing rhythm includes 4, 8, 12, 16, 24 and 32px, with larger page insets for the main content.
 
 **The Open Workspace Rule.** Let rows and section separators organize content; avoid enclosing the full file workspace in a card.
 
@@ -151,12 +151,12 @@ Most surfaces stay flat, separated by borders and tonal shifts. The shared shado
 
 ## Shapes
 
-Controls and navigation use compact 5px corners. File rows remain square and use thin bottom separators; small file-name controls use a 2px corner. Dialogs use broader 9px corners. The recurring focus treatment is a 2px outline with a 3px offset in the theme ring color.
+Controls and navigation share rounded corners from the radius scale. Buttons use 9px corners. File rows remain square and use thin bottom separators; small file-name controls use a 2px corner. Dialogs and workspace surfaces use 13px corners. The recurring focus treatment is a 2px outline with a 3px offset in the theme ring color.
 
 ## Components
 
 ### Buttons
-- **Shape:** Compact 5px radius and a 32px minimum height on desktop; 44px minimum for coarse pointers.
+- **Shape:** Rounded 9px radius and a 32px minimum height on desktop; 44px minimum for coarse pointers.
 - **Primary:** Teal fill with theme-appropriate foreground; medium-weight text. Hover reduces fill intensity; pressed state shifts down by 1px.
 - **Secondary:** Surface fill with a thin border; hover shifts to the muted surface.
 - **Ghost:** No resting border or fill; hover uses the muted surface. Active navigation adds the selected surface and teal text/icon.
@@ -177,7 +177,7 @@ Controls and navigation use compact 5px corners. File rows remain square and use
 
 ### Administrator Settings
 - **Style:** Account and instance sections share the open content shell, section separators and restrained headings.
-- **Behavior:** Settings tabs use a bottom rule with teal active text and underline. Account rows align identity, role/status and actions; explanatory copy remains close to consequential controls.
+- **Behavior:** Settings tabs use a bottom rule with teal active text and underline. Compact account rows align identity, role/status and actions; explanatory copy remains close to consequential controls.
 
 ## Do's and Don'ts
 
