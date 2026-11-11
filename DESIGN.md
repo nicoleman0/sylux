@@ -60,17 +60,17 @@ components:
     backgroundColor: "{colors.primary}"
     textColor: "{colors.primary-foreground}"
     rounded: "{rounded.control}"
-    height: "44px"
+    height: "32px"
   button-secondary:
     backgroundColor: "{colors.background}"
     textColor: "{colors.foreground}"
     rounded: "{rounded.control}"
-    height: "44px"
+    height: "32px"
   button-danger:
     backgroundColor: "{colors.destructive}"
     textColor: "#ffffff"
     rounded: "{rounded.control}"
-    height: "44px"
+    height: "32px"
   input:
     backgroundColor: "{colors.background}"
     textColor: "{colors.foreground}"
@@ -138,7 +138,7 @@ Cool green-gray neutrals establish the workspace, with muted teal for actions an
 
 ## Layout
 
-The application shell places a 65px sticky header above a 212px desktop navigation rail and flexible content. The rail narrows to 180px below 1000px. At 620px and below, navigation becomes a sticky horizontal strip below the 59px header, and the content uses 17px side padding. File rows keep name, size and action columns aligned; the size column contracts on mobile. Account and settings sections cap at 840px. The common spacing rhythm includes 4, 8, 12, 16, 24 and 32px, with larger page insets for the main content.
+The signed-in shell uses the shadcn-svelte sidebar-07 pattern: a collapsible icon rail beside an inset workspace with a 56px header. Below 768px, the header trigger opens navigation in a drawer. At 620px and below, content uses 17px side padding. File rows keep name, size and action columns aligned; the size column contracts on mobile. Account and settings sections cap at 840px. The common spacing rhythm includes 4, 8, 12, 16, 24 and 32px, with larger page insets for the main content.
 
 **The Open Workspace Rule.** Let rows and section separators organize content; avoid enclosing the full file workspace in a card.
 
@@ -156,7 +156,7 @@ Controls and navigation use compact 5px corners. File rows remain square and use
 ## Components
 
 ### Buttons
-- **Shape:** Compact 5px radius and a 44px minimum height.
+- **Shape:** Compact 5px radius and a 32px minimum height on desktop; 44px minimum for coarse pointers.
 - **Primary:** Teal fill with theme-appropriate foreground; medium-weight text. Hover reduces fill intensity; pressed state shifts down by 1px.
 - **Secondary:** Surface fill with a thin border; hover shifts to the muted surface.
 - **Ghost:** No resting border or fill; hover uses the muted surface. Active navigation adds the selected surface and teal text/icon.
@@ -168,8 +168,8 @@ Controls and navigation use compact 5px corners. File rows remain square and use
 - **Focus / Error / Disabled:** Theme ring focus; invalid fields use destructive border and ring; disabled fields reduce opacity.
 
 ### Navigation
-- **Desktop:** Vertical sidebar destinations with icon and label; current location uses the selected surface and teal foreground.
-- **Mobile:** Sticky horizontal destinations below the header; account and settings utilities reduce to icon controls.
+- **Desktop:** Collapsible sidebar with instance home link, Files, Trash and administrator Settings; account details sit at the bottom. Current location uses the selected surface and teal foreground.
+- **Mobile:** Header trigger opens a navigation drawer, which closes after choosing a destination.
 
 ### File Rows
 - **Style:** Flat rows with aligned name, size and action columns, 1px separators and a 59px minimum height on desktop.

@@ -1,5 +1,7 @@
 <script lang="ts">
   import './app.css';
+  import * as Sidebar from '$lib/components/ui/sidebar/index.js';
+  import AppSidebar from '$lib/components/app-sidebar.svelte';
   import { onMount, tick } from 'svelte';
   import MoonIcon from '@lucide/svelte/icons/moon';
   import SunIcon from '@lucide/svelte/icons/sun';
@@ -1280,6 +1282,7 @@
 
 <div class="app-shell">
   <a class="skip-link" href="#main-content">Skip to content</a>
+  {#if !user || loggingOut}
   <header class="app-header">
     <a class="brand" href="#files" onclick={home}><FolderOpenIcon /><span>{instanceName}</span></a>
     <div class="header-actions">
@@ -1287,6 +1290,7 @@
       {#if user && !loggingOut}<HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>{/if}
     </div>
   </header>
+  {/if}
   {#if loggingOut}
     <main id="main-content" class="signin-main"><p role="status">Signing out…</p></main>
   {:else if !user}
@@ -1305,19 +1309,37 @@
       </section>
     </main>
   {:else}
-    <div class="workspace-layout">
-      <aside class="workspace-sidebar" aria-label="Workspace navigation">
-        <nav class="nav-group" aria-label="Files">
-          <Button variant="ghost" class={`nav-link ${!showTrash && !accountView && !settingsView ? 'active' : ''} ${dropTarget === folders[0]?.id ? 'drop-active' : ''}`} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={async () => { if (folders[0]) await openFolder(folders[0]); await navigate('files'); }}><FolderIcon />Files</Button>
-          <Button variant="ghost" class={`nav-link ${showTrash ? 'active' : ''}`} aria-current={showTrash ? 'page' : undefined} onclick={openTrash}><TrashIcon />Trash</Button>
-        </nav>
-        <nav class="nav-group nav-bottom" aria-label="Account">
-          <Button variant="ghost" class={`nav-link ${accountView ? 'active' : ''}`} aria-current={accountView ? 'page' : undefined} onclick={() => navigate('account')}><UserRoundIcon /><span>Account</span></Button>
-          {#if user.role === 'administrator'}<Button variant="ghost" class={`nav-link ${settingsView ? 'active' : ''}`} aria-current={settingsView ? 'page' : undefined} onclick={() => navigate('settings')}><SettingsIcon /><span>Settings</span></Button>{/if}
-        </nav>
-        <p class="sidebar-note">Sylux beta</p>
-      </aside>
-      <main id="main-content" class="workspace-main">
+    <Sidebar.Provider>
+      <AppSidebar {instanceName} onhome={home}>
+        {#snippet navigation(close)}
+          <nav aria-label="Files"><Sidebar.Menu>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" isActive={!showTrash && !accountView && !settingsView} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={async () => { if (folders[0]) await openFolder(folders[0]); await navigate('files'); close(); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Trash" aria-label="Trash" isActive={showTrash} aria-current={showTrash ? 'page' : undefined} onclick={async () => { await openTrash(); close(); }}><TrashIcon /><span>Trash</span></Sidebar.MenuButton></Sidebar.MenuItem>
+
+          </Sidebar.Menu></nav>
+          {#if user?.role === 'administrator'}
+            <nav aria-label="Administration" class="mt-4"><Sidebar.Menu><Sidebar.MenuItem>
+              <Sidebar.MenuButton tooltipContent="Settings" aria-label="Settings" isActive={settingsView} aria-current={settingsView ? 'page' : undefined} onclick={async () => { await navigate('settings'); close(); }}><SettingsIcon /><span>Settings</span></Sidebar.MenuButton>
+            </Sidebar.MenuItem></Sidebar.Menu></nav>
+          {/if}
+        {/snippet}
+        {#snippet account(close)}
+          <nav aria-label="Account"><Sidebar.Menu><Sidebar.MenuItem>
+            <Sidebar.MenuButton size="lg" tooltipContent="Account" aria-label="Account" isActive={accountView} aria-current={accountView ? 'page' : undefined} onclick={async () => { await navigate('account'); close(); }}>
+              <UserRoundIcon /><span class="sidebar-account"><span>{user?.handle}</span><span class="sidebar-account-role">{user?.role === 'administrator' ? 'Administrator' : 'User'}</span></span>
+            </Sidebar.MenuButton>
+          </Sidebar.MenuItem></Sidebar.Menu></nav>
+        {/snippet}
+      </AppSidebar>
+      <Sidebar.Inset class="min-w-0">
+        <header class="app-header workspace-header">
+          <div class="workspace-location"><Sidebar.Trigger /><span class="header-divider"></span><span>{settingsView ? 'Settings' : accountView ? 'Account' : showTrash ? 'Trash' : 'Files'}</span></div>
+          <div class="header-actions">
+            <HeaderIconButton label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} pressed={darkMode} onclick={toggleTheme}>{#if darkMode}<SunIcon />{:else}<MoonIcon />{/if}</HeaderIconButton>
+            <HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>
+          </div>
+        </header>
+        <div id="main-content" class="workspace-main">
         {#if accountView}
           <section class="account-content">
             <h1 id="account-title" tabindex="-1">Account</h1>
@@ -1428,8 +1450,9 @@
             {#if notice}<Alert.Root role="status"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
         {/if}
-      </main>
-    </div>
+        </div>
+      </Sidebar.Inset>
+    </Sidebar.Provider>
     <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client} onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }} />
     <Dialog.Root open={createOpen} onOpenChange={(open) => { if (!folderBusy) createOpen = open; }}>
       <Dialog.Content showCloseButton={!folderBusy} onOpenAutoFocus={(event) => { event.preventDefault(); folderInput?.focus(); }} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(createTrigger); createTrigger = null; }}>
