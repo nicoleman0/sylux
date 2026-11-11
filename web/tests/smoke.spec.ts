@@ -554,6 +554,7 @@ test('account screens create, reset, disable and change passwords', async ({ pag
 test('settings tab selection draws only the underline and keeps keyboard focus visible', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeFocused();
 
   const accounts = page.getByRole('button', { name: 'Accounts', exact: true });
   const instance = page.getByRole('button', { name: 'Instance', exact: true });
