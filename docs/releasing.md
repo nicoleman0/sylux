@@ -28,7 +28,9 @@ disposable Linux host. The workflows install their own prerequisites.
    runs recovery against that exact image ID. A failed check prevents publication.
 4. With `publish` true, the workflow publishes only from the public canonical
    repository's `main` branch. It creates a new prerelease at the checked commit.
-   An existing release/tag must not be reused; use a new beta number for changes.
+   It checks asset names while the release is a draft, then verifies anonymous
+   downloads and checksums after publishing. A failed download check returns the
+   release to draft. An existing release/tag must not be reused; use a new beta number for changes.
 5. Confirm all assets download without authentication, check `SHA256SUMS`, and
    follow the installation guide on the target host. Record that host's observed
    limitations before inviting testers. Feedback goes to hello@corvus-dev.com.

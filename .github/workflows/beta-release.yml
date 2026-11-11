@@ -115,6 +115,28 @@ jobs:
           Physical durability and schema upgrades are not qualified. Keep independent copies.
           Feedback: hello@corvus-dev.com
           EOF_NOTES
-          gh release create "$VERSION" sylux-image.tar.gz SHA256SUMS image-id.txt release.json compose.yaml .env.example docker-beta.md \
+          gh release create "$VERSION" sylux-image.tar.gz SHA256SUMS image-id.txt release.json compose.yaml env.example docker-beta.md \
             --target "$REVISION" --title "Sylux $VERSION" --prerelease --latest=false \
-            --notes-file "$RUNNER_TEMP/release-notes.md"
+            --draft --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release view "$VERSION" --json assets > "$RUNNER_TEMP/assets.json"
+          python3 - "$RUNNER_TEMP/assets.json" <<'PY'
+          import json, pathlib, sys
+          expected = {'sylux-image.tar.gz', 'SHA256SUMS', 'image-id.txt', 'release.json', 'compose.yaml', 'env.example', 'docker-beta.md'}
+          assets = json.loads(pathlib.Path(sys.argv[1]).read_text())['assets']
+          assert {asset['name'] for asset in assets} == expected, 'Release asset names changed'
+          assert all(asset['size'] > 0 for asset in assets), 'Empty release asset'
+          PY
+          gh release edit "$VERSION" --draft=false
+          mkdir "$RUNNER_TEMP/public-download"
+          cd "$RUNNER_TEMP/public-download"
+          for asset in sylux-image.tar.gz SHA256SUMS image-id.txt release.json compose.yaml env.example docker-beta.md; do
+            if ! curl --fail --location --silent --show-error --retry 3 \
+              --output "$asset" "https://github.com/$GH_REPO/releases/download/$VERSION/$asset"; then
+              gh release edit "$VERSION" --draft
+              exit 1
+            fi
+          done
+          if ! sha256sum --check SHA256SUMS; then
+            gh release edit "$VERSION" --draft
+            exit 1
+          fi

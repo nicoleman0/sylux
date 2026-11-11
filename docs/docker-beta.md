@@ -13,7 +13,7 @@ RELEASE='<published release tag>'
 mkdir -m 0700 sylux-install || exit 1
 cd sylux-install || exit 1
 BASE="https://github.com/nicoleman0/sylux/releases/download/${RELEASE}"
-for asset in sylux-image.tar.gz SHA256SUMS image-id.txt compose.yaml .env.example docker-beta.md release.json; do
+for asset in sylux-image.tar.gz SHA256SUMS image-id.txt compose.yaml env.example docker-beta.md release.json; do
   curl --fail --location --show-error --output "$asset" "$BASE/$asset" || exit 1
 done
 sha256sum -c SHA256SUMS || exit 1
@@ -63,7 +63,7 @@ Install and trust `cert.pem` on each client through its operating system or brow
 Create `.env` from the verified image ID. Keep the default paths unless you have prepared equivalent absolute host paths:
 
 ```sh
-cp .env.example .env
+cp env.example .env
 chmod 0600 .env
 sed -i "s|^SYLUX_IMAGE=.*|SYLUX_IMAGE=$IMAGE_ID|" .env
 docker compose config -q || exit 1

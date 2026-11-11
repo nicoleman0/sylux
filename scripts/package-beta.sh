@@ -24,7 +24,8 @@ image_id=$(docker image inspect --format '{{.Id}}' "$image")
 [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_id")" == linux/amd64 ]]
 docker save "$image" | gzip -n > "$output/sylux-image.tar.gz"
 printf '%s\n' "$image_id" > "$output/image-id.txt"
-cp "$context/deploy/docker/compose.yaml" "$context/deploy/docker/.env.example" "$context/docs/docker-beta.md" "$output/"
+cp "$context/deploy/docker/compose.yaml" "$context/docs/docker-beta.md" "$output/"
+cp "$context/deploy/docker/.env.example" "$output/env.example"
 python3 - "$output" "$version" "$revision" "$image_id" <<'PY'
 import hashlib, json, pathlib, sys
 out, version, revision, image_id = sys.argv[1:]
