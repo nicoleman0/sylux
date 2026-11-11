@@ -28,5 +28,4 @@
   </Sidebar.Header>
   <Sidebar.Content><Sidebar.Group>{@render navigation(close)}</Sidebar.Group></Sidebar.Content>
   <Sidebar.Footer>{@render account(close)}</Sidebar.Footer>
-  <Sidebar.Rail />
 </Sidebar.Root>

@@ -17,6 +17,9 @@
   import FolderIcon from '@lucide/svelte/icons/folder';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+  import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
+  import ArrowDownIcon from '@lucide/svelte/icons/arrow-down';
+  import ArrowUpDownIcon from '@lucide/svelte/icons/arrow-up-down';
   import * as Alert from '$lib/components/ui/alert/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -345,7 +348,15 @@
   }
 
   async function changeFolderSort(event: Event): Promise<void> {
-    folderSort = (event.currentTarget as HTMLSelectElement).value as FolderSort;
+    await setFolderSort((event.currentTarget as HTMLSelectElement).value as FolderSort);
+  }
+
+  function toggleFolderSort(field: 'name' | 'size'): void {
+    void setFolderSort(folderSort === `${field}_asc` ? `${field}_desc` : `${field}_asc`);
+  }
+
+  async function setFolderSort(sort: FolderSort): Promise<void> {
+    folderSort = sort;
     clearSelection();
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false;
     await refresh();
@@ -1430,7 +1441,15 @@
                 </select>
               </div>
               <span class="chosen-file" aria-live="polite">{selectedFileName}</span>
-              {#if transferBusy || progress > 0}<div class="grid basis-full justify-items-start gap-2" role="status"><div class="grid w-full gap-1 text-sm"><span class="break-all">{transferName}</span><div class="flex justify-between gap-3"><span>{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span>{progress}% transferred</span></div></div><Progress value={progress} max={100} aria-label="Upload progress" />{#if transferBusy}<Button variant="link" class="h-auto p-0" onclick={() => { if (uploadCancelable) controller?.abort(); }} disabled={!uploadCancelable}>Cancel upload</Button>{/if}</div>{/if}
+              {#if transferBusy || progress > 0}
+                <div class="upload-status" role="status">
+                  <div class="upload-status-body">
+                    <div class="upload-status-line"><span class="upload-name" title={transferName}>{transferName}</span><span class="upload-phase">{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span class="upload-percent">{progress}%</span></div>
+                    {#if transferBusy && transferPhase !== 'complete'}<Progress value={progress} max={100} aria-label="Upload progress" />{/if}
+                    {#if transferBusy}<Button variant="link" class="h-auto justify-self-start p-0" onclick={() => { if (uploadCancelable) controller?.abort(); }} disabled={!uploadCancelable}>Cancel upload</Button>{/if}
+                  </div>
+                </div>
+              {/if}
 
             </section>
             {#if entries.length && !loading && !listingError}
@@ -1441,10 +1460,17 @@
                 {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
               </div>
             {/if}
+            {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span>
+              <button type="button" class="list-sort" aria-label="Sort by name" aria-pressed={folderSort.startsWith('name_')} aria-describedby="name-sort-order" disabled={bulkBusy || bulkNeedsRefresh} onclick={() => toggleFolderSort('name')}>
+                Name<span aria-hidden="true">{#if folderSort === 'name_asc'}<ArrowUpIcon />{:else if folderSort === 'name_desc'}<ArrowDownIcon />{:else}<ArrowUpDownIcon />{/if}</span>
+              </button><span id="name-sort-order" class="sr-only">{folderSort === 'name_asc' ? 'Ascending' : folderSort === 'name_desc' ? 'Descending' : 'Not selected'}</span>
+              <button type="button" class="list-sort size-sort" aria-label="Sort by size" aria-pressed={folderSort.startsWith('size_')} aria-describedby="size-sort-order" disabled={bulkBusy || bulkNeedsRefresh} onclick={() => toggleFolderSort('size')}>
+                Size<span aria-hidden="true">{#if folderSort === 'size_asc'}<ArrowUpIcon />{:else if folderSort === 'size_desc'}<ArrowDownIcon />{:else}<ArrowUpDownIcon />{/if}</span>
+              </button><span id="size-sort-order" class="sr-only">{folderSort === 'size_asc' ? 'Ascending' : folderSort === 'size_desc' ? 'Descending' : 'Not selected'}</span><span class="sr-only">Options</span></div></div>{/if}
             {#if loading}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if listingError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Could not open this folder</Alert.Title><Alert.Description><p>{listingError}</p><Button variant="outline" size="sm" class="mt-2" onclick={refresh}>Try again</Button></Alert.Description></Alert.Root>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
-            {:else}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span><span>Name</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>{#each entries as entry (entry.id)}
+            {:else}<div class="file-list">{#each entries as entry (entry.id)}
               <article aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
                 <label class="entry-selection"><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onchange={(event) => selectEntry(entry.id, event.currentTarget.checked)} /></label>
                 <button type="button" class="item-name" aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="filename">{entry.name}</span></button><span class="file-size">{entry.kind === 'folder' ? '—' : formatSize(entry.size)}</span>
@@ -1469,7 +1495,7 @@
                 </div>
               </section>
             {/if}
-            {#if notice}<Alert.Root role="status"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
+            {#if notice}<Alert.Root role="status" class="workspace-notice"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
         {/if}
         </div>

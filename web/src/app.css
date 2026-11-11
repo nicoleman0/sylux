@@ -130,10 +130,25 @@ h1:focus, h2:focus { outline: none; }
 .search-item-main { min-width: 0; padding: 7px 0; }
 .search-location { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding-left: 29px; color: var(--muted-foreground); font-size: var(--type-meta); overflow-wrap: anywhere; }
 .search-location [data-slot="button"] { min-height: 30px; padding: 0 5px; }
+.upload-status { flex-basis: 100%; min-width: 0; padding-top: 3px; }
+.upload-status-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: min(100%, 360px); }
+.upload-status-line { display: flex; align-items: baseline; gap: 12px; font-size: var(--type-ui); }
+.upload-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-phase { color: var(--muted-foreground); }
+.upload-percent { font-variant-numeric: tabular-nums; }
+.workspace-notice { margin-top: 20px; }
 .upload-form { display: flex; align-items: center; gap: 9px; }
 .chosen-file { font-size: var(--type-ui); color: var(--muted-foreground); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 3px; }
 .file-row, .list-head { display: grid; grid-template-columns: minmax(0,1fr) 116px 44px; align-items: center; column-gap: 16px; padding: 0 7px 0 12px; border-bottom: 1px solid var(--border); }
 .list-head { height: 35px; color: var(--muted-foreground); font-size: var(--type-meta); }
+.list-sort { display: inline-flex; align-items: center; gap: 5px; justify-self: start; min-height: var(--control-height); padding: 0; border: 0; border-radius: 2px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.list-sort svg { width: var(--icon-small); height: var(--icon-small); }
+.list-sort[aria-pressed="true"], .list-sort:hover { color: var(--foreground); }
+.list-sort[aria-pressed="true"] { font-weight: var(--weight-control); }
+.list-sort:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+.list-sort:disabled { cursor: default; opacity: .5; }
+.list-sort.size-sort { justify-self: end; }
+@media (pointer: coarse) { .list-head.selectable-head { min-height: var(--control-height-touch); } .list-sort { min-height: var(--control-height-touch); } }
 .file-row { min-height: 59px; transition: background 140ms ease-out; }
 @media (max-width: 520px) { .file-row.search-row { grid-template-columns: minmax(0,1fr) 44px; } .search-row .file-size { display: none; } }
 .file-row:hover, .file-row:focus-within { background: var(--muted); }

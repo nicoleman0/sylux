@@ -1,6 +1,6 @@
 # Folder listings
 
-In Files, use **Sort files by** to choose name or file-size order. The default is **Name: A to Z**. The choice stays selected during folder navigation and refreshes for the signed-in session. Changing it starts at the first page and clears the current selection.
+In Files, use **Sort files by** to choose name or file-size order. Click **Name** or **Size** in the listing header to toggle its direction, or use the selector. The default is **Name: A to Z**. The choice stays selected during folder navigation and refreshes for the signed-in session. Changing it starts at the first page and clears the current selection.
 
 `GET /folders/children` lists the private root. `GET /folders/{id}/children` lists a folder. Both accept `sort=name_asc` (the default), `name_desc`, `size_asc` or `size_desc`, plus `limit` (1–500, default 100) and `cursor`.
 

@@ -124,6 +124,16 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
   await page.getByRole('button', { name: 'Upload', exact: true }).click();
   await expect(page.getByRole('article').filter({ hasText: 'fixture.txt' })).toBeVisible({ timeout: 8000 });
   await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeVisible();
+  const uploadStatus = page.getByRole('status').filter({ hasText: 'fixture.txt' });
+  await expect(uploadStatus.getByText('Saved', { exact: true })).toBeVisible();
+  await expect(uploadStatus.getByText('100%', { exact: true })).toBeVisible();
+  await expect(uploadStatus).not.toContainText('transferred');
+  await expect(uploadStatus.getByRole('progressbar')).toHaveCount(0);
+  const listSummary = await page.locator('.list-summary').boundingBox();
+  const notice = await page.locator('.workspace-notice').boundingBox();
+  expect(listSummary).not.toBeNull();
+  expect(notice).not.toBeNull();
+  expect(notice!.y - (listSummary!.y + listSummary!.height)).toBeGreaterThanOrEqual(16);
   await page.getByRole('button', { name: 'Options for Notes', exact: true }).click();
   await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
@@ -1075,11 +1085,14 @@ for (const width of [1280, 390]) {
     await page.getByLabel('Choose a file to upload').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
     await expect(page.getByText(longName, { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Upload', exact: true }).click();
-    await expect(page.getByRole('status').filter({ hasText: longName }).getByText('Saved', { exact: true })).toBeVisible();
+    const uploadStatus = page.getByRole('status').filter({ hasText: longName });
+    await expect(uploadStatus.getByText('Saved', { exact: true })).toBeVisible();
+    await expect(uploadStatus.getByText('100%', { exact: true })).toBeVisible();
+    await expect(uploadStatus).not.toContainText('transferred');
+    await expect(uploadStatus.getByRole('progressbar')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await expect(page.locator('[data-slot=progress-indicator]')).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
     await page.screenshot({ path: test.info().outputPath(`layout-${width}.png`), fullPage: true });
   });
 }
