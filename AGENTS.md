@@ -61,6 +61,15 @@
 - Reuse checks for unchanged inputs; rerun when changes or failures
   invalidate them. Report gaps and measure bottlenecks before optimizing.
 
+## UI foundations
+
+- Read `DESIGN.md` before UI changes. `web/src/tokens.css` owns shared
+  type and semantic color values; use existing roles and components first.
+- Use `/design-system.html` on the web dev server to review the real styles
+  in both themes. Keep shared component examples current when changing them.
+- Scoped exceptions are allowed when they serve a different user need.
+  Explain them in the PR; promote recurring intent, not matching numbers.
+
 ## Storage and privacy boundaries
 
 - Submit serving-time SQL through `SqliteWorkers`. Keep network

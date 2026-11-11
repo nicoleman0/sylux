@@ -1,193 +1,72 @@
----
-name: Sylux
-description: A quiet file manager for private, self-hosted storage.
-colors:
-  primary: "#146c60"
-  primary-foreground: "#ffffff"
-  background: "#ffffff"
-  foreground: "#202b2b"
-  secondary: "#e5f0ed"
-  muted: "#f6f7f7"
-  muted-foreground: "#5f6d68"
-  destructive: "#a12d35"
-  border: "#e3e8e7"
-  input: "#d7dfdc"
-  ring: "#277e71"
-  dark-primary: "#8bd0bb"
-  dark-primary-foreground: "#171c1c"
-  dark-background: "#171c1c"
-  dark-foreground: "#e4eae8"
-  dark-secondary: "#283f36"
-  dark-muted: "#1d2323"
-  dark-muted-foreground: "#a2afab"
-  dark-destructive: "#f0a1a5"
-  dark-border: "#303b38"
-  dark-input: "#42534b"
-  dark-ring: "#8bd0bb"
-typography:
-  body:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
-    fontSize: "14px"
-    fontWeight: 400
-  headline:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
-    fontSize: "25px"
-    fontWeight: 600
-    lineHeight: 1.25
-    letterSpacing: "-0.025em"
-  title:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
-    fontSize: "18px"
-    fontWeight: 600
-    letterSpacing: "-0.015em"
-  label:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
-    fontSize: "12px"
-    fontWeight: 400
-rounded:
-  sm: "2px"
-  control: "9px"
-  dialog: "9px"
-spacing:
-  xs: "4px"
-  sm: "8px"
-  md: "12px"
-  lg: "16px"
-  xl: "24px"
-  2xl: "32px"
-components:
-  button-primary:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.primary-foreground}"
-    rounded: "{rounded.control}"
-    height: "32px"
-  button-secondary:
-    backgroundColor: "{colors.background}"
-    textColor: "{colors.foreground}"
-    rounded: "{rounded.control}"
-    height: "32px"
-  button-danger:
-    backgroundColor: "{colors.destructive}"
-    textColor: "#ffffff"
-    rounded: "{rounded.control}"
-    height: "32px"
-  input:
-    backgroundColor: "{colors.background}"
-    textColor: "{colors.foreground}"
-    rounded: "{rounded.control}"
-    height: "43px"
-  nav-active:
-    backgroundColor: "{colors.secondary}"
-    textColor: "{colors.primary}"
-    rounded: "{rounded.control}"
-    padding: "11px 14px"
----
+# Sylux design system
 
-# Design System: Sylux
+Sylux is a quiet file workspace. Keep its own system sans-serif type, green-gray surfaces and teal actions. Files and account tasks take priority over decoration.
 
-## Overview
+## Source of truth
 
-**Creative North Star: "The Quiet File Desk"**
+- `web/src/tokens.css` owns semantic colors, type sizes, control dimensions, corners and overlay shadow.
+- `web/src/app.css` connects those tokens to Tailwind and the application layout.
+- `web/src/lib/components/ui/` owns shared control behavior and variants.
+- `/design-system.html` is the local catalogue. It renders the actual CSS and components and reads token values from the browser. Run `npm --prefix web run dev` to view it. It is not included in the production build.
 
-Sylux gives stored files the visual priority. A slim header and compact destination navigation frame a broad working area; file names align in rows, while thin separators and restrained tonal shifts provide grouping. The result is familiar and low-noise for occasional file and account tasks.
-
-The interface uses system sans-serif type, small control corners and a muted teal accent for actions and current locations. Light and dark themes share the same semantic roles. Copy stays short and factual, with consequences stated near account or file actions. The production design reflects the accepted file-manager direction; prototype documentation remains historical and separate.
-
-**Key Characteristics:**
-- Files occupy open, aligned rows instead of a large enclosing panel.
-- Teal marks primary actions and active destinations; neutral planes carry the rest.
-- The same shell supports file work, personal account details and administrator settings.
-
-## Colors
-
-Cool green-gray neutrals establish the workspace, with muted teal for actions and selection; dark mode keeps the same roles at higher contrast.
-
-### Primary
-- **Muted Teal** ({colors.primary}): Primary actions, links, folder emphasis and active navigation in the light theme.
-- **Soft Mint Teal** ({colors.dark-primary}): The corresponding action and active-state color in dark mode.
-
-### Neutral
-- **White** ({colors.background}): Main light surface and input background.
-- **Ink Green-Gray** ({colors.foreground}): Main light-theme text.
-- **Pale Green-Gray** ({colors.secondary}): Light selection and accent surface.
-- **Cool Mist** ({colors.muted}): Sidebar and quiet hover surface.
-- **Muted Green-Gray** ({colors.muted-foreground}): Metadata and supporting text.
-- **Quiet Line** ({colors.border}): Separators and control outlines.
-- **Dark Charcoal** ({colors.dark-background}): Main dark surface.
-- **Pale Gray-Mint** ({colors.dark-foreground}): Main dark-theme text.
-- **Muted Red** ({colors.destructive}): Destructive actions and errors in light mode; dark mode uses {colors.dark-destructive}.
-
-**The One Accent Rule.** Reserve teal for primary actions, links and the current destination; keep routine file surfaces neutral.
+Change a shared value in the token file, rather than overriding each consumer. This document explains intent; the catalogue shows current values.
 
 ## Typography
 
-**Display Font:** System UI sans-serif (system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif)
-**Body Font:** System UI sans-serif (same stack)
-**Label/Mono Font:** System UI sans-serif for interface labels; monospace is used for file content where appropriate.
+Use `--font-ui` for the interface and `--font-code` for file content or code that needs fixed-width characters. Use `--weight-heading` for semibold headings, `--weight-body` for ordinary content and `--weight-control` for control labels.
 
-**Character:** Compact, familiar interface typography. Semibold headings provide hierarchy without a separate display face.
+| Role | CSS token | Use |
+| --- | --- | --- |
+| Page | `--type-page` | Main destination heading |
+| Compact page | `--type-page-compact` | Page heading at narrow widths |
+| Section | `--type-section` | Settings sections and result headings |
+| Brand | `--type-brand` | Instance name in the sidebar |
+| Interface | `--type-ui` | File names, body text, controls and navigation |
+| Metadata | `--type-meta` | Column labels, secondary file details and account roles |
+| Note | `--type-note` | The persistent beta notice |
 
-### Hierarchy
-- **Headline** (600, 25px, 1.25): Main page headings; 23px on narrow screens.
-- **Title** (600, 18px): Settings and section headings.
-- **Body** (400, 13px): Default interface text.
-- **Label** (400, 12px): Compact metadata and list headings; controls, navigation and file names use the shared 13px interface size.
-- **Brand** (600, 19px): Header wordmark, reduced to 18px on narrow screens.
+Tailwind `text-sm` maps to the interface role; `text-xs` maps to metadata. Use these for shared controls. Heading line heights and responsive layout belong in app.css. Do not resize the root font to change interface text: rem units also size the sidebar, spacing and controls.
 
-**Not canonized:** The current build uses system UI for display headings. That implementation detail is recorded as observed, not prescribed for future display typography.
+## Color roles
 
-## Layout
+Tokens provide light defaults and `.dark` overrides. Choose a role by meaning, not by its current hex value. Tokens with equal values may still represent different roles.
 
-The signed-in shell uses the shadcn-svelte sidebar-07 pattern: a collapsible icon rail beside an inset workspace with a 56px header. Below 768px, the header trigger opens navigation in a drawer. At 620px and below, content uses 17px side padding. File rows keep name, size and action columns aligned; the size column contracts on mobile. Account sections cap at 840px; administrator Settings cap at 680px. The beta notice sits within the workspace and follows its content insets. The common spacing rhythm includes 4, 8, 12, 16, 24 and 32px, with larger page insets for the main content.
+| Role | Tokens | Use |
+| --- | --- | --- |
+| Workspace | `--background`, `--foreground` | Main surface and readable text |
+| Secondary surface | `--muted`, `--muted-foreground` | Hover areas and supporting text |
+| Primary action | `--primary`, `--primary-foreground` | Main action and its label |
+| Selection | `--accent`, `--accent-foreground` | Current destination or drop target |
+| Secondary action | `--secondary`, `--secondary-foreground` | Lower-emphasis filled controls |
+| Destructive action | `--destructive`, `--destructive-foreground` | Destructive actions and errors |
+| Floating surface | `--popover`, `--popover-foreground` | Dialogs, menus and tooltips |
+| Structure | `--border`, `--input`, `--ring` | Dividers, field boundaries and keyboard focus |
+| Sidebar | `--sidebar-*` | Navigation-specific surface, text, selection and focus |
 
-**The Open Workspace Rule.** Let rows and section separators organize content; avoid enclosing the full file workspace in a card.
+Use paired foreground/background roles together. Keep normal text at least 4.5:1 contrast and large text at least 3:1. A new state needs a usable light and dark treatment; reducing opacity alone is not a substitute for checking readability.
 
-## Elevation & Depth
+## Controls and surfaces
 
-Most surfaces stay flat, separated by borders and tonal shifts. The shared shadow is reserved for floating menus and dialogs; resting file and settings areas have no elevation.
+- Use the existing Button variants: default, outline, secondary, ghost, destructive and link. Keep keyboard focus visible.
+- Use `--control-height` for ordinary desktop controls, `--control-height-touch` for coarse pointers and `--input-height` for text fields. A smaller glyph does not require a smaller touch target.
+- Use `--icon-small` for header utility icons and `--icon-file` for file-type icons. Sidebar icon alignment is owned by the shared sidebar component.
+- Use the `--radius` scale through the shared components. Workspace, header and footer corners should agree. File rows stay flat, with separators rather than enclosing cards.
+- Use `--shadow-overlay` only for floating surfaces. Resting file and Settings content stays flat.
+- Keep file previews large, with scrollable content and reachable header/footer controls.
 
-### Shadow Vocabulary
-- **Overlay** (`0 8px 24px #132d2924`): Floating menus and dialog surfaces.
+## Flexible defaults
 
-## Shapes
+These are defaults, not a ban on variation. A scoped exception is appropriate when a surface has a different job: document content, a dense viewer toolbar or standalone sign-in branding can need a different treatment.
 
-Controls and navigation share rounded corners from the radius scale. Buttons use 9px corners. File rows remain square and use thin bottom separators; small file-name controls use a 2px corner. Dialogs and workspace surfaces use 13px corners. The recurring focus treatment is a 2px outline with a 3px offset in the theme ring color.
+1. Try the existing role or component variant first.
+2. Keep an exception local and explain the user need in the PR.
+3. Check both themes, keyboard focus and the affected viewport sizes.
+4. Promote a new shared role when the same intent recurs. Do not create a global token for every one-off measurement.
 
-## Components
+Equal numbers do not automatically mean the same rule. Layout widths, file-row geometry and document canvas colors remain local unless they encode a shared decision. PDF paper stays white because it represents document content.
 
-### Buttons
-- **Shape:** Rounded 9px radius and a 32px minimum height on desktop; 44px minimum for coarse pointers.
-- **Primary:** Teal fill with theme-appropriate foreground; medium-weight text. Hover reduces fill intensity; pressed state shifts down by 1px.
-- **Secondary:** Surface fill with a thin border; hover shifts to the muted surface.
-- **Ghost:** No resting border or fill; hover uses the muted surface. Active navigation adds the selected surface and teal text/icon.
-- **Danger:** Destructive text on a light destructive tint; disabled controls reduce opacity.
-- **Focus:** Visible theme ring remains around interactive controls.
+## Changing the system
 
-### Inputs / Fields
-- **Style:** Theme surface, thin input border, compact corners and a 43px minimum height.
-- **Focus / Error / Disabled:** Theme ring focus; invalid fields use destructive border and ring; disabled fields reduce opacity.
+Update the owning token or shared component and its catalogue example together. Use the catalogue to compare normal, disabled, hover and keyboard-focus states. Then check the actual affected journey; a catalogue alone cannot prove application behavior.
 
-### Navigation
-- **Desktop:** Collapsible sidebar with instance home link, Files, Trash and administrator Settings; account details sit at the bottom. Current location uses the selected surface and teal foreground.
-- **Mobile:** Header trigger opens a navigation drawer, which closes after choosing a destination.
-
-### File Rows
-- **Style:** Flat rows with aligned name, size and action columns, 1px separators and a 59px minimum height on desktop.
-- **Interaction:** Hover or focus-within adds a muted surface; active drag targets use the accent surface. Names truncate while metadata and actions retain their columns.
-
-### Administrator Settings
-- **Style:** Account and instance sections share the open content shell, section separators and restrained headings.
-- **Behavior:** Settings tabs use a bottom rule with teal active text and underline. Compact account rows align identity, role/status and actions; explanatory copy remains close to consequential controls.
-
-## Do's and Don'ts
-
-### Do:
-- **Do** keep file names visually dominant and actions grouped in the toolbar or row menu.
-- **Do** use teal for primary actions and the current location.
-- **Do** keep account and administrator settings in the same restrained workspace shell.
-- **Do** state account and file consequences in concise nearby copy.
-
-### Don't:
-- **Don't** wrap the main file workspace in a large enclosing card.
-- **Don't** add promotional sign-in copy, fake capacity figures or unsupported security claims.
-- **Don't** add shadows to ordinary resting surfaces.
+Run Svelte checks and the affected browser tests, then rebuild `web/dist`. Required Linux CI remains the merge gate. New system changes use a separate PR; do not silently redesign unrelated surfaces during feature work.
