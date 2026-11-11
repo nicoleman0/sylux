@@ -30,6 +30,7 @@ run npm --prefix web run audit:dependencies
 run npm --prefix web run test:dependency-policy
 run python3 tools/test-dependency-verifier.py
 run python3 tools/test-rust-notices.py
+run node --test tools/test-web-notices.mjs
 artifact_check_pending=0
 if [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]; then
   run python3 tools/verify-dependency-locks.py

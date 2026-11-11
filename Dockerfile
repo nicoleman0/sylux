@@ -5,6 +5,7 @@ RUN npm install --global npm@11.19.1
 COPY web/package.json web/package-lock.json ./web/
 RUN npm --prefix web ci
 COPY web/ ./web/
+COPY tools/collect-web-notices.mjs ./tools/collect-web-notices.mjs
 RUN npm --prefix web run check && npm --prefix web run build
 
 FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS rust-build

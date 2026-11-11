@@ -7,6 +7,8 @@ Exact dependency versions are recorded in `Cargo.lock` and `web/package-lock.jso
 
 The Docker image includes Rust dependency license and notice texts under
 `/usr/share/doc/sylux/third-party/`, with an inventory of package versions.
+Bundled JavaScript dependency notices are collected from the emitted modules and
+served at `/licenses/third-party.txt`; the build fails if a bundled package lacks notices.
 The runtime operating-system packages retain their notices under `/usr/share/doc`.
 The unmodified Poppins and JetBrains Mono fonts include their OFL notices in
 `web/public/licenses`; the application serves them at `/licenses/poppins.txt`

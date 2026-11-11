@@ -2,9 +2,11 @@ import path from 'node:path';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
+// @ts-expect-error The build helper is a checked Node ESM module without a declaration file.
+import { webNoticesPlugin } from '../tools/collect-web-notices.mjs';
 
 export default defineConfig({
-  plugins: [tailwindcss(), svelte()],
+  plugins: [tailwindcss(), svelte(), webNoticesPlugin()],
   resolve: {
     alias: { $lib: path.resolve('./src/lib') },
   },
