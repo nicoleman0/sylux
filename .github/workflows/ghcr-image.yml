@@ -1,0 +1,51 @@
+name: GHCR image
+
+# Pushes a published release's image archive to GHCR unchanged, so registry
+# deployments run the same image the release workflow qualified. `beta` moves
+# to whichever version ran last.
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published beta release, for example v0.1.0-beta.2'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  push:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Load the verified release image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]] || exit 1
+          gh release download "$VERSION" --pattern sylux-image.tar.gz --pattern SHA256SUMS --dir "$RUNNER_TEMP/release"
+          cd "$RUNNER_TEMP/release"
+          grep -E '  sylux-image\.tar\.gz$' SHA256SUMS | sha256sum --check
+          docker load -i sylux-image.tar.gz
+          test "$(docker image inspect "sylux:$VERSION" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$VERSION"
+      - name: Push to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+          for tag in "$VERSION" beta; do
+            docker tag "sylux:$VERSION" "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done
