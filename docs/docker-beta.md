@@ -29,7 +29,7 @@ test "$(docker image inspect "sylux:$RELEASE" --format '{{.Os}}/{{.Architecture}
 test "$(docker image inspect "sylux:$RELEASE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$RELEASE" || exit 1
 ```
 
-The local image ID is a full `sha256:<64 hex digits>` value. `image-id.txt` records the build engine's ID; another Docker image store may report a different ID for the loaded image. Compose pins the locally inspected ID with `pull_policy: never`, so it neither builds nor requests an image from a registry. Keep the archive and checksum for rollback. The source Dockerfile can be built for development, but that is outside this prebuilt-image install.
+The local image ID is a full `sha256:<64 hex digits>` value. `image-id.txt` records the build engine's ID; another Docker image store may report a different ID for the loaded image. Compose pins the locally inspected ID with `pull_policy: never`, so it neither builds nor requests an image from a registry. Keep the archive and checksum for rollback. The source Dockerfile can be built for development, but that is outside this prebuilt-image install. Each published release is also pushed unchanged to `ghcr.io/nicoleman0/sylux:<release tag>`, and the `beta` tag follows the newest one; this guide does not use them.
 
 ## 2. Prepare the host
 
