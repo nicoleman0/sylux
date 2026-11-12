@@ -121,19 +121,12 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
   await expect(page.getByText('Notes')).toBeVisible();
 
   await page.locator('#upload-file').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
   await expect(page.getByRole('article').filter({ hasText: 'fixture.txt' })).toBeVisible({ timeout: 8000 });
-  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeVisible();
-  const uploadStatus = page.getByRole('status').filter({ hasText: 'fixture.txt' });
-  await expect(uploadStatus.getByText('Saved', { exact: true })).toBeVisible();
-  await expect(uploadStatus.getByText('100%', { exact: true })).toBeVisible();
-  await expect(uploadStatus).not.toContainText('transferred');
-  await expect(uploadStatus.getByRole('progressbar')).toHaveCount(0);
-  const listSummary = await page.locator('.list-summary').boundingBox();
-  const notice = await page.locator('.workspace-notice').boundingBox();
-  expect(listSummary).not.toBeNull();
-  expect(notice).not.toBeNull();
-  expect(notice!.y - (listSummary!.y + listSummary!.height)).toBeGreaterThanOrEqual(16);
+  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeAttached();
+  await expect(page.locator('.upload-batch-report summary')).toHaveText('Upload complete. Results for 1 item');
+  await expect(page.locator('.upload-status')).toHaveCount(0);
+  await expect(page.locator('.upload-batch-status')).toHaveCount(0);
+  await expect(page.locator('.workspace-notice')).toHaveCount(0);
   await page.getByRole('button', { name: 'Options for Notes', exact: true }).click();
   await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
@@ -605,6 +598,7 @@ test('logging out clears account form secrets before another sign-in', async ({ 
   await create.getByLabel('Account name').fill('second');
   await create.getByLabel('Password', { exact: true }).fill('temporary password');
   await create.getByRole('button', { name: 'Create account', exact: true }).click();
+  await expect(create).toBeHidden();
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await create.getByLabel('Account name').fill('unfinished');
   await create.getByLabel('Password', { exact: true }).fill('unfinished password');
@@ -767,8 +761,8 @@ test('late upload ticket cannot continue in the next session', async ({ page }) 
   const waiting = new Promise<void>((resolve) => { started = resolve; });
   await page.route('**/mutation-tickets', async (route) => { started(); await gate; await route.fulfill({ json: { mutation_id: 'old-upload', ticket: 'old-ticket', expires_at: '2030-01-01T00:00:00Z' }, status: 201 }); });
   await page.route('**/uploads', async (route) => { admissions++; await route.fallback(); });
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'private-old-name.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click(); await waiting;
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'private-old-name.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
+  await waiting;
   await signOut(page);
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
@@ -778,8 +772,8 @@ test('late upload ticket cannot continue in the next session', async ({ page }) 
   release(); await response; await page.evaluate(() => new Promise(requestAnimationFrame));
   expect(admissions).toBe(0);
   await expect(page.getByText('private-old-name.txt')).toHaveCount(0);
-  await expect(page.getByLabel('Choose a file to upload')).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('Choose files to upload')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toHaveCount(0);
 });
 
 test('late upload content cannot commit after logout', async ({ page }) => {
@@ -789,8 +783,8 @@ test('late upload content cannot commit after logout', async ({ page }) => {
   const waiting = new Promise<void>((resolve) => { started = resolve; });
   await page.route('**/uploads/upload-1/content', async (route) => { started(); await gate; await route.fulfill({ json: { upload_id: 'upload-1', mutation_id: 'upload-1', status: 'staged', length: 3, sha256: '0'.repeat(64), published: false } }).catch(() => {}); });
   await page.route('**/uploads/upload-1/commit', async (route) => { commits++; await route.fallback(); });
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'old-content.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click(); await waiting;
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'old-content.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
+  await waiting;
   await signOut(page);
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
@@ -799,8 +793,8 @@ test('late upload content cannot commit after logout', async ({ page }) => {
   release(); await page.evaluate(() => new Promise(requestAnimationFrame));
   expect(commits).toBe(0);
   await expect(page.getByText('old-content.txt')).toHaveCount(0);
-  await expect(page.getByLabel('Choose a file to upload')).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('Choose files to upload')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toHaveCount(0);
 });
 
 test('sign-in submissions are serialized before logout', async ({ page }) => {
@@ -823,8 +817,7 @@ test('unresolved upload state is cleared on logout', async ({ page }) => {
   await login(page);
   await page.route('**/uploads/upload-1/content', (route) => route.fulfill({ status: 500 }));
   await page.route('**/uploads/upload-1', (route) => route.fulfill({ status: 503 }));
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'unresolved-private.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'unresolved-private.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
   await expect(page.getByText('Upload status needs checking')).toBeVisible();
   await signOut(page);
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
@@ -833,8 +826,8 @@ test('unresolved upload state is cleared on logout', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   await expect(page.getByText('Upload status needs checking')).toHaveCount(0);
   await expect(page.getByText('unresolved-private.txt')).toHaveCount(0);
-  await expect(page.getByLabel('Choose a file to upload')).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('Choose files to upload')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toHaveCount(0);
 });
 
 test('late folder creation cannot change the next session', async ({ page }) => {
@@ -872,7 +865,7 @@ test('pending logout hides the workspace and prevents new actions', async ({ pag
   await signOut(page); await waiting;
   await expect(page.getByRole('status')).toHaveText('Signing out…');
   await expect(page.getByLabel('Folder name', { exact: true })).toHaveCount(0);
-  await expect(page.getByLabel('Choose a file to upload')).toHaveCount(0);
+  await expect(page.getByLabel('Choose files to upload')).toHaveCount(0);
   await expect(page.getByLabel('Account name')).toHaveCount(0);
   release();
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
@@ -1048,9 +1041,8 @@ test('wrong current password and rejected upload tickets do not end a valid sess
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   await page.route('**/mutation-tickets', (route) => route.fulfill({ status: 401, json: { code: 'invalid_mutation_ticket' } }));
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'ticket.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('Upload was not admitted');
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'ticket.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
+  await expect(page.locator('.workspace-notice')).toContainText('Upload was not admitted');
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
 });
 
@@ -1082,14 +1074,12 @@ for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 900 });
     await login(page);
     const longName = `${'long-name-'.repeat(18)}.txt`;
-    await page.getByLabel('Choose a file to upload').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-    await expect(page.getByText(longName, { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Upload', exact: true }).click();
-    const uploadStatus = page.getByRole('status').filter({ hasText: longName });
-    await expect(uploadStatus.getByText('Saved', { exact: true })).toBeVisible();
-    await expect(uploadStatus.getByText('100%', { exact: true })).toBeVisible();
-    await expect(uploadStatus).not.toContainText('transferred');
-    await expect(uploadStatus.getByRole('progressbar')).toHaveCount(0);
+    await page.getByLabel('Choose files to upload').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
+    await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeAttached();
+    await expect(page.locator('.upload-status')).toHaveCount(0);
+    await page.locator('.upload-batch-report summary').click();
+    await expect(page.locator('[data-upload-result]')).toContainText(longName);
+    await expect(page.locator('[data-upload-result]')).toContainText('Saved');
     await expect(page.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -1310,7 +1300,16 @@ test('sidebar collapses to named icons and preserves navigation', async ({ page 
     const centers = icons.map((icon) => { const rect = icon.getBoundingClientRect(); return rect.x + rect.width / 2; });
     return Math.max(...centers) - Math.min(...centers);
   });
+  const navigationSpacing = async () => {
+    const centers = await Promise.all(['Files', 'Trash', 'Settings'].map(name =>
+      sidebar.getByRole('button', { name, exact: true }).evaluate(element => {
+        const rect = element.getBoundingClientRect();
+        return rect.y + rect.height / 2;
+      })));
+    return Math.abs((centers[1] - centers[0]) - (centers[2] - centers[1]));
+  };
   expect(await iconSpread()).toBeLessThan(1);
+  expect(await navigationSpacing()).toBeLessThan(1);
   const workspace = await page.locator('[data-slot="sidebar-inset"]').boundingBox();
   const footer = await page.locator('.beta-notice').boundingBox();
   expect(footer!.x).toBeCloseTo(workspace!.x, 0);
@@ -1321,8 +1320,10 @@ test('sidebar collapses to named icons and preserves navigation', async ({ page 
   await expect(sidebar).toHaveAttribute('data-state', 'collapsed');
   await expect(page.getByRole('button', { name: 'Files', exact: true })).toHaveAttribute('data-active', 'true');
   await expect(page.locator('.sidebar-brand')).toBeHidden();
+  await expect(page.locator('.sidebar-account-role')).toHaveText('Administrator');
   await expect(page.locator('.sidebar-account')).toBeHidden();
   await expect.poll(iconSpread).toBeLessThan(1);
+  await expect.poll(navigationSpacing).toBeLessThan(1);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
   const accountRow = await page.locator('.account-row').first().boundingBox();

@@ -83,7 +83,7 @@ test('folder, upload, rename, and logout controls have accessible names', { anno
   await page.getByRole('button', { name: 'New folder', exact: true }).click();
   await expect(page.getByLabel('Folder name', { exact: true })).toBeFocused();
   await page.keyboard.press('Escape');
-  await expect(page.getByLabel('Choose a file to upload')).toBeAttached();
+  await expect(page.getByLabel('Choose files to upload')).toBeAttached();
   await expect(page.getByRole('button', { name: 'Refresh folder' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${fixture.folder}`, exact: true }).click();
   await page.getByRole('article').filter({ hasText: fixture.nested }).getByRole('button', { name: 'Open' }).click();
