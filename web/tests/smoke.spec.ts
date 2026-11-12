@@ -1300,7 +1300,16 @@ test('sidebar collapses to named icons and preserves navigation', async ({ page 
     const centers = icons.map((icon) => { const rect = icon.getBoundingClientRect(); return rect.x + rect.width / 2; });
     return Math.max(...centers) - Math.min(...centers);
   });
+  const navigationSpacing = async () => {
+    const centers = await Promise.all(['Files', 'Trash', 'Settings'].map(name =>
+      sidebar.getByRole('button', { name, exact: true }).evaluate(element => {
+        const rect = element.getBoundingClientRect();
+        return rect.y + rect.height / 2;
+      })));
+    return Math.abs((centers[1] - centers[0]) - (centers[2] - centers[1]));
+  };
   expect(await iconSpread()).toBeLessThan(1);
+  expect(await navigationSpacing()).toBeLessThan(1);
   const workspace = await page.locator('[data-slot="sidebar-inset"]').boundingBox();
   const footer = await page.locator('.beta-notice').boundingBox();
   expect(footer!.x).toBeCloseTo(workspace!.x, 0);
@@ -1314,6 +1323,7 @@ test('sidebar collapses to named icons and preserves navigation', async ({ page 
   await expect(page.locator('.sidebar-account-role')).toHaveText('Administrator');
   await expect(page.locator('.sidebar-account')).toBeHidden();
   await expect.poll(iconSpread).toBeLessThan(1);
+  await expect.poll(navigationSpacing).toBeLessThan(1);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
   const accountRow = await page.locator('.account-row').first().boundingBox();

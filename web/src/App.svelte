@@ -1529,7 +1529,7 @@
 
           </Sidebar.Menu></nav>
           {#if user?.role === 'administrator'}
-            <nav aria-label="Administration" class="mt-4"><Sidebar.Menu><Sidebar.MenuItem>
+            <nav aria-label="Administration" class="mt-1"><Sidebar.Menu><Sidebar.MenuItem>
               <Sidebar.MenuButton tooltipContent="Settings" aria-label="Settings" isActive={settingsView} aria-current={settingsView ? 'page' : undefined} onclick={async () => { await navigate('settings'); close(); }}><SettingsIcon /><span>Settings</span></Sidebar.MenuButton>
             </Sidebar.MenuItem></Sidebar.Menu></nav>
           {/if}
