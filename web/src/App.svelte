@@ -30,6 +30,7 @@
   import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
+  import { filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
 
   import { MockTransport } from './lib/mock-transport';
 
@@ -133,7 +134,6 @@
     if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
     if (destination !== 'files') clearSearch();
     accountView = destination === 'account'; settingsView = destination === 'settings'; showTrash = destination === 'trash';
-    if (destination !== 'files') selectedFileName = '';
     accountNotice = '';
     if (record) recordNavigation();
     if (showTrash) await loadTrash();
@@ -279,7 +279,8 @@
   let moveBusy = $state(false);
   let moveRequest = 0;
   let moveTrigger: HTMLElement | null = null;
-  let replacementPrompt = $state<{ file: File; folder: Folder; target: { id: string; name: string; etag: string } } | null>(null);
+  type ReplacementPrompt = { file: File; folder: Folder; target: { id: string; name: string; etag: string } };
+  let replacementPrompt = $state<ReplacementPrompt | null>(null);
   let uploadReplacement = $state(false);
   let transferName = $state('');
   let progress = $state(0);
@@ -291,8 +292,16 @@
   let unresolvedUploadName = $state('');
   let unresolvedCancel = $state(false);
   let controller: AbortController | null = null;
-  let selectedFileName = $state('');
-  const fileMutationBusy = $derived(bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || folderBusy || transferBusy);
+  let uploadBatchBusy = $state(false);
+  let uploadBatchStatus = $state('');
+  type UploadResult = { path: string; kind: 'file' | 'folder'; status: 'waiting' | 'active' | 'saved' | 'created' | 'failed' | 'unknown' | 'canceled' };
+  let uploadResults = $state<UploadResult[]>([]);
+  let uploadResultsExpanded = $state(false);
+  let uploadBatchDestination = '';
+  let unresolvedUploadResult: number | null = null;
+  let uploadBatchCanceled = false;
+  let replacementDecision: ((prompt: ReplacementPrompt | null) => void) | null = null;
+  const fileMutationBusy = $derived(bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || folderBusy || transferBusy || uploadBatchBusy);
 
   function restoreFocus(trigger: HTMLElement | null, fallback = 'folder-title'): void {
     if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus();
@@ -615,7 +624,9 @@
     bulkAction = null; bulkTargets = []; bulkReport = null; bulkBusy = false; bulkNeedsRefresh = false; bulkError = '';
     navigationPaths.clear();
     controller?.abort(); controller = null;
-    replacementPrompt = null; uploadReplacement = false; selectedFileName = '';
+    dismissReplacement(); uploadReplacement = false;
+    uploadBatchCanceled = true; uploadBatchBusy = false; uploadBatchStatus = '';
+    uploadResults = []; uploadResultsExpanded = false; unresolvedUploadResult = null; uploadBatchDestination = '';
     transfers.invalidate(); transfers = new TransferApi(client, mutations);
     transferName = ''; progress = 0; transferPhase = ''; transferBusy = false; uploadCancelable = false;
     uploadId = ''; unresolvedUploadId = ''; unresolvedUploadName = ''; unresolvedCancel = false; notice = '';
@@ -926,7 +937,7 @@
   }
 
   function canDrop(entry: Entry | null, destination: Folder): boolean {
-    if (!entry || bulkBusy || bulkNeedsRefresh || dropPending || moveBusy || moveNeedsRefresh || destination.id === entry.id || destination.id === entry.parent_id) return false;
+    if (!entry || fileMutationBusy || destination.id === entry.id || destination.id === entry.parent_id) return false;
     const seen = new Set<string>();
     let ancestor: string | null | undefined = destination.id;
     while (ancestor) {
@@ -937,7 +948,7 @@
   }
 
   function startDrag(event: DragEvent, entry: Entry): void {
-    if (!event.dataTransfer || bulkBusy || bulkNeedsRefresh || dropPending || moveBusy || moveNeedsRefresh) { event.preventDefault(); return; }
+    if (!event.dataTransfer || fileMutationBusy) { event.preventDefault(); return; }
     draggedEntry = entry; dropError = '';
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData(dragType, entry.id);
@@ -946,8 +957,14 @@
   function endDrag(): void { draggedEntry = null; dropTarget = ''; }
 
   function dragOver(event: DragEvent, destination: Folder): void {
+    if (isDesktopDrag(event)) {
+      event.preventDefault(); event.stopPropagation();
+      event.dataTransfer!.dropEffect = canUploadDrop() ? 'copy' : 'none';
+      if (canUploadDrop()) dropTarget = destination.id;
+      return;
+    }
     if (!event.dataTransfer?.types.includes(dragType) || !canDrop(draggedEntry, destination)) return;
-    event.preventDefault(); event.dataTransfer.dropEffect = 'move'; dropTarget = destination.id;
+    event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'move'; dropTarget = destination.id;
   }
 
   function dragLeave(event: DragEvent, destination: Folder): void {
@@ -956,6 +973,7 @@
   }
 
   async function dropEntry(event: DragEvent, destination: Folder): Promise<void> {
+    if (isDesktopDrag(event)) { acceptDesktopDrop(event, destination); return; }
     const target = draggedEntry;
     if (!event.dataTransfer?.types.includes(dragType) || !canDrop(target, destination) || !target) return;
     event.preventDefault(); event.stopPropagation(); endDrag();
@@ -972,11 +990,149 @@
     finally { if (generation === sessionGeneration) dropPending = null; }
   }
 
-  function externalDrag(event: DragEvent): void {
-    if (!event.dataTransfer?.types.includes('Files')) return;
+  function isDesktopDrag(event: DragEvent): boolean {
+    return !!event.dataTransfer?.types.includes('Files') && !event.dataTransfer.types.includes(dragType);
+  }
+
+  function canUploadDrop(): boolean {
+    return !!user && !showTrash && !accountView && !settingsView && !searchQuery && !!currentFolder.id &&
+      !fileMutationBusy && !unresolvedUploadId && !replacementPrompt && !createOpen && !renameId && !moveTarget && !trashTarget;
+  }
+
+  function acceptDesktopDrop(event: DragEvent, destination: Folder): void {
     event.preventDefault();
-    if (event.type === 'dragover') event.dataTransfer.dropEffect = 'none';
-    else if (user) notice = 'Use Choose file and Upload to add a file. Dragging here moves files already in Sylux.';
+    event.stopPropagation(); dropTarget = '';
+    if (!canUploadDrop() || !event.dataTransfer) return;
+    try {
+      const read = snapshotDesktopDrop(event.dataTransfer);
+      void runUploadBatch(read, destination);
+    } catch (error) {
+      uploadResults = []; uploadResultsExpanded = false; unresolvedUploadResult = null; notice = '';
+      uploadBatchStatus = error instanceof Error ? error.message : 'The dropped items could not be read. Nothing was uploaded.';
+    }
+  }
+
+  function externalDrag(event: DragEvent): void {
+    if (!isDesktopDrag(event)) return;
+    event.preventDefault();
+    if (event.type === 'dragover') event.dataTransfer!.dropEffect = 'none';
+  }
+
+  function cancelUploadBatch(): void {
+    uploadBatchCanceled = true;
+    if (uploadCancelable) controller?.abort();
+    dismissReplacement();
+  }
+
+  async function freshUploadFolder(folder: Folder): Promise<Folder> {
+    if (!folder.parent_id) return (await listing.roots()).root;
+    let cursor: string | null = null;
+    do {
+      const page = await listing.children(folder.parent_id, cursor);
+      const descriptor = page.items.find((entry): entry is Folder => entry.id === folder.id && entry.kind === 'folder');
+      if (descriptor) return descriptor;
+      cursor = page.next_cursor;
+    } while (cursor);
+    throw new Error('The upload destination is no longer available.');
+  }
+
+  function uploadCounts(saved: number, created: number): string {
+    return `${saved} ${saved === 1 ? 'file' : 'files'} saved. ${created} ${created === 1 ? 'folder' : 'folders'} created`;
+  }
+
+  function uploadResultLabel(result: UploadResult): string {
+    if (result.status === 'waiting') return uploadBatchBusy ? 'Waiting' : 'Not attempted';
+    return { active: result.kind === 'folder' ? 'Creating folder' : 'Uploading', saved: 'Saved', created: 'Folder created', failed: 'Failed', unknown: 'Outcome unknown', canceled: 'Canceled' }[result.status];
+  }
+
+  function resolveUploadResult(status: 'saved' | 'failed' | 'canceled'): void {
+    if (unresolvedUploadResult === null || !uploadResults[unresolvedUploadResult]) return;
+    uploadResults[unresolvedUploadResult].status = status;
+    unresolvedUploadResult = null;
+    uploadBatchStatus = `Upload stopped. ${uploadCounts(uploadResults.filter((item) => item.status === 'saved').length, uploadResults.filter((item) => item.status === 'created').length)} in ${uploadBatchDestination}. Remaining items were not resumed.`;
+  }
+
+  async function runUploadBatch(read: (canceled: () => boolean) => Promise<UploadItem[]>, destination: Folder): Promise<void> {
+    if (uploadBatchBusy || transferBusy || unresolvedUploadId) return;
+    const generation = sessionGeneration;
+    uploadBatchBusy = true; uploadBatchCanceled = false; uploadBatchStatus = 'Reading files and folders…'; notice = '';
+    uploadResults = []; uploadResultsExpanded = false; unresolvedUploadResult = null; uploadBatchDestination = destination.name;
+    let saved = 0; let created = 0; let complete = false;
+    let currentPath = '';
+    let currentIndex = -1;
+    let creatingFolder = false;
+    try {
+      const items = await read(() => uploadBatchCanceled || generation !== sessionGeneration);
+      if (generation !== sessionGeneration) return;
+      if (!items.length) { uploadBatchStatus = 'No files or folders were selected.'; return; }
+      uploadResults = items.map((item) => ({ path: item.path.join('/'), kind: item.kind, status: 'waiting' }));
+      const destinations = new Map<string, Folder>([['[]', destination]]);
+      for (const [index, item] of items.entries()) {
+        if (uploadBatchCanceled || generation !== sessionGeneration) break;
+        currentIndex = index;
+        uploadResults[index].status = 'active';
+        currentPath = item.path.join('/');
+        const remaining = uploadResults.filter((result) => result.kind === 'file' && result.status === 'waiting').length;
+        uploadBatchStatus = `Adding ${currentPath} to ${destination.name}… ${remaining} ${remaining === 1 ? 'file' : 'files'} left after this item. ${uploadCounts(saved, created)}.`;
+        const parent = destinations.get(JSON.stringify(item.path.slice(0, -1)));
+        if (!parent) throw new Error('The destination for this item could not be found.');
+        if (item.kind === 'folder') {
+          creatingFolder = true;
+          const folder = await listing.createFolder(parent.id, item.path.at(-1)!, parent.etag);
+          if (generation !== sessionGeneration) return;
+          creatingFolder = false;
+          destinations.set(JSON.stringify(item.path), folder); created++;
+          uploadResults[index].status = 'created';
+        } else {
+          const folder = await freshUploadFolder(parent);
+          if (generation !== sessionGeneration || uploadBatchCanceled) break;
+          let committed = await startUpload(item.file, null, undefined, folder);
+          if (generation !== sessionGeneration) return;
+          if (!committed && replacementPrompt && !uploadBatchCanceled) {
+            const prompt = await new Promise<ReplacementPrompt | null>((resolve) => { replacementDecision = resolve; });
+            if (generation !== sessionGeneration) return;
+            if (prompt && !uploadBatchCanceled) {
+              const refreshed = await freshUploadFolder(prompt.folder);
+              if (generation !== sessionGeneration || uploadBatchCanceled) break;
+              committed = await startUpload(prompt.file, null, { entry_id: prompt.target.id, etag: prompt.target.etag }, refreshed);
+            } else uploadBatchCanceled = true;
+          }
+          if (!committed) {
+            uploadResults[index].status = unresolvedUploadId ? 'unknown' : uploadBatchCanceled ? 'canceled' : 'failed';
+            if (unresolvedUploadId) unresolvedUploadResult = index;
+            break;
+          }
+          saved++;
+          uploadResults[index].status = 'saved';
+        }
+      }
+      complete = !uploadBatchCanceled && !unresolvedUploadId && saved + created === items.length;
+      if (currentIndex >= 0 && uploadResults[currentIndex].status === 'active') uploadResults[currentIndex].status = 'canceled';
+      uploadResultsExpanded = !complete;
+      uploadBatchStatus = `${complete ? 'All items added.' : `Upload stopped${currentPath ? ` at ${currentPath}` : ''}.`} ${uploadCounts(saved, created)} in ${destination.name}.${complete ? '' : ' Confirmed items remain; remaining items were not attempted.'}`;
+      if (complete && !notice) notice = 'Upload complete.';
+    } catch (error) {
+      if (generation !== sessionGeneration) return;
+      const uncertain = creatingFolder && (!(error instanceof HttpError) || error.status >= 500);
+      if (currentIndex >= 0) uploadResults[currentIndex].status = uncertain ? 'unknown' : uploadBatchCanceled ? 'canceled' : 'failed';
+      uploadResultsExpanded = true;
+      const reason = error instanceof HttpError && error.status === 409 ? 'An item already has this name. Rename it before trying again.' :
+        error instanceof HttpError && error.status >= 400 && error.status < 500 ? 'The item could not be added. Check its name and destination.' :
+        uncertain ? 'The last item may have been added. Refresh your files before retrying it.' : error instanceof Error ? error.message : 'The dropped items could not be read.';
+      uploadBatchStatus = `Upload stopped${currentPath ? ` at ${currentPath}` : ''}. ${uploadCounts(saved, created)}. ${reason} Confirmed items remain; remaining items were not attempted.`;
+    } finally {
+      if (generation === sessionGeneration) {
+        if (uploadBatchCanceled) dismissReplacement();
+        replacementDecision = null;
+        try { await refreshRoot(); if (generation === sessionGeneration) await refresh(); } catch { /* Keep the confirmed item counts visible. */ }
+        finally {
+          if (generation === sessionGeneration) {
+            uploadBatchBusy = false;
+            if (uploadBatchCanceled) { await tick(); restoreFocus(document.getElementById('choose-file')); }
+          }
+        }
+      }
+    }
   }
 
   function openPreview(entry: Entry, trigger: HTMLElement): void { previewTrigger = trigger; previewEntry = entry; }
@@ -1060,24 +1216,34 @@
   async function showCommittedUpload(): Promise<void> {
     const generation = sessionGeneration;
     progress = 100; transferPhase = 'complete';
-    notice = uploadReplacement ? 'Replacement complete. The previous file is in trash. Rename the current file before restoring the previous one.' : 'Upload complete.';
+    notice = uploadReplacement ? 'Replacement complete. The previous file is in trash. Rename the current file before restoring the previous one.' : uploadBatchBusy ? '' : 'Upload complete.';
     try { if (!await refreshRoot()) return; } catch { /* Keep the confirmed commit outcome visible. */ }
     if (generation !== sessionGeneration) return;
     await refresh();
   }
 
-  async function upload(event: SubmitEvent): Promise<void> {
-    event.preventDefault();
-    const input = document.querySelector<HTMLInputElement>('#upload-file');
-    const file = input?.files?.[0];
-    if (!file || transferBusy || unresolvedUploadId) return;
-    await startUpload(file, input);
+  function chooseUploads(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    if (!files.length || !canUploadDrop()) return;
+    void runUploadBatch(async () => filesToUpload(files), currentFolder);
+  }
+
+  function dismissReplacement(): void {
+    replacementPrompt = null;
+    const decide = replacementDecision; replacementDecision = null;
+    decide?.(null);
   }
 
   async function confirmReplacement(): Promise<void> {
     const prompt = replacementPrompt;
     if (!prompt || transferBusy || unresolvedUploadId) return;
     replacementPrompt = null;
+    if (replacementDecision) {
+      const decide = replacementDecision; replacementDecision = null;
+      decide(prompt); return;
+    }
     await startUpload(prompt.file, null, { entry_id: prompt.target.id, etag: prompt.target.etag }, prompt.folder);
   }
 
@@ -1085,9 +1251,10 @@
     if (transferPhase !== 'complete') { transferPhase = ''; progress = 0; }
   }
 
-  async function startUpload(file: File, input: HTMLInputElement | null, replacement?: Replacement, folder = currentFolder): Promise<void> {
+  async function startUpload(file: File, input: HTMLInputElement | null, replacement?: Replacement, folder = currentFolder): Promise<boolean> {
     const generation = sessionGeneration;
     const activeTransfers = transfers;
+    let committed = false;
     transferBusy = true;
     uploadReplacement = !!replacement;
     progress = 0;
@@ -1096,51 +1263,55 @@
     const uploadController = new AbortController();
     controller = uploadController;
     try {
-      if (!await refreshRoot()) return;
-      const targetFolder = currentFolder.id === folder.id ? currentFolder : folder;
+      if (!await refreshRoot() || (uploadBatchBusy && uploadBatchCanceled)) return committed;
+      const targetFolder = folder;
       const admission = await activeTransfers.admit(targetFolder.id, file.name, file.size, targetFolder.etag, (id) => { if (generation === sessionGeneration) uploadId = id; }, replacement);
-      if (generation !== sessionGeneration) return;
+      if (generation !== sessionGeneration) return committed;
       uploadId = admission.id;
       progress = 0;
       uploadCancelable = true;
+      if (uploadBatchBusy && uploadBatchCanceled) throw new DOMException('Upload canceled', 'AbortError');
       await activeTransfers.send(admission.id, file, uploadController.signal, (sent, total) => { if (generation === sessionGeneration) progress = total ? Math.floor((sent / total) * 100) : 0; });
-      if (generation !== sessionGeneration) return;
+      if (generation !== sessionGeneration) return committed;
+      if (uploadBatchBusy && uploadBatchCanceled) throw new DOMException('Upload canceled', 'AbortError');
       uploadCancelable = false;
       progress = 100;
       transferPhase = 'saving';
       try { await activeTransfers.commit(admission.id); }
       catch (error) {
-        if (generation !== sessionGeneration) return;
+        if (generation !== sessionGeneration) return committed;
         if (replacement && error instanceof HttpError && (error.status === 409 || error.status === 412)) {
           try {
             await activeTransfers.cancel(admission.id);
-            if (generation !== sessionGeneration) return;
+            if (generation !== sessionGeneration) return committed;
             notice = 'Replacement was not saved because the file or folder changed. This upload did not replace the existing file. Refresh and try again.';
-            return;
+            return committed;
           } catch { /* Check durable status when cancellation cannot be confirmed. */ }
         }
         const outcome = await uploadOutcome(admission.id);
-        if (generation !== sessionGeneration) return;
+        if (generation !== sessionGeneration) return committed;
         if (outcome === 'rejected') {
           notice = 'Upload failed. No saved file is implied.';
-          return;
+          return committed;
         }
         if (outcome !== 'committed') {
           unresolvedUploadId = admission.id;
           unresolvedUploadName = file.name;
           notice = 'Upload outcome could not be confirmed. Check your files before retrying.';
-          return;
+          return committed;
         }
       }
-      if (generation !== sessionGeneration) return;
+      if (generation !== sessionGeneration) return committed;
+      committed = true;
       await showCommittedUpload();
     } catch (error) {
-      if (generation !== sessionGeneration) return;
+      if (generation !== sessionGeneration) return committed;
       if (error instanceof HttpError && error.status === 409 && error.details?.code === 'name_collision') {
         if (uploadId) activeTransfers.forget(uploadId);
         uploadId = '';
         const target = error.details.existing;
-        if (target?.kind === 'file') {
+        if (uploadBatchBusy && uploadBatchCanceled) notice = 'Upload canceled before sending bytes.';
+        else if (target?.kind === 'file') {
           replacementPrompt = { file, folder, target };
           notice = 'A file already has this name. Confirm replacement to continue.';
         } else notice = 'A folder already has this name. Rename the upload or the folder and try again.';
@@ -1152,33 +1323,35 @@
         try {
           if (!uploadId) throw new Error('Upload was not admitted');
           await activeTransfers.cancel(uploadId);
-          if (generation !== sessionGeneration) return;
+          if (generation !== sessionGeneration) return committed;
           notice = uploadReplacement ? 'Replacement canceled. This upload did not replace the existing file.' : 'Upload canceled. No saved file is implied.';
         } catch {
-          if (generation !== sessionGeneration) return;
+          if (generation !== sessionGeneration) return committed;
           const outcome = uploadId ? await uploadOutcome(uploadId) : 'unknown';
-          if (generation !== sessionGeneration) return;
+          if (generation !== sessionGeneration) return committed;
           if (outcome === 'committed') {
+            committed = true;
             await showCommittedUpload();
           } else if (outcome === 'canceled') notice = uploadReplacement ? 'Replacement canceled. This upload did not replace the existing file.' : 'Upload canceled. No saved file is implied.';
           else { unresolvedUploadId = uploadId; unresolvedUploadName = file.name; unresolvedCancel = true; notice = 'Upload outcome could not be confirmed. Check your files before retrying.'; }
         }
       } else if (uploadId) {
         const outcome = await uploadOutcome(uploadId);
-        if (generation !== sessionGeneration) return;
-        if (outcome === 'committed') await showCommittedUpload();
+        if (generation !== sessionGeneration) return committed;
+        if (outcome === 'committed') { committed = true; await showCommittedUpload(); }
         else if (outcome === 'canceled' || outcome === 'rejected') notice = uploadReplacement ? 'Replacement failed. This upload did not replace the existing file.' : 'Upload failed. No saved file was created.';
         else { unresolvedUploadId = uploadId; unresolvedUploadName = file.name; notice = 'Upload outcome could not be confirmed. Check status before retrying.'; }
       } else notice = 'Upload failed before it was admitted. No saved file is implied.';
     } finally {
-      if (generation !== sessionGeneration) return;
+      if (generation !== sessionGeneration) return committed;
       uploadCancelable = false;
       transferBusy = false;
       resetTransferActivity();
       controller = null;
       if (!unresolvedUploadId) uploadId = '';
-      if (input) { input.value = ''; selectedFileName = ''; }
+      if (input) input.value = '';
     }
+    return committed;
   }
 
   async function reconcileUpload(): Promise<void> {
@@ -1206,6 +1379,7 @@
             if (!admitted) {
               activeTransfers.forget(unresolvedUploadId);
               unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false;
+              resolveUploadResult('failed');
               notice = 'The upload was never admitted and its ticket expired. No saved file was created.';
               transferBusy = false;
               return;
@@ -1226,6 +1400,7 @@
     if (generation !== sessionGeneration) return;
     const outcome = status.state === 'committed' ? 'committed' : status.state === 'rejected' && status.status === 'canceled' ? 'canceled' : status.state === 'rejected' ? 'rejected' : 'unknown';
     if (outcome === 'committed') {
+      resolveUploadResult('saved');
       uploadId = unresolvedUploadId;
       unresolvedUploadId = '';
       unresolvedCancel = false;
@@ -1233,6 +1408,7 @@
       if (generation !== sessionGeneration) return;
       if (!uploadReplacement) notice = 'Upload complete. The saved file is listed below.';
     } else if (outcome === 'canceled' || outcome === 'rejected') {
+      resolveUploadResult(outcome === 'canceled' ? 'canceled' : 'failed');
       unresolvedUploadId = '';
       uploadId = '';
       unresolvedCancel = false;
@@ -1252,6 +1428,7 @@
     try {
       await activeTransfers.cancel(unresolvedUploadId);
       if (generation !== sessionGeneration) return;
+      resolveUploadResult('canceled');
       unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false;
       notice = 'Upload canceled. No saved file was created.';
     } catch {
@@ -1259,9 +1436,11 @@
       const outcome = await uploadOutcome(unresolvedUploadId);
       if (generation !== sessionGeneration) return;
       if (outcome === 'canceled' || outcome === 'rejected') {
+        resolveUploadResult(outcome === 'canceled' ? 'canceled' : 'failed');
         unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false;
         notice = outcome === 'canceled' ? 'Upload canceled. No saved file was created.' : 'Upload was rejected. No saved file was created.';
       } else if (outcome === 'committed') {
+        resolveUploadResult('saved');
         unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false;
         await showCommittedUpload();
       } else notice = 'Cancellation is still unconfirmed. Retry cancellation or check status.';
@@ -1390,7 +1569,7 @@
             <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h1 id="trash-heading" tabindex="-1">Trash</h1><p class="text-sm">Restore a parent folder before its children. Permanent removal is not available yet.</p><Button variant="outline" size="sm" disabled={trashLoading || trashBusy} onclick={loadTrash}>Refresh trash</Button>{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore</Button></li>{/each}</ul>{/if}</section>
 
         {:else}
-          <section class="files-content" aria-labelledby="folder-title">
+          <section class="files-content" aria-labelledby="folder-title" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
             {#if unresolvedUploadId}<Alert.Root variant="destructive"><Alert.Title>Upload status needs checking</Alert.Title><Alert.Description><p>{unresolvedUploadName} may have been saved. Check its status before uploading it again.</p><div class="mt-2 flex flex-wrap gap-2"><Button variant="outline" size="sm" onclick={reconcileUpload} disabled={transferBusy}>Check upload status</Button>{#if unresolvedCancel}<Button variant="outline" size="sm" onclick={retryCancel} disabled={transferBusy}>Retry cancellation</Button>{/if}</div></Alert.Description></Alert.Root>{/if}
 
             <div class="page-heading">
@@ -1424,12 +1603,11 @@
               </section>
             {:else}
             <section class="upload-toolbar" aria-label="Upload files">
-              <Button variant="outline" disabled={folderBusy || bulkBusy || bulkNeedsRefresh || !currentFolder.id} onclick={(event) => beginCreate(event.currentTarget as HTMLElement)}><PlusIcon />New folder</Button>
-              <form class="upload-form" onsubmit={upload}>
-                <Input class="sr-only size-px border-0 p-0" id="upload-file" type="file" tabindex={-1} aria-label="Choose a file to upload" disabled={bulkBusy || bulkNeedsRefresh || transferBusy || !!unresolvedUploadId} onchange={(event) => { selectedFileName = event.currentTarget.files?.[0]?.name ?? ''; }} />
-                <Button id="choose-file" variant="outline" type="button" disabled={bulkBusy || bulkNeedsRefresh || transferBusy || !!unresolvedUploadId} onclick={() => document.getElementById('upload-file')?.click()}>Choose file</Button>
-                <Button type="submit" disabled={bulkBusy || bulkNeedsRefresh || transferBusy || !!unresolvedUploadId || !!replacementPrompt || !currentFolder.id || !selectedFileName}>Upload</Button>
-              </form>
+              <Button variant="outline" disabled={fileMutationBusy || !currentFolder.id} onclick={(event) => beginCreate(event.currentTarget as HTMLElement)}><PlusIcon />New folder</Button>
+              <div class="upload-form">
+                <input class="sr-only" id="upload-file" type="file" multiple tabindex={-1} aria-label="Choose files to upload" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onchange={chooseUploads} />
+                <Button id="choose-file" variant="outline" type="button" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onclick={() => document.getElementById('upload-file')?.click()}>Choose files</Button>
+              </div>
               <Button variant="outline" disabled={loading || bulkBusy} onclick={() => bulkNeedsRefresh ? reconcileBulk() : refresh()} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
               <div class="folder-sort">
                 <label for="folder-sort">Sort files by</label>
@@ -1440,18 +1618,29 @@
                   <option value="size_desc">Size: largest first</option>
                 </select>
               </div>
-              <span class="chosen-file" aria-live="polite">{selectedFileName}</span>
               {#if transferBusy || progress > 0}
                 <div class="upload-status" role="status">
                   <div class="upload-status-body">
                     <div class="upload-status-line"><span class="upload-name" title={transferName}>{transferName}</span><span class="upload-phase">{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span class="upload-percent">{progress}%</span></div>
                     {#if transferBusy && transferPhase !== 'complete'}<Progress value={progress} max={100} aria-label="Upload progress" />{/if}
-                    {#if transferBusy}<Button variant="link" class="h-auto justify-self-start p-0" onclick={() => { if (uploadCancelable) controller?.abort(); }} disabled={!uploadCancelable}>Cancel upload</Button>{/if}
+                    {#if transferBusy}<Button variant="link" class="h-auto justify-self-start p-0" onclick={cancelUploadBatch} disabled={!uploadCancelable}>Cancel upload</Button>{/if}
                   </div>
                 </div>
               {/if}
 
             </section>
+            {#if uploadBatchStatus}
+              <section class="upload-batch-report" aria-label="Upload results">
+                <p class="upload-batch-status" role="status">{uploadBatchStatus}</p>
+                {#if uploadBatchBusy}<Button variant="outline" size="sm" onclick={cancelUploadBatch}>Cancel remaining uploads</Button>{/if}
+                {#if uploadResults.length}
+                  <details open={uploadResultsExpanded} ontoggle={(event) => uploadResultsExpanded = event.currentTarget.open}>
+                    <summary>Results for {uploadResults.length} {uploadResults.length === 1 ? 'item' : 'items'}</summary>
+                    <ul>{#each uploadResults as result, index (index)}<li data-upload-result={result.path}><span class="upload-result-path">{result.path}</span><span>{uploadResultLabel(result)}</span></li>{/each}</ul>
+                  </details>
+                {/if}
+              </section>
+            {/if}
             {#if entries.length && !loading && !listingError}
               <div class="selection-toolbar" role="group" aria-label="Selected items">
                 <span aria-live="polite">{selectedEntries.length} selected</span>
@@ -1531,10 +1720,10 @@
         <Dialog.Footer><Button variant="outline" disabled={bulkBusy} onclick={closeBulk}>Cancel</Button><Button disabled={bulkBusy} onclick={runBulk}>{bulkBusy ? 'Moving to trash…' : 'Move to trash'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
-    <Dialog.Root open={!!replacementPrompt} onOpenChange={(open) => { if (!open) replacementPrompt = null; }}>
+    <Dialog.Root open={!!replacementPrompt} onOpenChange={(open) => { if (!open) dismissReplacement(); }}>
       <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); const choose = document.getElementById('choose-file') as HTMLButtonElement | null; restoreFocus(choose && !choose.disabled ? choose : null); }}>
         <Dialog.Header><Dialog.Title>Replace {replacementPrompt?.target.name}?</Dialog.Title><Dialog.Description>A file with this name already exists in {replacementPrompt?.folder.name}. The previous file will move to trash and stay there until restored. Rename the current file before restoring it. If this upload fails or is canceled before saving, the previous file stays unchanged.</Dialog.Description></Dialog.Header>
-        <Dialog.Footer><Button variant="outline" onclick={() => replacementPrompt = null}>Keep existing file</Button><Button onclick={confirmReplacement}>Replace file</Button></Dialog.Footer>
+        <Dialog.Footer><Button variant="outline" onclick={dismissReplacement}>Keep existing file</Button><Button onclick={confirmReplacement}>Replace file</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!trashTarget} onOpenChange={(open) => { if (!open && !trashBusy) trashTarget = null; }}>
@@ -1562,6 +1751,13 @@
 </div>
 
 <style>
+  .upload-batch-report { display: grid; gap: 12px; padding-block: 12px; }
+  .upload-batch-report > button { justify-self: start; }
+  .upload-batch-report summary { cursor: pointer; font-size: var(--type-ui); }
+  .upload-batch-report li { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-block: 8px; font-size: var(--type-ui); }
+  .upload-batch-report li > span:last-child { flex-shrink: 0; }
+  .upload-batch-status, .upload-result-path { overflow-wrap: anywhere; min-width: 0; }
+  .files-content[data-drop-active="true"] { outline: 2px solid var(--primary); outline-offset: -2px; }
   :global(.drop-active) { background: var(--accent); outline: 2px solid var(--primary); outline-offset: -2px; }
   :global(.refreshing) { animation: refresh-turn 1s linear infinite; }
   @keyframes refresh-turn { to { transform: rotate(360deg); } }

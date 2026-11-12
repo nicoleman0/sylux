@@ -121,7 +121,6 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
   await expect(page.getByText('Notes')).toBeVisible();
 
   await page.locator('#upload-file').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
   await expect(page.getByRole('article').filter({ hasText: 'fixture.txt' })).toBeVisible({ timeout: 8000 });
   await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeVisible();
   const uploadStatus = page.getByRole('status').filter({ hasText: 'fixture.txt' });
@@ -767,8 +766,8 @@ test('late upload ticket cannot continue in the next session', async ({ page }) 
   const waiting = new Promise<void>((resolve) => { started = resolve; });
   await page.route('**/mutation-tickets', async (route) => { started(); await gate; await route.fulfill({ json: { mutation_id: 'old-upload', ticket: 'old-ticket', expires_at: '2030-01-01T00:00:00Z' }, status: 201 }); });
   await page.route('**/uploads', async (route) => { admissions++; await route.fallback(); });
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'private-old-name.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click(); await waiting;
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'private-old-name.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
+  await waiting;
   await signOut(page);
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
@@ -778,8 +777,8 @@ test('late upload ticket cannot continue in the next session', async ({ page }) 
   release(); await response; await page.evaluate(() => new Promise(requestAnimationFrame));
   expect(admissions).toBe(0);
   await expect(page.getByText('private-old-name.txt')).toHaveCount(0);
-  await expect(page.getByLabel('Choose a file to upload')).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('Choose files to upload')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toHaveCount(0);
 });
 
 test('late upload content cannot commit after logout', async ({ page }) => {
@@ -789,8 +788,8 @@ test('late upload content cannot commit after logout', async ({ page }) => {
   const waiting = new Promise<void>((resolve) => { started = resolve; });
   await page.route('**/uploads/upload-1/content', async (route) => { started(); await gate; await route.fulfill({ json: { upload_id: 'upload-1', mutation_id: 'upload-1', status: 'staged', length: 3, sha256: '0'.repeat(64), published: false } }).catch(() => {}); });
   await page.route('**/uploads/upload-1/commit', async (route) => { commits++; await route.fallback(); });
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'old-content.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click(); await waiting;
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'old-content.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
+  await waiting;
   await signOut(page);
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
@@ -799,8 +798,8 @@ test('late upload content cannot commit after logout', async ({ page }) => {
   release(); await page.evaluate(() => new Promise(requestAnimationFrame));
   expect(commits).toBe(0);
   await expect(page.getByText('old-content.txt')).toHaveCount(0);
-  await expect(page.getByLabel('Choose a file to upload')).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('Choose files to upload')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toHaveCount(0);
 });
 
 test('sign-in submissions are serialized before logout', async ({ page }) => {
@@ -823,8 +822,7 @@ test('unresolved upload state is cleared on logout', async ({ page }) => {
   await login(page);
   await page.route('**/uploads/upload-1/content', (route) => route.fulfill({ status: 500 }));
   await page.route('**/uploads/upload-1', (route) => route.fulfill({ status: 503 }));
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'unresolved-private.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'unresolved-private.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
   await expect(page.getByText('Upload status needs checking')).toBeVisible();
   await signOut(page);
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
@@ -833,8 +831,8 @@ test('unresolved upload state is cleared on logout', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   await expect(page.getByText('Upload status needs checking')).toHaveCount(0);
   await expect(page.getByText('unresolved-private.txt')).toHaveCount(0);
-  await expect(page.getByLabel('Choose a file to upload')).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('Choose files to upload')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toHaveCount(0);
 });
 
 test('late folder creation cannot change the next session', async ({ page }) => {
@@ -872,7 +870,7 @@ test('pending logout hides the workspace and prevents new actions', async ({ pag
   await signOut(page); await waiting;
   await expect(page.getByRole('status')).toHaveText('Signing out…');
   await expect(page.getByLabel('Folder name', { exact: true })).toHaveCount(0);
-  await expect(page.getByLabel('Choose a file to upload')).toHaveCount(0);
+  await expect(page.getByLabel('Choose files to upload')).toHaveCount(0);
   await expect(page.getByLabel('Account name')).toHaveCount(0);
   release();
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
@@ -1048,9 +1046,8 @@ test('wrong current password and rejected upload tickets do not end a valid sess
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   await page.route('**/mutation-tickets', (route) => route.fulfill({ status: 401, json: { code: 'invalid_mutation_ticket' } }));
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'ticket.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('Upload was not admitted');
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'ticket.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
+  await expect(page.locator('.workspace-notice')).toContainText('Upload was not admitted');
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
 });
 
@@ -1082,9 +1079,7 @@ for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 900 });
     await login(page);
     const longName = `${'long-name-'.repeat(18)}.txt`;
-    await page.getByLabel('Choose a file to upload').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-    await expect(page.getByText(longName, { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Upload', exact: true }).click();
+    await page.getByLabel('Choose files to upload').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
     const uploadStatus = page.getByRole('status').filter({ hasText: longName });
     await expect(uploadStatus.getByText('Saved', { exact: true })).toBeVisible();
     await expect(uploadStatus.getByText('100%', { exact: true })).toBeVisible();

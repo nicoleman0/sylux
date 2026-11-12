@@ -33,6 +33,13 @@ function markListingProgress(marker: string): void {
   test.info().annotations.push({ type: 's1_listing_progress', description: marker });
 }
 
+async function chooseUpload(file: { name: string; mimeType: string; buffer: Buffer }): Promise<void> {
+  await expect(page.locator('#upload-file')).toBeEnabled();
+  const admission = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/uploads');
+  await page.locator('#upload-file').setInputFiles(file);
+  await admission;
+}
+
 test.beforeAll(async ({}, workerInfo) => {
   if (!origin || !process.env.S1_BROWSER_FIXTURES || !process.env.S1_BROWSER_FIXTURE || !process.env.S1_BROWSER_PHASE || !password || !process.env.S1_CA_CERT || !process.env.S1_CERTUTIL) {
     throw new Error('owned browser fixture required');
@@ -65,14 +72,14 @@ test.afterAll(async () => { await browser?.close(); });
 test('desktop and narrow viewport keep folder browsing and upload controls usable', { annotation: { type: 'harness_case', description: 'storage_responsive_controls' } }, async () => {
   await signIn();
   await expect(page.getByRole('navigation', { name: 'Files', exact: true })).toBeVisible();
-  await expect(page.getByLabel('Choose a file to upload')).toBeAttached();
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Choose files to upload')).toBeAttached();
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Log out', exact: true })).toBeVisible();
 
   // Playwright mobile viewport emulation only; this is not a physical-device claim.
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeInViewport();
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeInViewport();
   await expect(page.getByRole('button', { name: 'Log out', exact: true })).toBeInViewport();
   await page.setViewportSize({ width: 1440, height: 900 });
 });
@@ -214,8 +221,7 @@ test('Unicode, zero-byte, and binary files round-trip through real upload and do
     { name: `bounded-${phase}.bin`, bytes: new Uint8Array(1024 * 1024).fill(0x5a) },
   ];
   for (const item of cases) {
-    await page.locator('#upload-file').setInputFiles({ name: item.name, mimeType: 'application/octet-stream', buffer: Buffer.from(item.bytes) });
-    await page.getByRole('button', { name: 'Upload', exact: true }).click();
+    await chooseUpload({ name: item.name, mimeType: 'application/octet-stream', buffer: Buffer.from(item.bytes) });
     const savedItem = page.getByRole('article').filter({ has: page.getByText(item.name, { exact: true }) });
     await expect(savedItem.getByText(item.name, { exact: true })).toBeVisible({ timeout: 15_000 });
     const downloadPromise = page.waitForEvent('download');
@@ -243,13 +249,12 @@ test('browsing remains available while a real upload body is delayed', { annotat
     await paused;
     await route.continue();
   });
-  await page.locator('#upload-file').setInputFiles({ name: `slow-upload-${phase}.bin`, mimeType: 'application/octet-stream', buffer: Buffer.alloc(512 * 1024, 0x5a) });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await chooseUpload({ name: `slow-upload-${phase}.bin`, mimeType: 'application/octet-stream', buffer: Buffer.alloc(512 * 1024, 0x5a) });
   await requestArrived;
   await page.getByRole('button', { name: `Open ${fixtures.folder}`, exact: true }).click();
   await expect(page.getByRole('heading', { name: fixtures.folder })).toBeVisible();
   release();
-  await expect(page.getByText('Upload complete.')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole('status').filter({ hasText: 'All items added.' })).toContainText('1 file saved.', { timeout: 20_000 });
 });
 
 test('cancel aborts the in-flight upload without claiming a saved file', { annotation: { type: 'harness_case', description: 'storage_upload_cancel' } }, async () => {
@@ -260,8 +265,7 @@ test('cancel aborts the in-flight upload without claiming a saved file', { annot
   const requestArrived = new Promise<void>(resolve => { arrived = resolve; });
   await page.route('**/uploads/*/content', async route => { arrived(); await paused; await route.continue(); });
   const fileName = `cancel-me-${phase}.bin`;
-  await page.locator('#upload-file').setInputFiles({ name: fileName, mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024 * 1024, 0x44) });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await chooseUpload({ name: fileName, mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024 * 1024, 0x44) });
   await requestArrived;
   await page.getByRole('button', { name: 'Cancel upload' }).click();
   release();
@@ -321,8 +325,7 @@ test('lost commit response is resolved through the original upload status', { an
     await route.abort('connectionreset');
   });
   const fileName = `commit-response-lost-${phase}.bin`;
-  await page.locator('#upload-file').setInputFiles({ name: fileName, mimeType: 'application/octet-stream', buffer: Buffer.from([0, 255, 7]) });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await chooseUpload({ name: fileName, mimeType: 'application/octet-stream', buffer: Buffer.from([0, 255, 7]) });
   await expect.poll(() => dropped).toBe(true);
   await expect.poll(() => firstStatusLookupFailed).toBe(true);
   const unresolved = page.getByRole('alert').filter({ hasText: 'Upload status needs checking' });
@@ -377,8 +380,7 @@ test('lost commit response is resolved through the original upload status', { an
     await route.abort('connectionreset');
   });
   const admissionFile = `admission-response-lost-${phase}.bin`;
-  await page.locator('#upload-file').setInputFiles({ name: admissionFile, mimeType: 'application/octet-stream', buffer: Buffer.from([4, 3, 2, 1]) });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await chooseUpload({ name: admissionFile, mimeType: 'application/octet-stream', buffer: Buffer.from([4, 3, 2, 1]) });
   const admissionWarning = page.getByRole('alert').filter({ hasText: 'Upload status needs checking' });
   await expect(admissionWarning).toBeVisible();
   expect(admittedId).toMatch(/^[A-Za-z0-9-]+$/);
@@ -387,7 +389,7 @@ test('lost commit response is resolved through the original upload status', { an
   await page.getByRole('button', { name: 'Check upload status' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Upload is admitted or still processing' })).toBeVisible();
   await expect(admissionWarning).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+  await expect(page.locator('#upload-file')).toBeDisabled();
   expect(ticketRequests).toBe(1);
   expect(admissionRequests).toBe(1);
   await expect(page.getByRole('article').filter({ hasText: admissionFile })).toHaveCount(0);
@@ -397,8 +399,7 @@ test('uploaded PDF renders and changes pages over real TLS', { annotation: { typ
   await signIn();
   const name = `preview-${phase}.pdf`;
   const bytes = fs.readFileSync(path.resolve(__dirname, '../../web/tests/fixtures/three-pages.pdf'));
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name, mimeType: 'application/pdf', buffer: bytes });
-  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await chooseUpload({ name, mimeType: 'application/pdf', buffer: bytes });
   const trigger = page.getByRole('button', { name: `Preview ${name}`, exact: true });
   await expect(trigger).toBeVisible({ timeout: 15_000 });
   await trigger.click();

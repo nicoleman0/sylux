@@ -9,10 +9,11 @@ async function replacementBackend(page: Page, outcome: 'confirmed' | 'lost-respo
   let deleted: Array<Record<string, unknown>> = [];
   let issued = 0;
   let replacement = false;
+  let uploadedName = original.name;
+  let uploadedBytes = Buffer.alloc(0);
   let sent = 0;
   let committed = false;
   const bytes = Buffer.from('replacement bytes');
-  const digest = createHash('sha256').update(bytes).digest('hex');
   await page.route('**/*', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -25,23 +26,32 @@ async function replacementBackend(page: Page, outcome: 'confirmed' | 'lost-respo
     if (path === '/mutation-tickets') {
       const body = request.postDataJSON();
       replacement = !!body.replacement;
+      uploadedName = body.name;
       if (replacement) expect(body.replacement).toEqual({ entry_id: 'old', etag: '"old:1"' });
       return json({ mutation_id: `upload-${++issued}`, ticket: `ticket-${issued}`, expires_at: '2030-01-01' }, 201);
     }
     if (path === '/uploads') {
-      if (!replacement) return json({ code: 'name_collision', message: 'Name conflict', request_id: 'test', existing: original }, 409);
-      expect(request.headers()['if-match']).toBe('"old:1"');
-      expect(request.headers()['if-none-match']).toBeUndefined();
+      if (!replacement && uploadedName === original.name) return json({ code: 'name_collision', message: 'Name conflict', request_id: 'test', existing: original }, 409);
+      if (replacement) {
+        expect(request.headers()['if-match']).toBe('"old:1"');
+        expect(request.headers()['if-none-match']).toBeUndefined();
+      }
       return json({ upload_id: `upload-${issued}` }, 201);
     }
     if (path.endsWith('/content') && request.method() === 'PUT') {
       sent++;
-      expect(request.postDataBuffer()).toEqual(bytes);
-      return json({ upload_id: `upload-${issued}`, mutation_id: `upload-${issued}`, status: 'staged', length: bytes.length, sha256: digest, published: false });
+      uploadedBytes = request.postDataBuffer()!;
+      if (replacement) expect(uploadedBytes).toEqual(bytes);
+      return json({ upload_id: `upload-${issued}`, mutation_id: `upload-${issued}`, status: 'staged', length: uploadedBytes.length, sha256: createHash('sha256').update(uploadedBytes).digest('hex'), published: false });
     }
     if (path.endsWith('/commit')) {
-      if (outcome === 'changed') return json({ code: 'replacement_changed' }, 412);
-      expect(request.headers()['if-match']).toBe('"old:1"');
+      if (outcome === 'changed' && replacement) return json({ code: 'replacement_changed' }, 412);
+      if (replacement) expect(request.headers()['if-match']).toBe('"old:1"');
+      if (!replacement) {
+        active.push({ id: 'fresh', parent_id: 'root', name: uploadedName, kind: 'file', size: uploadedBytes.length, etag: '"fresh:1"' });
+        committed = true;
+        return json({ status: 'committed' }, 201);
+      }
       if (outcome !== 'uncertain') {
         active = [{ ...original, id: 'new', size: bytes.length, etag: '"new:1"' }];
         deleted = [original];
@@ -59,8 +69,7 @@ async function replacementBackend(page: Page, outcome: 'confirmed' | 'lost-respo
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await expect(page.getByText('same.bin', { exact: true })).toBeVisible();
   const choose = async () => {
-    await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'same.bin', mimeType: 'application/octet-stream', buffer: bytes });
-    await page.getByRole('button', { name: 'Upload', exact: true }).click();
+    await page.getByLabel('Choose files to upload').setInputFiles({ name: 'same.bin', mimeType: 'application/octet-stream', buffer: bytes });
     await expect(page.getByRole('dialog')).toBeVisible();
   };
   return { choose, sent: () => sent };
@@ -78,7 +87,7 @@ for (const width of [1280, 390]) {
     await page.screenshot({ path: test.info().outputPath(`replacement-${width}.png`), fullPage: true, animations: 'disabled' });
     await page.getByRole('button', { name: 'Keep existing file' }).click();
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Choose file', exact: true })).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeFocused();
     expect(backend.sent()).toBe(0);
     await backend.choose();
     await page.getByRole('button', { name: 'Replace file', exact: true }).click();
@@ -104,7 +113,7 @@ test('uncertain replacement does not claim success or retry the upload', async (
   await page.getByRole('button', { name: 'Replace file', exact: true }).click();
   await expect(page.getByText('Upload status needs checking')).toBeVisible();
   await expect(page.getByText('Replacement complete.', { exact: false })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeDisabled();
   expect(backend.sent()).toBe(1);
 });
 
@@ -115,9 +124,9 @@ test('changed replacement target explains failure and allows a fresh upload', as
   await page.getByRole('button', { name: 'Replace file', exact: true }).click();
   await expect(page.getByText('Replacement was not saved because the file or folder changed.', { exact: false })).toBeVisible();
   await expect(page.getByText('Upload status needs checking')).toHaveCount(0);
-  await expect(page.getByLabel('Choose a file to upload')).toBeEnabled();
-  await page.getByLabel('Choose a file to upload').setInputFiles({ name: 'fresh.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('fresh bytes') });
-  await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeEnabled();
-  await expect(page.getByText('same.bin', { exact: true })).toBeVisible();
-  expect(backend.sent()).toBe(1);
+  await expect(page.getByLabel('Choose files to upload')).toBeEnabled();
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'fresh.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('fresh bytes') });
+  await expect(page.getByRole('article', { name: 'fresh.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('article', { name: 'same.bin', exact: true })).toBeVisible();
+  expect(backend.sent()).toBe(2);
 });

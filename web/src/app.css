@@ -138,7 +138,6 @@ h1:focus, h2:focus { outline: none; }
 .upload-percent { font-variant-numeric: tabular-nums; }
 .workspace-notice { margin-top: 20px; }
 .upload-form { display: flex; align-items: center; gap: 9px; }
-.chosen-file { font-size: var(--type-ui); color: var(--muted-foreground); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 3px; }
 .file-row, .list-head { display: grid; grid-template-columns: minmax(0,1fr) 116px 44px; align-items: center; column-gap: 16px; padding: 0 7px 0 12px; border-bottom: 1px solid var(--border); }
 .list-head { height: 35px; color: var(--muted-foreground); font-size: var(--type-meta); }
 .list-sort { display: inline-flex; align-items: center; gap: 5px; justify-self: start; min-height: var(--control-height); padding: 0; border: 0; border-radius: 2px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
@@ -205,7 +204,6 @@ h1:focus, h2:focus { outline: none; }
   .upload-toolbar { gap: 7px; margin-bottom: 23px; }
   .upload-form { gap: 7px; }
   .upload-toolbar [data-slot="button"] { padding: 0 11px; font-size: var(--type-ui); }
-  .chosen-file { width: 100%; max-width: 100%; padding: 4px 0 0; }
   .file-row, .list-head { grid-template-columns: minmax(0,1fr) 61px 44px; gap: 8px; padding-left: 5px; padding-right: 0; }
   .file-row { min-height: 64px; }
   .item-name { gap: 10px; min-height: 63px; font-size: var(--type-ui); }

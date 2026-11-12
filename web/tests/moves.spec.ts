@@ -141,21 +141,18 @@ test('invalid drops do not mutate storage and failed drops retain the source', a
 });
 
 
-test('external files and unknown entry drags cannot trigger moves', async ({ page }) => {
+test('unknown entry drags cannot trigger moves', async ({ page }) => {
   const backend = await installMoveBackend(page);
   const destination = page.getByRole('article', { name: 'Destination', exact: true });
-  for (const kind of ['external', 'unknown']) {
-    const dataTransfer = await page.evaluateHandle(kind => {
-      const data = new DataTransfer();
-      if (kind === 'external') data.items.add(new File(['outside'], 'outside.txt', { type: 'text/plain' }));
-      else data.setData('application/x-sylux-entry', 'unknown-id');
-      return data;
-    }, kind);
-    await destination.dispatchEvent('dragover', { dataTransfer });
-    await expect(destination).toHaveAttribute('data-drop-active', 'false');
-    await destination.dispatchEvent('drop', { dataTransfer });
-    await dataTransfer.dispose();
-  }
+  const dataTransfer = await page.evaluateHandle(() => {
+    const data = new DataTransfer();
+    data.setData('application/x-sylux-entry', 'unknown-id');
+    return data;
+  });
+  await destination.dispatchEvent('dragover', { dataTransfer });
+  await expect(destination).toHaveAttribute('data-drop-active', 'false');
+  await destination.dispatchEvent('drop', { dataTransfer });
+  await dataTransfer.dispose();
   expect(backend.moves).toEqual([]);
   await expect(page.getByRole('article', { name: 'notes.bin', exact: true })).toBeVisible();
 });
