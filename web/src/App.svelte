@@ -1536,7 +1536,7 @@
         {#snippet account(close)}
           <nav aria-label="Account"><Sidebar.Menu><Sidebar.MenuItem>
             <Sidebar.MenuButton size="lg" tooltipContent="Account" aria-label="Account" isActive={accountView} aria-current={accountView ? 'page' : undefined} onclick={async () => { await navigate('account'); close(); }}>
-              <UserRoundIcon class="sidebar-account-icon" /><span class="sidebar-account"><span>{user?.handle}</span><span class="sidebar-account-role">{user?.role === 'administrator' ? 'Administrator' : 'User'}</span></span>
+              <UserRoundIcon /><span class="sidebar-account"><span>{user?.handle}</span><span class="sidebar-account-role"><span aria-hidden="true">· </span>{user?.role === 'administrator' ? 'Administrator' : 'User'}</span></span>
             </Sidebar.MenuButton>
           </Sidebar.MenuItem></Sidebar.Menu></nav>
         {/snippet}
