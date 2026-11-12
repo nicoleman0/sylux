@@ -1311,6 +1311,7 @@ test('sidebar collapses to named icons and preserves navigation', async ({ page 
   await expect(sidebar).toHaveAttribute('data-state', 'collapsed');
   await expect(page.getByRole('button', { name: 'Files', exact: true })).toHaveAttribute('data-active', 'true');
   await expect(page.locator('.sidebar-brand')).toBeHidden();
+  await expect(page.locator('.sidebar-account-role')).toHaveText('Administrator');
   await expect(page.locator('.sidebar-account')).toBeHidden();
   await expect.poll(iconSpread).toBeLessThan(1);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();

@@ -26,7 +26,8 @@
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
-  import { Progress } from '$lib/components/ui/progress/index.js';
+  import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
+  import XIcon from '@lucide/svelte/icons/x';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
   import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
@@ -1536,7 +1537,7 @@
         {#snippet account(close)}
           <nav aria-label="Account"><Sidebar.Menu><Sidebar.MenuItem>
             <Sidebar.MenuButton size="lg" tooltipContent="Account" aria-label="Account" isActive={accountView} aria-current={accountView ? 'page' : undefined} onclick={async () => { await navigate('account'); close(); }}>
-              <UserRoundIcon /><span class="sidebar-account"><span>{user?.handle}</span><span class="sidebar-account-role"><span aria-hidden="true">· </span>{user?.role === 'administrator' ? 'Administrator' : 'User'}</span></span>
+              <UserRoundIcon /><span class="sidebar-account"><span>{user?.handle}</span><span class="sidebar-account-role">{user?.role === 'administrator' ? 'Administrator' : 'User'}</span></span>
             </Sidebar.MenuButton>
           </Sidebar.MenuItem></Sidebar.Menu></nav>
         {/snippet}
@@ -1625,22 +1626,18 @@
                   <option value="size_desc">Size: largest first</option>
                 </select>
               </div>
-              {#if transferBusy && transferPhase !== 'complete'}
-                <div class="upload-status" role="status">
-                  <div class="upload-status-body">
-                    <div class="upload-status-line"><span class="upload-name" title={transferName}>{transferName}</span><span class="upload-phase">{transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span class="upload-percent">{progress}%</span></div>
-                    <Progress value={progress} max={100} aria-label="Upload progress" />
-                    {#if transferBusy}<Button variant="link" class="h-auto justify-self-start p-0" onclick={cancelUploadBatch} disabled={!uploadCancelable}>Cancel upload</Button>{/if}
-                  </div>
-                </div>
-              {/if}
 
             </section>
             {#if (uploadBatchBusy || uploadReportVisible) && (uploadBatchStatus || uploadResults.length)}
               <section class="upload-batch-report" aria-label="Upload results">
-                {#if uploadBatchStatus && !uploadComplete}<p class="upload-batch-status" role="status">{uploadBatchStatus}</p>{/if}
-                {#if uploadBatchBusy}<Button variant="outline" size="sm" onclick={cancelUploadBatch}>Cancel remaining uploads</Button>{/if}
-                {#if uploadReportVisible && uploadResults.length}
+                {#if uploadBatchStatus && !uploadBatchBusy && !uploadComplete}<p class="upload-batch-status" role="status">{uploadBatchStatus}</p>{/if}
+                {#if uploadBatchBusy}
+                  <div class="upload-pending">
+                    <span role="status" aria-label="Uploading"><LoaderCircleIcon class="refreshing" aria-hidden="true" /><span class="sr-only">{transferName ? `Uploading ${transferName}. ${progress}%.` : 'Reading files and folders.'}</span></span>
+                    <Button variant="ghost" size="icon" aria-label="Cancel upload" title="Cancel upload" onclick={cancelUploadBatch}><XIcon /></Button>
+                  </div>
+                {/if}
+                {#if !uploadBatchBusy && uploadReportVisible && uploadResults.length}
                   <details open={uploadResultsExpanded} ontoggle={(event) => uploadResultsExpanded = event.currentTarget.open}>
                     <summary><span class="upload-results-summary">{#if uploadComplete}<CheckIcon aria-hidden="true" /><span class="sr-only" role="status">Upload complete.{' '}</span>{/if}<span>Results for {uploadResults.length} {uploadResults.length === 1 ? 'item' : 'items'}</span></span></summary>
                     <ul>{#each uploadResults as result, index (index)}<li data-upload-result={result.path}><span class="upload-result-path">{result.path}</span><span>{uploadResultLabel(result)}</span></li>{/each}</ul>
@@ -1761,7 +1758,9 @@
 
 <style>
   .upload-batch-report { display: grid; gap: 12px; padding-block: 12px; }
-  .upload-batch-report > button { justify-self: start; }
+  .upload-pending { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); }
+  .upload-pending [role="status"] { display: flex; }
+  .upload-pending :global(svg) { width: var(--icon-file); height: var(--icon-file); }
   .upload-batch-report summary { cursor: pointer; font-size: var(--type-ui); }
   .upload-batch-report li { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-block: 8px; font-size: var(--type-ui); }
   .upload-batch-report li > span:last-child { flex-shrink: 0; }

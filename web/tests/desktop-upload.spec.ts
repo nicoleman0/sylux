@@ -287,12 +287,17 @@ test('cancel during saving retains the confirmed file and stops the remaining qu
   const store = await backend(page);
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  await page.route('**/uploads/*/commit', async route => { await gate; return route.fallback(); });
+  let saving!: () => void;
+  const savingStarted = new Promise<void>(resolve => { saving = resolve; });
+  await page.route('**/uploads/*/commit', async route => { saving(); await gate; return route.fallback(); });
   await desktopDrop(page, current(page), [{ name: 'saving.txt' }, { name: 'after.txt' }]);
-  await expect(page.getByText('Saving file', { exact: true })).toBeVisible();
-  await expect(summary(page)).toContainText('1 file left after this item.');
+  await savingStarted;
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
+  await expect(summary(page)).toHaveCount(0);
+  await expect(page.locator('.upload-batch-report details')).toHaveCount(0);
+  await expect(page.locator('.upload-status-line')).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath('desktop-upload-saving.png'), fullPage: true });
-  await page.getByRole('button', { name: 'Cancel remaining uploads', exact: true }).click();
+  await page.getByRole('button', { name: 'Cancel upload', exact: true }).click();
   release();
   await expect(summary(page)).toContainText('Upload stopped at saving.txt.');
   await expect(page.locator('[data-upload-result="saving.txt"]')).toContainText('Saved');
@@ -311,7 +316,7 @@ test('cancel while admission is pending does not reopen a late replacement promp
   await page.route('**/uploads', async route => { started(); await gate; return route.fallback(); });
   await desktopDrop(page, current(page), [{ name: 'same.txt' }, { name: 'after.txt' }]);
   await pending;
-  await page.getByRole('button', { name: 'Cancel remaining uploads', exact: true }).click();
+  await page.getByRole('button', { name: 'Cancel upload', exact: true }).click();
   release();
   await expect(summary(page)).toContainText('Upload stopped at same.txt.');
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
@@ -340,10 +345,19 @@ test('unavailable drop items clear the prior batch report without changing stora
   expect(store.sent).toEqual(['saved.txt']);
 });
 
-test('confirmed uploads keep one compact accessible summary', async ({ page }) => {
+test('confirmed uploads replace a quiet spinner with one compact accessible summary', async ({ page }) => {
   await backend(page);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/uploads/*/commit', async route => { await gate; return route.fallback(); });
   await desktopDrop(page, current(page), [{ name: 'compact.txt' }]);
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true }).locator('svg')).toBeVisible();
+  await expect(summary(page)).toHaveCount(0);
+  await expect(page.locator('.upload-batch-report details')).toHaveCount(0);
+  await expect(page.locator('.upload-pending .sr-only')).toBeAttached();
+  release();
   await expect(completed(page)).toBeAttached();
+  await expect(page.locator('.upload-pending')).toHaveCount(0);
   const report = page.getByRole('region', { name: 'Upload results', exact: true });
   await expect(report.locator('summary')).toHaveText('Upload complete. Results for 1 item');
   await expect(report.locator('summary svg')).toBeVisible();
@@ -407,13 +421,16 @@ test('navigation preserves the active queue without reviving its old report', as
   const store = await backend(page);
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  await page.route('**/uploads/*/commit', async route => { await gate; return route.fallback(); });
+  let saving!: () => void;
+  const savingStarted = new Promise<void>(resolve => { saving = resolve; });
+  await page.route('**/uploads/*/commit', async route => { saving(); await gate; return route.fallback(); });
   await desktopDrop(page, current(page), [{ name: 'first.txt' }, { name: 'second.txt' }]);
-  await expect(page.getByText('Saving file', { exact: true })).toBeVisible();
+  await savingStarted;
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
   await expect(page.locator('.upload-batch-report details')).toHaveCount(0);
-  await expect(page.getByText('Saving file', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Cancel remaining uploads', exact: true })).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cancel upload', exact: true })).toBeVisible();
   release();
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
   await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);

@@ -131,12 +131,6 @@ h1:focus, h2:focus { outline: none; }
 .search-item-main { min-width: 0; padding: 7px 0; }
 .search-location { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding-left: 29px; color: var(--muted-foreground); font-size: var(--type-meta); overflow-wrap: anywhere; }
 .search-location [data-slot="button"] { min-height: 30px; padding: 0 5px; }
-.upload-status { flex-basis: 100%; min-width: 0; padding-top: 3px; }
-.upload-status-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: min(100%, 360px); }
-.upload-status-line { display: flex; align-items: baseline; gap: 12px; font-size: var(--type-ui); }
-.upload-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.upload-phase { color: var(--muted-foreground); }
-.upload-percent { font-variant-numeric: tabular-nums; }
 .workspace-notice { margin-top: 20px; }
 .upload-form { display: flex; align-items: center; gap: 9px; }
 .file-row, .list-head { display: grid; grid-template-columns: minmax(0,1fr) 116px 44px; align-items: center; column-gap: 16px; padding: 0 7px 0 12px; border-bottom: 1px solid var(--border); }
