@@ -122,17 +122,11 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
 
   await page.locator('#upload-file').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
   await expect(page.getByRole('article').filter({ hasText: 'fixture.txt' })).toBeVisible({ timeout: 8000 });
-  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeVisible();
-  const uploadStatus = page.getByRole('status').filter({ hasText: 'fixture.txt' });
-  await expect(uploadStatus.getByText('Saved', { exact: true })).toBeVisible();
-  await expect(uploadStatus.getByText('100%', { exact: true })).toBeVisible();
-  await expect(uploadStatus).not.toContainText('transferred');
-  await expect(uploadStatus.getByRole('progressbar')).toHaveCount(0);
-  const listSummary = await page.locator('.list-summary').boundingBox();
-  const notice = await page.locator('.workspace-notice').boundingBox();
-  expect(listSummary).not.toBeNull();
-  expect(notice).not.toBeNull();
-  expect(notice!.y - (listSummary!.y + listSummary!.height)).toBeGreaterThanOrEqual(16);
+  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeAttached();
+  await expect(page.locator('.upload-batch-report summary')).toHaveText('Upload complete. Results for 1 item');
+  await expect(page.locator('.upload-status')).toHaveCount(0);
+  await expect(page.locator('.upload-batch-status')).toHaveCount(0);
+  await expect(page.locator('.workspace-notice')).toHaveCount(0);
   await page.getByRole('button', { name: 'Options for Notes', exact: true }).click();
   await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
@@ -604,6 +598,7 @@ test('logging out clears account form secrets before another sign-in', async ({ 
   await create.getByLabel('Account name').fill('second');
   await create.getByLabel('Password', { exact: true }).fill('temporary password');
   await create.getByRole('button', { name: 'Create account', exact: true }).click();
+  await expect(create).toBeHidden();
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await create.getByLabel('Account name').fill('unfinished');
   await create.getByLabel('Password', { exact: true }).fill('unfinished password');
@@ -1080,11 +1075,11 @@ for (const width of [1280, 390]) {
     await login(page);
     const longName = `${'long-name-'.repeat(18)}.txt`;
     await page.getByLabel('Choose files to upload').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-    const uploadStatus = page.getByRole('status').filter({ hasText: longName });
-    await expect(uploadStatus.getByText('Saved', { exact: true })).toBeVisible();
-    await expect(uploadStatus.getByText('100%', { exact: true })).toBeVisible();
-    await expect(uploadStatus).not.toContainText('transferred');
-    await expect(uploadStatus.getByRole('progressbar')).toHaveCount(0);
+    await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeAttached();
+    await expect(page.locator('.upload-status')).toHaveCount(0);
+    await page.locator('.upload-batch-report summary').click();
+    await expect(page.locator('[data-upload-result]')).toContainText(longName);
+    await expect(page.locator('[data-upload-result]')).toContainText('Saved');
     await expect(page.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

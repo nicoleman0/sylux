@@ -16,6 +16,7 @@
   import FileIcon from '@lucide/svelte/icons/file';
   import FolderIcon from '@lucide/svelte/icons/folder';
   import PlusIcon from '@lucide/svelte/icons/plus';
+  import CheckIcon from '@lucide/svelte/icons/check';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
   import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
   import ArrowDownIcon from '@lucide/svelte/icons/arrow-down';
@@ -130,7 +131,7 @@
   async function navigate(destination: 'files' | 'trash' | 'account' | 'settings', record = true): Promise<void> {
     if (!user) { view = 'login'; return; }
     if (bulkBusy) return;
-    clearSelection(); closeBulk();
+    clearSelection(); closeBulk(); hideUploadReport();
     if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
     if (destination !== 'files') clearSearch();
     accountView = destination === 'account'; settingsView = destination === 'settings'; showTrash = destination === 'trash';
@@ -146,6 +147,7 @@
     if (!user) return;
     if (bulkBusy) { recordNavigation(); return; }
     closeBulk();
+    hideUploadReport();
     clearSearch();
     const generation = sessionGeneration;
     const state = event.state;
@@ -297,7 +299,10 @@
   type UploadResult = { path: string; kind: 'file' | 'folder'; status: 'waiting' | 'active' | 'saved' | 'created' | 'failed' | 'unknown' | 'canceled' };
   let uploadResults = $state<UploadResult[]>([]);
   let uploadResultsExpanded = $state(false);
-  let uploadBatchDestination = '';
+  let uploadReportVisible = $state(false);
+  const uploadComplete = $derived(!uploadBatchBusy && uploadResults.length > 0 && uploadResults.every((item) => item.status === 'saved' || item.status === 'created'));
+
+  function hideUploadReport(): void { uploadReportVisible = false; uploadResultsExpanded = false; }
   let unresolvedUploadResult: number | null = null;
   let uploadBatchCanceled = false;
   let replacementDecision: ((prompt: ReplacementPrompt | null) => void) | null = null;
@@ -365,6 +370,7 @@
   }
 
   async function setFolderSort(sort: FolderSort): Promise<void> {
+    hideUploadReport();
     folderSort = sort;
     clearSelection();
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false;
@@ -414,6 +420,7 @@
 
   function searchChanged(): void {
     if (bulkBusy) return;
+    hideUploadReport();
     clearSelection();
     if (!searchInput) { clearSearch(true); return; }
     if (searchTimer) clearTimeout(searchTimer);
@@ -487,6 +494,7 @@
     const path = containing ? hit.location : [...hit.location, hit.entry as Folder];
     const folder = path.at(-1);
     if (!folder) return;
+    hideUploadReport();
     clearSearch();
     folderPath = path.map((item, index) => index === 0 ? { ...item, name: 'Files' } : item);
     currentFolder = folderPath.at(-1)!;
@@ -498,6 +506,7 @@
 
   async function loadMore(): Promise<void> {
     if (!hasMore || !nextCursor || loading || bulkBusy) return;
+    hideUploadReport();
     clearSelection();
     const generation = sessionGeneration;
     const folderId = currentFolder.id;
@@ -523,6 +532,7 @@
 
   async function loadPrevious(): Promise<void> {
     if (pageIndex === 0 || loading || bulkBusy) return;
+    hideUploadReport();
     clearSelection();
     const generation = sessionGeneration;
     const folderId = currentFolder.id;
@@ -626,7 +636,7 @@
     controller?.abort(); controller = null;
     dismissReplacement(); uploadReplacement = false;
     uploadBatchCanceled = true; uploadBatchBusy = false; uploadBatchStatus = '';
-    uploadResults = []; uploadResultsExpanded = false; unresolvedUploadResult = null; uploadBatchDestination = '';
+    uploadResults = []; uploadResultsExpanded = false; uploadReportVisible = false; unresolvedUploadResult = null;
     transfers.invalidate(); transfers = new TransferApi(client, mutations);
     transferName = ''; progress = 0; transferPhase = ''; transferBusy = false; uploadCancelable = false;
     uploadId = ''; unresolvedUploadId = ''; unresolvedUploadName = ''; unresolvedCancel = false; notice = '';
@@ -1007,7 +1017,7 @@
       const read = snapshotDesktopDrop(event.dataTransfer);
       void runUploadBatch(read, destination);
     } catch (error) {
-      uploadResults = []; uploadResultsExpanded = false; unresolvedUploadResult = null; notice = '';
+      uploadResults = []; uploadResultsExpanded = false; uploadReportVisible = true; unresolvedUploadResult = null; notice = '';
       uploadBatchStatus = error instanceof Error ? error.message : 'The dropped items could not be read. Nothing was uploaded.';
     }
   }
@@ -1036,10 +1046,6 @@
     throw new Error('The upload destination is no longer available.');
   }
 
-  function uploadCounts(saved: number, created: number): string {
-    return `${saved} ${saved === 1 ? 'file' : 'files'} saved. ${created} ${created === 1 ? 'folder' : 'folders'} created`;
-  }
-
   function uploadResultLabel(result: UploadResult): string {
     if (result.status === 'waiting') return uploadBatchBusy ? 'Waiting' : 'Not attempted';
     return { active: result.kind === 'folder' ? 'Creating folder' : 'Uploading', saved: 'Saved', created: 'Folder created', failed: 'Failed', unknown: 'Outcome unknown', canceled: 'Canceled' }[result.status];
@@ -1049,14 +1055,15 @@
     if (unresolvedUploadResult === null || !uploadResults[unresolvedUploadResult]) return;
     uploadResults[unresolvedUploadResult].status = status;
     unresolvedUploadResult = null;
-    uploadBatchStatus = `Upload stopped. ${uploadCounts(uploadResults.filter((item) => item.status === 'saved').length, uploadResults.filter((item) => item.status === 'created').length)} in ${uploadBatchDestination}. Remaining items were not resumed.`;
+    uploadBatchStatus = 'Upload stopped.';
   }
 
   async function runUploadBatch(read: (canceled: () => boolean) => Promise<UploadItem[]>, destination: Folder): Promise<void> {
     if (uploadBatchBusy || transferBusy || unresolvedUploadId) return;
     const generation = sessionGeneration;
+    uploadReportVisible = true;
     uploadBatchBusy = true; uploadBatchCanceled = false; uploadBatchStatus = 'Reading files and folders…'; notice = '';
-    uploadResults = []; uploadResultsExpanded = false; unresolvedUploadResult = null; uploadBatchDestination = destination.name;
+    uploadResults = []; uploadResultsExpanded = false; unresolvedUploadResult = null;
     let saved = 0; let created = 0; let complete = false;
     let currentPath = '';
     let currentIndex = -1;
@@ -1073,7 +1080,7 @@
         uploadResults[index].status = 'active';
         currentPath = item.path.join('/');
         const remaining = uploadResults.filter((result) => result.kind === 'file' && result.status === 'waiting').length;
-        uploadBatchStatus = `Adding ${currentPath} to ${destination.name}… ${remaining} ${remaining === 1 ? 'file' : 'files'} left after this item. ${uploadCounts(saved, created)}.`;
+        uploadBatchStatus = `Adding ${currentPath} to ${destination.name}… ${remaining} ${remaining === 1 ? 'file' : 'files'} left after this item.`;
         const parent = destinations.get(JSON.stringify(item.path.slice(0, -1)));
         if (!parent) throw new Error('The destination for this item could not be found.');
         if (item.kind === 'folder') {
@@ -1109,8 +1116,7 @@
       complete = !uploadBatchCanceled && !unresolvedUploadId && saved + created === items.length;
       if (currentIndex >= 0 && uploadResults[currentIndex].status === 'active') uploadResults[currentIndex].status = 'canceled';
       uploadResultsExpanded = !complete;
-      uploadBatchStatus = `${complete ? 'All items added.' : `Upload stopped${currentPath ? ` at ${currentPath}` : ''}.`} ${uploadCounts(saved, created)} in ${destination.name}.${complete ? '' : ' Confirmed items remain; remaining items were not attempted.'}`;
-      if (complete && !notice) notice = 'Upload complete.';
+      uploadBatchStatus = complete ? '' : `Upload stopped${currentPath ? ` at ${currentPath}` : ''}.`;
     } catch (error) {
       if (generation !== sessionGeneration) return;
       const uncertain = creatingFolder && (!(error instanceof HttpError) || error.status >= 500);
@@ -1119,7 +1125,7 @@
       const reason = error instanceof HttpError && error.status === 409 ? 'An item already has this name. Rename it before trying again.' :
         error instanceof HttpError && error.status >= 400 && error.status < 500 ? 'The item could not be added. Check its name and destination.' :
         uncertain ? 'The last item may have been added. Refresh your files before retrying it.' : error instanceof Error ? error.message : 'The dropped items could not be read.';
-      uploadBatchStatus = `Upload stopped${currentPath ? ` at ${currentPath}` : ''}. ${uploadCounts(saved, created)}. ${reason} Confirmed items remain; remaining items were not attempted.`;
+      uploadBatchStatus = `Upload stopped${currentPath ? ` at ${currentPath}` : ''}. ${reason}`;
     } finally {
       if (generation === sessionGeneration) {
         if (uploadBatchCanceled) dismissReplacement();
@@ -1216,7 +1222,7 @@
   async function showCommittedUpload(): Promise<void> {
     const generation = sessionGeneration;
     progress = 100; transferPhase = 'complete';
-    notice = uploadReplacement ? 'Replacement complete. The previous file is in trash. Rename the current file before restoring the previous one.' : uploadBatchBusy ? '' : 'Upload complete.';
+    notice = uploadReplacement ? 'Replacement complete. The previous file is in trash. Rename the current file before restoring the previous one.' : '';
     try { if (!await refreshRoot()) return; } catch { /* Keep the confirmed commit outcome visible. */ }
     if (generation !== sessionGeneration) return;
     await refresh();
@@ -1406,7 +1412,7 @@
       unresolvedCancel = false;
       await showCommittedUpload();
       if (generation !== sessionGeneration) return;
-      if (!uploadReplacement) notice = 'Upload complete. The saved file is listed below.';
+      if (!uploadReplacement) notice = '';
     } else if (outcome === 'canceled' || outcome === 'rejected') {
       resolveUploadResult(outcome === 'canceled' ? 'canceled' : 'failed');
       unresolvedUploadId = '';
@@ -1462,6 +1468,7 @@
   async function openFolder(folder: Folder): Promise<void> {
     if (bulkBusy) return;
     closeBulk();
+    hideUploadReport();
     clearSearch();
     const index = folderPath.findIndex((item) => item.id === folder.id);
     folderPath = index >= 0 ? folderPath.slice(0, index + 1) : [...folderPath, folder];
@@ -1529,7 +1536,7 @@
         {#snippet account(close)}
           <nav aria-label="Account"><Sidebar.Menu><Sidebar.MenuItem>
             <Sidebar.MenuButton size="lg" tooltipContent="Account" aria-label="Account" isActive={accountView} aria-current={accountView ? 'page' : undefined} onclick={async () => { await navigate('account'); close(); }}>
-              <UserRoundIcon /><span class="sidebar-account"><span>{user?.handle}</span><span class="sidebar-account-role">{user?.role === 'administrator' ? 'Administrator' : 'User'}</span></span>
+              <UserRoundIcon class="sidebar-account-icon" /><span class="sidebar-account"><span>{user?.handle}</span><span class="sidebar-account-role">{user?.role === 'administrator' ? 'Administrator' : 'User'}</span></span>
             </Sidebar.MenuButton>
           </Sidebar.MenuItem></Sidebar.Menu></nav>
         {/snippet}
@@ -1569,7 +1576,7 @@
             <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h1 id="trash-heading" tabindex="-1">Trash</h1><p class="text-sm">Restore a parent folder before its children. Permanent removal is not available yet.</p><Button variant="outline" size="sm" disabled={trashLoading || trashBusy} onclick={loadTrash}>Refresh trash</Button>{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore</Button></li>{/each}</ul>{/if}</section>
 
         {:else}
-          <section class="files-content" aria-labelledby="folder-title" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
+          <section class="files-content" aria-labelledby="folder-title">
             {#if unresolvedUploadId}<Alert.Root variant="destructive"><Alert.Title>Upload status needs checking</Alert.Title><Alert.Description><p>{unresolvedUploadName} may have been saved. Check its status before uploading it again.</p><div class="mt-2 flex flex-wrap gap-2"><Button variant="outline" size="sm" onclick={reconcileUpload} disabled={transferBusy}>Check upload status</Button>{#if unresolvedCancel}<Button variant="outline" size="sm" onclick={retryCancel} disabled={transferBusy}>Retry cancellation</Button>{/if}</div></Alert.Description></Alert.Root>{/if}
 
             <div class="page-heading">
@@ -1618,24 +1625,24 @@
                   <option value="size_desc">Size: largest first</option>
                 </select>
               </div>
-              {#if transferBusy || progress > 0}
+              {#if transferBusy && transferPhase !== 'complete'}
                 <div class="upload-status" role="status">
                   <div class="upload-status-body">
-                    <div class="upload-status-line"><span class="upload-name" title={transferName}>{transferName}</span><span class="upload-phase">{transferPhase === 'complete' ? 'Saved' : transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span class="upload-percent">{progress}%</span></div>
-                    {#if transferBusy && transferPhase !== 'complete'}<Progress value={progress} max={100} aria-label="Upload progress" />{/if}
+                    <div class="upload-status-line"><span class="upload-name" title={transferName}>{transferName}</span><span class="upload-phase">{transferPhase === 'saving' ? 'Saving file' : 'Uploading'}</span><span class="upload-percent">{progress}%</span></div>
+                    <Progress value={progress} max={100} aria-label="Upload progress" />
                     {#if transferBusy}<Button variant="link" class="h-auto justify-self-start p-0" onclick={cancelUploadBatch} disabled={!uploadCancelable}>Cancel upload</Button>{/if}
                   </div>
                 </div>
               {/if}
 
             </section>
-            {#if uploadBatchStatus}
+            {#if (uploadBatchBusy || uploadReportVisible) && (uploadBatchStatus || uploadResults.length)}
               <section class="upload-batch-report" aria-label="Upload results">
-                <p class="upload-batch-status" role="status">{uploadBatchStatus}</p>
+                {#if uploadBatchStatus && !uploadComplete}<p class="upload-batch-status" role="status">{uploadBatchStatus}</p>{/if}
                 {#if uploadBatchBusy}<Button variant="outline" size="sm" onclick={cancelUploadBatch}>Cancel remaining uploads</Button>{/if}
-                {#if uploadResults.length}
+                {#if uploadReportVisible && uploadResults.length}
                   <details open={uploadResultsExpanded} ontoggle={(event) => uploadResultsExpanded = event.currentTarget.open}>
-                    <summary>Results for {uploadResults.length} {uploadResults.length === 1 ? 'item' : 'items'}</summary>
+                    <summary><span class="upload-results-summary">{#if uploadComplete}<CheckIcon aria-hidden="true" /><span class="sr-only" role="status">Upload complete.{' '}</span>{/if}<span>Results for {uploadResults.length} {uploadResults.length === 1 ? 'item' : 'items'}</span></span></summary>
                     <ul>{#each uploadResults as result, index (index)}<li data-upload-result={result.path}><span class="upload-result-path">{result.path}</span><span>{uploadResultLabel(result)}</span></li>{/each}</ul>
                   </details>
                 {/if}
@@ -1649,6 +1656,7 @@
                 {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
               </div>
             {/if}
+            <section class="file-drop-region" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
             {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span>
               <button type="button" class="list-sort" aria-label="Sort by name" aria-pressed={folderSort.startsWith('name_')} aria-describedby="name-sort-order" disabled={bulkBusy || bulkNeedsRefresh} onclick={() => toggleFolderSort('name')}>
                 Name<span aria-hidden="true">{#if folderSort === 'name_asc'}<ArrowUpIcon />{:else if folderSort === 'name_desc'}<ArrowDownIcon />{:else}<ArrowUpDownIcon />{/if}</span>
@@ -1666,6 +1674,7 @@
                 <EntryOptions {entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
               </article>
             {/each}</div>{/if}
+            </section>
             {#if dropPending}<p role="status">Moving {dropPending.entry.name} to {dropPending.destination.name}…</p>{/if}
             {#if dropError}<p role="alert">{dropError}</p>{/if}
             {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading || bulkBusy}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading || bulkBusy}>Next page</Button>{/if}</div>{/if}
@@ -1757,8 +1766,11 @@
   .upload-batch-report li { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-block: 8px; font-size: var(--type-ui); }
   .upload-batch-report li > span:last-child { flex-shrink: 0; }
   .upload-batch-status, .upload-result-path { overflow-wrap: anywhere; min-width: 0; }
-  .files-content[data-drop-active="true"] { outline: 2px solid var(--primary); outline-offset: -2px; }
-  :global(.drop-active) { background: var(--accent); outline: 2px solid var(--primary); outline-offset: -2px; }
+  .upload-results-summary { display: inline-flex; align-items: center; gap: 7px; vertical-align: middle; }
+  .upload-results-summary :global(svg) { width: var(--icon-small); height: var(--icon-small); color: var(--primary); }
+  .file-drop-region { border-radius: var(--radius-lg); }
+  .file-drop-region[data-drop-active="true"] { outline: 2px solid var(--primary); outline-offset: -2px; }
+  :global(.drop-active) { border-radius: var(--radius-lg); background: var(--accent); outline: 2px solid var(--primary); outline-offset: -2px; }
   :global(.refreshing) { animation: refresh-turn 1s linear infinite; }
   @keyframes refresh-turn { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { :global(.refreshing) { animation: none; } }

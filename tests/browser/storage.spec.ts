@@ -254,7 +254,10 @@ test('browsing remains available while a real upload body is delayed', { annotat
   await page.getByRole('button', { name: `Open ${fixtures.folder}`, exact: true }).click();
   await expect(page.getByRole('heading', { name: fixtures.folder })).toBeVisible();
   release();
-  await expect(page.getByRole('status').filter({ hasText: 'All items added.' })).toContainText('1 file saved.', { timeout: 20_000 });
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled({ timeout: 20_000 });
+  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await expect(page.getByRole('article', { name: `slow-upload-${phase}.bin`, exact: true })).toBeVisible();
 });
 
 test('cancel aborts the in-flight upload without claiming a saved file', { annotation: { type: 'harness_case', description: 'storage_upload_cancel' } }, async () => {
@@ -335,7 +338,8 @@ test('lost commit response is resolved through the original upload status', { an
   await page.getByRole('button', { name: 'Check upload status' }).click();
   await expect(unresolved).toBeHidden();
   await expect(page.getByRole('article').filter({ hasText: fileName })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toContainText('The saved file is listed below.');
+  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeAttached();
+  await expect(page.locator('.upload-status')).toHaveCount(0);
 
   let ticketRequests = 0;
   let admissionRequests = 0;

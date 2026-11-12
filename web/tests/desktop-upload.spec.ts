@@ -158,6 +158,7 @@ async function desktopDrop(page: Page, target: Locator, sources: Source[], fallb
 
 const current = (page: Page) => page.locator('[data-drop-target="current-folder"]');
 const summary = (page: Page) => page.locator('.upload-batch-status');
+const completed = (page: Page) => page.getByRole('status').filter({ hasText: 'Upload complete.' });
 
 test('mixed desktop drops preserve nested and empty folders across directory batches', async ({ page }) => {
   const store = await backend(page);
@@ -165,7 +166,7 @@ test('mixed desktop drops preserve nested and empty folders across directory bat
     { name: 'Album', batches: [[{ name: 'first.txt' }, { name: 'Nested', batches: [[{ name: 'inner.txt' }]] }], [{ name: 'last.txt' }]] },
     { name: 'Empty', batches: [] }, { name: 'loose.txt' },
   ], false, true);
-  await expect(summary(page)).toContainText('All items added. 4 files saved. 3 folders created in Files.');
+  await expect(completed(page)).toBeAttached();
   const album = store.entries.find(entry => entry.name === 'Album')!;
   const nested = store.entries.find(entry => entry.name === 'Nested')!;
   expect(store.events).toEqual([
@@ -184,12 +185,12 @@ test('mixed desktop drops preserve nested and empty folders across directory bat
 test('files fallback supports folder rows and Files sidebar as separate drop destinations', async ({ page }) => {
   const store = await backend(page);
   await desktopDrop(page, page.getByRole('article', { name: 'Destination', exact: true }), [{ name: 'row.txt', content: '' }], true);
-  await expect(summary(page)).toContainText('1 file saved. 0 folders created in Destination.');
+  await expect(completed(page)).toBeAttached();
   await page.getByText('Results for 1 item', { exact: true }).click();
   await expect(page.locator('[data-upload-result="row.txt"]')).toContainText('Saved');
   await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
   await desktopDrop(page, page.locator('[data-sidebar=menu-button][data-drop-target=root]'), [{ name: 'root.txt' }], true);
-  await expect(summary(page)).toContainText('1 file saved. 0 folders created in Files.');
+  await expect(completed(page)).toBeAttached();
   expect(store.events).toEqual([{ kind: 'file', name: 'row.txt', parent: 'destination' }, { kind: 'file', name: 'root.txt', parent: 'root' }]);
 });
 
@@ -204,12 +205,12 @@ test('chooser uploads multiple files immediately and refreshes a nested current 
     { name: 'one.txt', mimeType: 'text/plain', buffer: Buffer.from('one') },
     { name: 'two.txt', mimeType: 'text/plain', buffer: Buffer.from('two') },
   ]);
-  await expect(summary(page)).toContainText('All items added. 2 files saved. 0 folders created in Inner.');
+  await expect(completed(page)).toBeAttached();
   await expect(page.getByRole('button', { name: 'Upload', exact: true })).toHaveCount(0);
   expect(store.events).toEqual([{ kind: 'file', name: 'one.txt', parent: 'inner' }, { kind: 'file', name: 'two.txt', parent: 'inner' }]);
   await page.getByLabel('Choose files to upload').setInputFiles([]);
   expect(store.events).toHaveLength(2);
-  await expect(summary(page)).toContainText('All items added.');
+  await expect(completed(page)).toBeAttached();
   expect(errors).toEqual([]);
 });
 
@@ -219,7 +220,7 @@ test('desktop conflict waits for replacement confirmation before bytes or later 
   await expect(page.getByRole('dialog')).toContainText('Replace same.txt?');
   expect(store.sent).toEqual([]);
   await page.getByRole('button', { name: 'Replace file', exact: true }).click();
-  await expect(summary(page)).toContainText('All items added. 2 files saved.');
+  await expect(completed(page)).toBeAttached();
   expect(store.sent).toEqual(['same.txt', 'after.txt']);
 });
 
@@ -227,7 +228,7 @@ test('declining replacement stops the batch without sending later files', async 
   const store = await backend(page);
   await desktopDrop(page, current(page), [{ name: 'same.txt' }, { name: 'after.txt' }]);
   await page.getByRole('button', { name: 'Keep existing file', exact: true }).click();
-  await expect(summary(page)).toContainText('Upload stopped at same.txt. 0 files saved.');
+  await expect(summary(page)).toContainText('Upload stopped at same.txt.');
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
   await expect(page.locator('[data-upload-result="same.txt"]')).toContainText('Canceled');
   await expect(page.locator('[data-upload-result="after.txt"]')).toContainText('Not attempted');
@@ -238,7 +239,7 @@ for (const outcome of ['failed', 'uncertain'] as const) {
   test(`${outcome} upload stops later items and reports partial completion`, async ({ page }) => {
     const store = await backend(page, { name: 'broken.txt', outcome });
     await desktopDrop(page, current(page), [{ name: 'saved.txt' }, { name: 'broken.txt' }, { name: 'after.txt' }]);
-    await expect(summary(page)).toContainText('Upload stopped at broken.txt. 1 file saved. 0 folders created');
+    await expect(summary(page)).toContainText('Upload stopped at broken.txt.');
     await expect(page.locator('[data-upload-result="saved.txt"]')).toContainText('Saved');
     await expect(page.locator('[data-upload-result="broken.txt"]')).toContainText(outcome === 'uncertain' ? 'Outcome unknown' : 'Failed');
     await expect(page.locator('[data-upload-result="after.txt"]')).toContainText('Not attempted');
@@ -247,12 +248,12 @@ for (const outcome of ['failed', 'uncertain'] as const) {
     if (outcome === 'uncertain') {
       await expect(page.getByText('Upload status needs checking')).toBeVisible();
       await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeDisabled();
-      await expect(summary(page)).not.toContainText('All items added');
+      await expect(completed(page)).toHaveCount(0);
       await page.screenshot({ path: test.info().outputPath('desktop-upload-unknown-results.png'), fullPage: true });
       store.resolve('broken.txt', 'committed');
       await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
       await expect(page.locator('[data-upload-result="broken.txt"]')).toContainText('Saved');
-      await expect(summary(page)).toContainText('2 files saved.');
+      await expect(summary(page)).toHaveText('Upload stopped.');
       await expect(page.locator('[data-upload-result="after.txt"]')).toContainText('Not attempted');
       expect(store.sent).toEqual(['saved.txt', 'broken.txt']);
     }
@@ -293,7 +294,7 @@ test('cancel during saving retains the confirmed file and stops the remaining qu
   await page.screenshot({ path: test.info().outputPath('desktop-upload-saving.png'), fullPage: true });
   await page.getByRole('button', { name: 'Cancel remaining uploads', exact: true }).click();
   release();
-  await expect(summary(page)).toContainText('Upload stopped at saving.txt. 1 file saved.');
+  await expect(summary(page)).toContainText('Upload stopped at saving.txt.');
   await expect(page.locator('[data-upload-result="saving.txt"]')).toContainText('Saved');
   await expect(page.locator('[data-upload-result="after.txt"]')).toContainText('Not attempted');
   await page.screenshot({ path: test.info().outputPath('desktop-upload-canceled-results.png'), fullPage: true });
@@ -312,7 +313,7 @@ test('cancel while admission is pending does not reopen a late replacement promp
   await pending;
   await page.getByRole('button', { name: 'Cancel remaining uploads', exact: true }).click();
   release();
-  await expect(summary(page)).toContainText('Upload stopped at same.txt. 0 files saved.');
+  await expect(summary(page)).toContainText('Upload stopped at same.txt.');
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(store.sent).toEqual([]);
@@ -330,11 +331,112 @@ test('unreadable zero-byte fallback is rejected before storage changes', async (
 test('unavailable drop items clear the prior batch report without changing storage', async ({ page }) => {
   const store = await backend(page);
   await desktopDrop(page, current(page), [{ name: 'saved.txt' }]);
-  await expect(summary(page)).toContainText('All items added.');
+  await expect(completed(page)).toBeAttached();
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
   await desktopDrop(page, current(page), [{ name: 'unavailable', unavailable: true }]);
   await expect(summary(page)).toContainText('A dropped item could not be read.');
   await expect(page.locator('[data-upload-result]')).toHaveCount(0);
   await expect(page.locator('.workspace-notice')).toHaveCount(0);
   expect(store.sent).toEqual(['saved.txt']);
+});
+
+test('confirmed uploads keep one compact accessible summary', async ({ page }) => {
+  await backend(page);
+  await desktopDrop(page, current(page), [{ name: 'compact.txt' }]);
+  await expect(completed(page)).toBeAttached();
+  const report = page.getByRole('region', { name: 'Upload results', exact: true });
+  await expect(report.locator('summary')).toHaveText('Upload complete. Results for 1 item');
+  await expect(report.locator('summary svg')).toBeVisible();
+  await expect(report.locator('details')).not.toHaveAttribute('open');
+  await expect(summary(page)).toHaveCount(0);
+  await expect(page.locator('.upload-status')).toHaveCount(0);
+  await expect(page.locator('.workspace-notice')).toHaveCount(0);
+  await report.locator('summary').click();
+  await expect(page.locator('[data-upload-result="compact.txt"]')).toContainText('Saved');
+});
+
+test('completed results stay dismissed across folder, view, search and page changes', async ({ page }) => {
+  const store = await backend(page);
+  const report = page.getByRole('region', { name: 'Upload results', exact: true });
+  await desktopDrop(page, current(page), [{ name: 'folder.txt' }]);
+  await expect(completed(page)).toBeAttached();
+  await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+  await expect(report).toHaveCount(0);
+  await page.goBack();
+  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
+  await expect(report).toHaveCount(0);
+
+  await desktopDrop(page, current(page), [{ name: 'view.txt' }]);
+  await expect(completed(page)).toBeAttached();
+  await page.getByRole('button', { name: 'Account', exact: true }).click();
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeFocused();
+  await expect(report).toHaveCount(0);
+
+  await desktopDrop(page, current(page), [{ name: 'search.txt' }]);
+  await expect(completed(page)).toBeAttached();
+  await page.getByLabel('Search files and folders').fill('missing');
+  await page.getByRole('button', { name: 'Clear search', exact: true }).click();
+  await expect(report).toHaveCount(0);
+
+  await page.route('**/folders/root/children*', route => route.fulfill({ json: { items: store.entries.filter(entry => entry.parent_id === 'root'), next_cursor: new URL(route.request().url()).searchParams.has('cursor') ? null : 'more', has_more: !new URL(route.request().url()).searchParams.has('cursor') } }));
+  await desktopDrop(page, current(page), [{ name: 'page.txt' }]);
+  await expect(completed(page)).toBeAttached();
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await expect(report).toHaveCount(0);
+  await page.getByRole('button', { name: 'Previous page', exact: true }).click();
+  await expect(report).toHaveCount(0);
+});
+
+test('navigation hides unknown results while retaining the reconciliation lock', async ({ page }) => {
+  const store = await backend(page, { name: 'unknown.txt', outcome: 'uncertain' });
+  await desktopDrop(page, current(page), [{ name: 'unknown.txt' }, { name: 'after.txt' }]);
+  await expect(page.locator('[data-upload-result="unknown.txt"]')).toContainText('Outcome unknown');
+  await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);
+  await expect(page.getByText('Upload status needs checking')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeDisabled();
+  store.resolve('unknown.txt', 'committed');
+  await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
+  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);
+  expect(store.sent).toEqual(['unknown.txt']);
+});
+
+test('navigation preserves the active queue without reviving its old report', async ({ page }) => {
+  const store = await backend(page);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/uploads/*/commit', async route => { await gate; return route.fallback(); });
+  await desktopDrop(page, current(page), [{ name: 'first.txt' }, { name: 'second.txt' }]);
+  await expect(page.getByText('Saving file', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+  await expect(page.locator('.upload-batch-report details')).toHaveCount(0);
+  await expect(page.getByText('Saving file', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cancel remaining uploads', exact: true })).toBeVisible();
+  release();
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
+  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);
+  expect(store.sent).toEqual(['first.txt', 'second.txt']);
+  expect(store.events.every(event => event.parent === 'root')).toBe(true);
+});
+
+test('drop targets are rounded and confined to the listing, with outside drops blocked', async ({ page }) => {
+  const store = await backend(page);
+  const region = current(page);
+  await expect(region.getByRole('heading')).toHaveCount(0);
+  await expect(region.getByLabel('Search files and folders')).toHaveCount(0);
+  await expect(region.getByRole('button', { name: 'Choose files', exact: true })).toHaveCount(0);
+  const transfer = await page.evaluateHandle(() => { const transfer = new DataTransfer(); transfer.items.add(new File(['x'], 'outside.txt')); return transfer; });
+  await page.locator('.page-heading').dispatchEvent('dragover', { dataTransfer: transfer });
+  await expect(region).toHaveAttribute('data-drop-active', 'false');
+  expect(await page.locator('.page-heading').evaluate((element, dataTransfer) => !element.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer })), transfer)).toBe(true);
+  expect(store.events).toEqual([]);
+  await region.dispatchEvent('dragover', { dataTransfer: transfer });
+  await expect(region).toHaveAttribute('data-drop-active', 'true');
+  for (const target of [region, page.getByRole('article', { name: 'Destination', exact: true }), page.locator('[data-sidebar=menu-button][data-drop-target=root]')]) {
+    await target.dispatchEvent('dragover', { dataTransfer: transfer });
+    expect(await target.evaluate(element => parseFloat(getComputedStyle(element).borderRadius))).toBeGreaterThan(0);
+  }
+  await transfer.dispose();
 });
