@@ -8,6 +8,14 @@ export default defineConfig({
   reporter: [['list']],
   projects: [
     { name: 'chromium', use: { browserName: 'chromium' } },
-    { name: 'firefox-classic', use: { browserName: 'firefox', launchOptions: { firefoxUserPrefs: { 'ui.useOverlayScrollbars': 0 } } } },
+    {
+      name: 'firefox-classic',
+      use: {
+        browserName: 'firefox',
+        // macOS headless Firefox does not allocate native scrollbar width.
+        headless: process.platform !== 'darwin',
+        launchOptions: { firefoxUserPrefs: { 'ui.useOverlayScrollbars': 0 } },
+      },
+    },
   ],
 });

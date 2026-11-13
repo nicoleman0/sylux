@@ -190,11 +190,18 @@ test('PDF page and zoom changes cancel pending renders, and closing releases the
 
 for (const [mode, cause] of [['render-error', 'render failure sentinel'], ['runtime-error', 'this[#n].getOrInsertComputed is not a function']] as const) {
   test(`PDF ${mode} retains its cause in local diagnostics`, async ({ page }) => {
-    const diagnostics: string[] = [];
-    page.on('console', message => { if (message.type() === 'warning') diagnostics.push(message.text()); });
+    const diagnostics: Array<{ text: string; error: { name: string; message: string; stack?: string } }> = [];
+    page.on('console', async message => {
+      if (message.type() !== 'warning' || !message.text().startsWith('PDF preview failed')) return;
+      const error = await message.args()[2].evaluate((error: Error) => ({ name: error.name, message: error.message, stack: error.stack }));
+      diagnostics.push({ text: message.text(), error });
+    });
     const dialog = await openPdf(page, mode);
     await expect(dialog.getByRole('alert')).toContainText('Could not display this PDF page');
-    expect(diagnostics.join('\n')).toContain(cause);
-    expect(diagnostics.join('\n')).not.toContain('mock document');
+    await expect.poll(() => diagnostics[0]?.error.message).toBe(cause);
+    expect(diagnostics[0].text).toContain('PDF preview failed');
+    expect(diagnostics[0].error.name).toBe(mode === 'runtime-error' ? 'TypeError' : 'Error');
+    expect(diagnostics[0].error.stack).toContain('pdfjs-dist.js');
+    expect(JSON.stringify(diagnostics)).not.toContain('mock document');
   });
 }

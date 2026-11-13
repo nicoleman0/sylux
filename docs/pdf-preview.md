@@ -16,6 +16,6 @@ The check uses browser capabilities, not user-agent strings. Sylux does not add 
 
 ## Verification
 
-Run `npm --prefix web exec -- playwright install chromium firefox`, then from `web` run `npx playwright test --config playwright.pdf.config.ts`. This focused suite includes Firefox with classic scrollbars forced at launch and checks that the scrollbar consumes layout width before exercising the real PDF fixture. It uses a disposable browser profile and does not change macOS settings.
+Run `npm --prefix web exec -- playwright install chromium firefox`, then from `web` run `npx playwright test --config playwright.pdf.config.ts`. This focused suite includes Firefox with classic scrollbars forced at launch and checks that the scrollbar consumes layout width before exercising the real PDF fixture. On macOS, Firefox runs headed because its headless mode does not allocate native scrollbar width. It opens a test window in a disposable profile and does not change macOS settings.
 
 The launch preference follows [Firefox's macOS testing guidance](https://firefox-source-docs.mozilla.org/ai-agent-tools/skills/desktop-theme-probing/references/platform-macos.html). Automated capability tests remove each required method independently and verify that the renderer is not loaded. Lifecycle tests cover zero width, stalled page/render work, repeated resizes, timeout recovery and cleanup.

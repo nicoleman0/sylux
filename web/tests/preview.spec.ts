@@ -163,6 +163,7 @@ for (const width of [1280, 390]) {
       const scrollbarWidth = await page.evaluate(() => {
         const pane = document.createElement('div');
         pane.style.cssText = 'width:100px;height:100px;overflow:scroll';
+        pane.innerHTML = '<div style="width:200px;height:200px"></div>';
         document.body.append(pane);
         const width = pane.offsetWidth - pane.clientWidth;
         pane.remove();
