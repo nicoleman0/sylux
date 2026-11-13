@@ -294,10 +294,12 @@ test('cancel during saving retains the confirmed file and stops the remaining qu
   await savingStarted;
   await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
   await expect(summary(page)).toHaveCount(0);
-  await expect(page.locator('.upload-batch-report details')).toHaveCount(0);
+  await expect(page.locator('.upload-batch-report > details')).toHaveCount(0);
   await expect(page.locator('.upload-status-line')).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath('desktop-upload-saving.png'), fullPage: true });
   await page.getByRole('button', { name: 'Cancel upload', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Cancel upload', exact: true })).toBeDisabled();
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toContainText('Stopping after this save');
   release();
   await expect(summary(page)).toContainText('Upload stopped at saving.txt.');
   await expect(page.locator('[data-upload-result="saving.txt"]')).toContainText('Saved');
@@ -353,8 +355,9 @@ test('confirmed uploads replace a quiet spinner with one compact accessible summ
   await desktopDrop(page, current(page), [{ name: 'compact.txt' }]);
   await expect(page.getByRole('status', { name: 'Uploading', exact: true }).locator('svg')).toBeVisible();
   await expect(summary(page)).toHaveCount(0);
-  await expect(page.locator('.upload-batch-report details')).toHaveCount(0);
+  await expect(page.locator('.upload-batch-report > details')).toHaveCount(0);
   await expect(page.locator('.upload-pending .sr-only')).toBeAttached();
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
   release();
   await expect(completed(page)).toBeAttached();
   await expect(page.locator('.upload-pending')).toHaveCount(0);
@@ -428,7 +431,7 @@ test('navigation preserves the active queue without reviving its old report', as
   await savingStarted;
   await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
-  await expect(page.locator('.upload-batch-report details')).toHaveCount(0);
+  await expect(page.locator('.upload-batch-report > details')).toHaveCount(0);
   await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Cancel upload', exact: true })).toBeVisible();
   release();
@@ -456,4 +459,191 @@ test('drop targets are rounded and confined to the listing, with outside drops b
     expect(await target.evaluate(element => parseFloat(getComputedStyle(element).borderRadius))).toBeGreaterThan(0);
   }
   await transfer.dispose();
+});
+
+// Keep actual XHR requests, but control progress events independently of local network speed.
+async function controlUploadProgress(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (body) {
+      const progress = this.upload.onprogress;
+      if (progress && body instanceof Blob) {
+        const upload = this.upload;
+        const size = body.size;
+        (window as unknown as { emitUploadProgress: (sent: number) => void }).emitUploadProgress = (sent) => progress.call(upload, new ProgressEvent('progress', { loaded: sent, total: size, lengthComputable: true }));
+        this.upload.onprogress = null;
+      }
+      return send.call(this, body);
+    };
+  });
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('60 mixed-size folder files keep byte progress across transfers and distinguish sending from saving', async ({ page }) => {
+  await controlUploadProgress(page);
+  const store = await backend(page);
+  const first = deferred(); const second = deferred(); const last = deferred();
+  let contentIndex = 0; let commitIndex = 0;
+  await page.route('**/uploads/*/content', async route => {
+    if (++contentIndex === 2) await second.promise;
+    return route.fallback();
+  });
+  await page.route('**/uploads/*/commit', async route => {
+    const index = ++commitIndex;
+    if (index === 1) await first.promise;
+    if (index === 60) await last.promise;
+    return route.fallback();
+  });
+  const folderName = 'Trip photographs and documents with a long folder name';
+  const files = Array.from({ length: 60 }, (_, index) => ({ name: `file-${String(index).padStart(2, '0')}.txt`, content: 'x'.repeat((index === 0 ? 10 : index === 1 ? 100 : 1) * 1024) }));
+  await desktopDrop(page, current(page), [{ name: folderName, batches: [files] }]);
+  const progress = page.getByRole('progressbar', { name: 'Batch bytes sent', exact: true });
+  const panel = page.locator('.upload-batch-progress');
+  await expect(panel).toContainText('Saving:');
+  await expect(panel).toContainText('0 of 60 files saved');
+  await expect(panel).toContainText('1 folder created');
+  await expect(progress).toHaveAttribute('aria-valuenow', '5');
+  const height = await panel.evaluate(element => element.getBoundingClientRect().height);
+  first.resolve();
+  await expect(panel).toContainText('1 of 60 files saved');
+  await expect(panel).toContainText('Sending:');
+  await expect(progress).toHaveAttribute('aria-valuenow', '5');
+  await page.evaluate(() => (window as unknown as { emitUploadProgress: (sent: number) => void }).emitUploadProgress(50 * 1024));
+  await expect(progress).toHaveAttribute('aria-valuenow', '35');
+  await page.evaluate(() => (window as unknown as { emitUploadProgress: (sent: number) => void }).emitUploadProgress(10 * 1024));
+  await expect(progress).toHaveAttribute('aria-valuenow', '35');
+  await expect(panel).toContainText('60 KB of 168 KB sent');
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toContainText('1 of 60 files saved. At least 30% sent.');
+  await expect(panel.locator('.upload-current-path')).toHaveText('file-01.txt');
+  await expect(panel.locator('.upload-current-path')).toHaveAttribute('title', `${folderName}/file-01.txt`);
+  await expect(panel).toContainText(`To Files / ${folderName}`);
+  await expect(panel).toContainText('To Files');
+  expect(await panel.evaluate(element => element.getBoundingClientRect().height)).toBe(height);
+  await expect(page.locator('.upload-batch-report > details')).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath('batch-progress-desktop.png'), fullPage: true, animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('header')).toHaveCount(1);
+  await expect(page.locator('#main-content')).toHaveCount(1);
+  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toHaveCount(1);
+  await page.getByRole('button', { name: 'Switch to dark mode', exact: true }).click();
+  await page.getByRole('button', { name: 'Switch to light mode', exact: true }).click();
+  await page.screenshot({ path: test.info().outputPath('batch-progress-mobile.png'), animations: 'disabled' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole('button', { name: 'Switch to dark mode', exact: true }).click();
+  await page.screenshot({ path: test.info().outputPath('batch-progress-dark-mobile.png'), animations: 'disabled' });
+  second.resolve();
+  await expect(panel).toContainText('59 of 60 files saved');
+  await expect(panel).toContainText('Saving:');
+  await expect(progress).toHaveAttribute('aria-valuenow', '100');
+  await expect(completed(page)).toHaveCount(0);
+  last.resolve();
+  await expect(completed(page)).toBeAttached();
+  await expect(progress).toHaveCount(0);
+  expect(store.sent).toHaveLength(60);
+  expect(store.maxActive()).toBe(1);
+});
+
+test('all-zero-byte files show sending separately from confirmed saving without invalid percentages', async ({ page }) => {
+  await backend(page);
+  const gate = deferred();
+  await page.route('**/uploads/*/commit', async route => { await gate.promise; return route.fallback(); });
+  await page.getByLabel('Choose files to upload').setInputFiles([
+    { name: 'empty-one.txt', mimeType: 'text/plain', buffer: Buffer.alloc(0) },
+    { name: 'empty-two.txt', mimeType: 'text/plain', buffer: Buffer.alloc(0) },
+  ]);
+  const panel = page.locator('.upload-batch-progress');
+  await expect(panel).toContainText('No file bytes to send');
+  await expect(panel).toContainText('0 of 2 files saved');
+  await expect(panel).toContainText('Saving:');
+  await expect(page.getByRole('progressbar', { name: 'Batch files sent', exact: true })).toHaveAttribute('aria-valuenow', '50');
+  gate.resolve();
+  await expect(completed(page)).toBeAttached();
+});
+
+test('all bytes sent never implies completion when the final save outcome is unknown', async ({ page }) => {
+  const store = await backend(page, { name: 'unknown.txt', outcome: 'uncertain' });
+  const gate = deferred(); let commits = 0;
+  await page.route('**/uploads/*/commit', async route => { if (++commits === 2) await gate.promise; return route.fallback(); });
+  await desktopDrop(page, current(page), [{ name: 'saved.txt' }, { name: 'unknown.txt' }]);
+  await expect(page.getByRole('progressbar', { name: 'Batch bytes sent', exact: true })).toHaveAttribute('aria-valuenow', '100');
+  await expect(page.locator('.upload-batch-progress')).toContainText('1 of 2 files saved');
+  await expect(page.locator('.upload-batch-progress')).toContainText('Saving:');
+  await expect(completed(page)).toHaveCount(0);
+  gate.resolve();
+  await expect(page.locator('[data-upload-result="saved.txt"]')).toContainText('Saved');
+  await expect(page.locator('[data-upload-result="unknown.txt"]')).toContainText('Outcome unknown');
+  await expect(completed(page)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeDisabled();
+  expect(store.sent).toEqual(['saved.txt', 'unknown.txt']);
+});
+
+test('confirmed save counts update while the post-commit listing refresh is held', async ({ page }) => {
+  const store = await backend(page);
+  const gate = deferred();
+  await page.route('**/folders/children*', async route => {
+    if (route.request().method() === 'GET' && store.entries.some(entry => entry.name === 'confirmed.txt')) await gate.promise;
+    return route.fallback();
+  });
+  await desktopDrop(page, current(page), [{ name: 'confirmed.txt' }, { name: 'after.txt' }]);
+  const panel = page.locator('.upload-batch-progress');
+  await expect(panel).toContainText('1 of 2 files saved');
+  await expect(panel).toContainText('Refreshing files:');
+  await expect(panel.locator('.upload-current-path')).toHaveText('confirmed.txt');
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toContainText('1 of 2 files saved');
+  expect(store.sent).toEqual(['confirmed.txt']);
+  gate.resolve();
+  await expect(completed(page)).toBeAttached();
+});
+
+test('cancel acknowledges a pending cancellation response and disables repeated cancellation', async ({ page }) => {
+  await backend(page);
+  const content = deferred(); const cancel = deferred(); const cancelStarted = deferred();
+  await page.route('**/uploads/*/content', async route => { await content.promise; return route.fallback(); });
+  await page.route('**/uploads/*', async route => {
+    if (route.request().method() === 'DELETE') { cancelStarted.resolve(); await cancel.promise; }
+    return route.fallback();
+  });
+  await desktopDrop(page, current(page), [{ name: 'cancel.txt' }, { name: 'after.txt' }]);
+  await expect(page.locator('.upload-batch-progress')).toContainText('Sending:');
+  await page.getByRole('button', { name: 'Cancel upload', exact: true }).click();
+  await cancelStarted.promise;
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toContainText('Canceling current upload');
+  await expect(page.getByRole('button', { name: 'Cancel upload', exact: true })).toBeDisabled();
+  await expect(completed(page)).toHaveCount(0);
+  cancel.resolve(); content.resolve();
+  await expect(page.locator('[data-upload-result="cancel.txt"]')).toContainText('Canceled');
+  await expect(page.locator('[data-upload-result="after.txt"]')).toContainText('Not attempted');
+});
+
+test.describe('touch batch locations', () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+  test('full filename suffix and destination are available without hover', async ({ page }) => {
+    await backend(page);
+    const gate = deferred();
+    await page.route('**/uploads/*/commit', async route => { await gate.promise; return route.fallback(); });
+    await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+    const folder = 'An exceptionally long project destination containing multiple document types';
+    const filename = 'A long filename whose distinguishing final suffix must stay available on a touch screen.final-receipt.pdf';
+    await desktopDrop(page, current(page), [{ name: folder, batches: [[{ name: filename }, { name: 'after.txt' }]] }]);
+    const details = page.locator('.upload-location-details');
+    await expect(details).not.toHaveAttribute('open');
+    expect(await details.locator('summary').evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+    await details.locator('summary').focus();
+    await expect(details.locator('summary')).toBeFocused();
+    await details.locator('summary').tap();
+    await expect(details).toHaveAttribute('open', '');
+    await expect(details.locator('dd').nth(0)).toHaveText(`${folder}/${filename}`);
+    await expect(details.locator('dd').nth(1)).toHaveText(`Destination / ${folder}`);
+    await expect(details.locator('dd').nth(0)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await details.locator('summary').tap();
+    await expect(details).not.toHaveAttribute('open');
+    gate.resolve();
+    await expect(completed(page)).toBeAttached();
+  });
 });
