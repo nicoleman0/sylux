@@ -55,7 +55,7 @@ test('sort resets paging and selection and persists through folders, history and
   await page.getByLabel('Select Zulu.txt', { exact: true }).check();
   await sort.selectOption('size_asc');
   await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
-  await expect(page.getByText('0 selected', { exact: true })).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Selected items', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toHaveCount(0);
   expect(requests.at(-1)?.searchParams.get('cursor')).toBeNull();
   expect(requests.at(-1)?.searchParams.get('sort')).toBe('size_asc');
@@ -77,42 +77,18 @@ test('sort resets paging and selection and persists through folders, history and
   await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
 });
 
-test('folder headers toggle sort and stay in sync with the dropdown', async ({ page }) => {
+test('one sorting control exposes all orders and supports keyboard focus', async ({ page }) => {
   const requests = await installSortingBackend(page);
   const sort = page.getByLabel('Sort files by', { exact: true });
-  const nameHeader = page.getByRole('button', { name: 'Sort by name', exact: true });
-  const sizeHeader = page.getByRole('button', { name: 'Sort by size', exact: true });
-
-  await expect(nameHeader).toHaveAttribute('aria-pressed', 'true');
-  await expect(nameHeader).toHaveAttribute('aria-describedby', 'name-sort-order');
-  await expect(page.locator('#name-sort-order')).toHaveText('Ascending');
-  await page.getByRole('button', { name: 'Next page', exact: true }).click();
-  await page.getByLabel('Select Zulu.txt', { exact: true }).check();
-
-  await nameHeader.click();
-  await expect(sort).toHaveValue('name_desc');
-  await expect(nameHeader).toHaveAttribute('aria-pressed', 'true');
-  await expect(sizeHeader).toHaveAttribute('aria-pressed', 'false');
-  await expect(page.locator('#name-sort-order')).toHaveText('Descending');
-  await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
-  await expect(page.getByText('0 selected', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toHaveCount(0);
-  expect(requests.at(-1)?.searchParams.get('cursor')).toBeNull();
-  expect(requests.at(-1)?.searchParams.get('sort')).toBe('name_desc');
-
-  await sizeHeader.focus();
-  await page.keyboard.press('Enter');
-  await expect(sort).toHaveValue('size_asc');
-  await expect(sizeHeader).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('#size-sort-order')).toHaveText('Ascending');
-  await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
-  await expect(sizeHeader).toBeFocused();
-  expect(requests.at(-1)?.searchParams.get('sort')).toBe('size_asc');
-
-  await page.keyboard.press('Space');
-  await expect(sort).toHaveValue('size_desc');
-  await expect(page.locator('#size-sort-order')).toHaveText('Descending');
-  expect(requests.at(-1)?.searchParams.get('sort')).toBe('size_desc');
+  await expect(page.getByRole('combobox')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: /^Sort by/ })).toHaveCount(0);
+  await sort.focus();
+  await expect(sort).toBeFocused();
+  for (const order of ['name_desc', 'size_asc', 'size_desc', 'name_asc']) {
+    await sort.selectOption(order);
+    await expect.poll(() => requests.at(-1)?.searchParams.get('sort')).toBe(order);
+    await expect(sort).toBeFocused();
+  }
 });
 
 test('late listing responses cannot replace a newer sort', async ({ page }) => {
