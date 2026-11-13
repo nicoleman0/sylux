@@ -1,5 +1,8 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test, expect, type Locator, type Page } from '@playwright/test';
 
 type TestEntry = { id: string; parent_id: string | null; name: string; kind: 'file' | 'folder'; etag: string; size?: number };
@@ -215,6 +218,114 @@ test('chooser uploads multiple files immediately and refreshes a nested current 
   expect(store.events).toHaveLength(2);
   await expect(completed(page)).toBeAttached();
   expect(errors).toEqual([]);
+});
+
+test('folder chooser preserves the selected root and nested paths in the current destination', async ({ page }) => {
+  // Chromium interception omits disk-backed File bytes; materialize the real selected bytes first.
+  await page.addInitScript(() => {
+    const send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (body) {
+      if (body instanceof File) {
+        void body.arrayBuffer().then((bytes) => send.call(this, new Blob([bytes], { type: body.type })));
+      } else send.call(this, body);
+    };
+  });
+  const temporary = await mkdtemp(join(tmpdir(), 'sylux-folder-'));
+  const directory = join(temporary, 'Album');
+  try {
+    await mkdir(join(directory, 'Nested'), { recursive: true });
+    await mkdir(join(directory, 'Empty'));
+    await writeFile(join(directory, 'first.txt'), 'first');
+    await writeFile(join(directory, 'Nested', 'inner.txt'), 'inner');
+    await writeFile(join(directory, 'Nested', 'second.txt'), 'second');
+    const store = await backend(page);
+    await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+    await expect(page.getByText('Choose folder skips empty folders. Drop a folder to include them.', { exact: true })).toBeVisible();
+    const chooser = page.getByLabel('Choose folder to upload', { exact: true });
+    const [dialog] = await Promise.all([page.waitForEvent('filechooser'), page.getByRole('button', { name: 'Choose folder', exact: true }).click()]);
+    await dialog.setFiles(directory);
+    await expect(completed(page)).toBeAttached();
+    const album = store.entries.find(entry => entry.name === 'Album')!;
+    const nested = store.entries.find(entry => entry.name === 'Nested')!;
+    expect(store.events.slice(0, 2)).toEqual([
+      { kind: 'folder', name: 'Album', parent: 'destination' },
+      { kind: 'folder', name: 'Nested', parent: album.id },
+    ]);
+    expect(store.events.slice(2)).toEqual(expect.arrayContaining([
+      { kind: 'file', name: 'first.txt', parent: album.id },
+      { kind: 'file', name: 'inner.txt', parent: nested.id },
+      { kind: 'file', name: 'second.txt', parent: nested.id },
+    ]));
+    expect(store.events).toHaveLength(5);
+    expect(store.maxActive()).toBe(1);
+    expect(await chooser.inputValue()).toBe('');
+    await chooser.setInputFiles(directory);
+    await expect(summary(page)).toContainText('Upload stopped at Album.');
+    expect(store.events).toHaveLength(6);
+    expect(store.sent).toHaveLength(3);
+    await expect(page.getByRole('button', { name: 'Choose folder', exact: true })).toBeEnabled();
+    await page.screenshot({ path: test.info().outputPath('folder-chooser-desktop-light.png'), fullPage: true });
+    await page.getByRole('button', { name: 'Switch to dark mode', exact: true }).click();
+    await page.screenshot({ path: test.info().outputPath('folder-chooser-desktop-dark.png'), fullPage: true });
+    await page.getByRole('button', { name: 'Switch to light mode', exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByRole('button', { name: 'Choose folder', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath('folder-chooser-mobile-light.png'), fullPage: true });
+    await page.getByRole('button', { name: 'Switch to dark mode', exact: true }).click();
+    await page.screenshot({ path: test.info().outputPath('folder-chooser-mobile-dark.png'), fullPage: true });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+async function selectFolderPaths(page: Page, paths: string[]) {
+  await page.getByLabel('Choose folder to upload', { exact: true }).evaluate((input, paths) => {
+    const transfer = new DataTransfer();
+    for (const path of paths) {
+      const file = new File(['contents'], path.split('/').at(-1) || 'file.txt');
+      Object.defineProperty(file, 'webkitRelativePath', { value: path });
+      transfer.items.add(file);
+    }
+    Object.defineProperty(input, 'files', { configurable: true, value: transfer.files });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }, paths);
+}
+
+for (const path of ['', 'file.txt', '/Album/file.txt', 'Album//file.txt', 'Album/../file.txt', 'Album/./file.txt', 'Album/bad\\name/file.txt']) {
+  test(`folder chooser rejects invalid relative path ${JSON.stringify(path)} before any mutation`, async ({ page }) => {
+    const store = await backend(page);
+    await selectFolderPaths(page, ['Album/valid.txt', path]);
+    await expect(summary(page)).toContainText('Nothing was uploaded.');
+    expect(store.events).toEqual([]);
+    expect(store.sent).toEqual([]);
+    await expect(page.getByRole('button', { name: 'Choose folder', exact: true })).toBeEnabled();
+  });
+}
+
+for (const outcome of ['failed', 'uncertain'] as const) {
+  test(`folder chooser retains ${outcome} upload handling and stops later files`, async ({ page }) => {
+    const store = await backend(page, { name: 'broken.txt', outcome });
+    await selectFolderPaths(page, ['Album/saved.txt', 'Album/broken.txt', 'Album/after.txt']);
+    await expect(page.locator('[data-upload-result="Album/saved.txt"]')).toContainText('Saved');
+    await expect(page.locator('[data-upload-result="Album/broken.txt"]')).toContainText(outcome === 'uncertain' ? 'Outcome unknown' : 'Failed');
+    await expect(page.locator('[data-upload-result="Album/after.txt"]')).toContainText('Not attempted');
+    expect(store.sent).toEqual(['saved.txt', 'broken.txt']);
+    if (outcome === 'uncertain') {
+      await expect(page.getByRole('button', { name: 'Choose folder', exact: true })).toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeDisabled();
+    }
+  });
+}
+
+test('unsupported folder chooser leaves file selection available', async ({ page }) => {
+  await page.addInitScript(() => { Reflect.deleteProperty(HTMLInputElement.prototype, 'webkitdirectory'); });
+  const store = await backend(page);
+  await expect(page.getByRole('button', { name: 'Choose folder', exact: true })).toHaveCount(0);
+  await expect(page.getByText('Folder selection is unavailable in this browser. Choose files or drop a folder instead.', { exact: true })).toBeVisible();
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'fallback.txt', mimeType: 'text/plain', buffer: Buffer.from('fallback') });
+  await expect(completed(page)).toBeAttached();
+  expect(store.sent).toEqual(['fallback.txt']);
 });
 
 test('desktop conflict waits for replacement confirmation before bytes or later items', async ({ page }) => {
@@ -662,6 +773,7 @@ test('cancel acknowledges a pending cancellation response and disables repeated 
   });
   await desktopDrop(page, current(page), [{ name: 'cancel.txt' }, { name: 'after.txt' }]);
   await expect(page.locator('.upload-batch-progress')).toContainText('Sending:');
+  await expect(page.getByRole('button', { name: 'Choose folder', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Account', exact: true }).click();
   await page.getByRole('button', { name: 'Cancel upload', exact: true }).click();
   await cancelStarted.promise;
@@ -671,6 +783,8 @@ test('cancel acknowledges a pending cancellation response and disables repeated 
   cancel.resolve(); content.resolve();
   await expect(page.locator('[data-upload-result="cancel.txt"]')).toContainText('Canceled');
   await expect(page.getByRole('heading', { name: 'Account', exact: true })).toBeFocused();
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Choose folder', exact: true })).toBeEnabled();
   await expect(page.locator('[data-upload-result="after.txt"]')).toContainText('Not attempted');
 });
 

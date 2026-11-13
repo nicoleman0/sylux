@@ -29,7 +29,7 @@
   import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
-  import { filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
+  import { directoryFilesToUpload, filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
 
   import { MockTransport } from './lib/mock-transport';
 
@@ -57,7 +57,10 @@
     catch { /* The switch still works when storage is unavailable. */ }
   }
 
+  let folderChooserSupported = $state(false);
+
   onMount(() => {
+    folderChooserSupported = 'webkitdirectory' in document.createElement('input');
     const preference = window.matchMedia('(prefers-color-scheme: dark)');
     let saved: string | null = null;
     try { saved = localStorage.getItem('sylux-theme'); }
@@ -1303,6 +1306,14 @@
     void runUploadBatch(async () => filesToUpload(files), currentFolder);
   }
 
+  function chooseFolderUploads(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    if (!files.length || !folderChooserSupported || !canUploadDrop()) return;
+    void runUploadBatch(async () => directoryFilesToUpload(files), currentFolder);
+  }
+
   function dismissReplacement(): void {
     replacementPrompt = null;
     const decide = replacementDecision; replacementDecision = null;
@@ -1758,6 +1769,10 @@
               <div class="upload-form">
                 <input class="sr-only" id="upload-file" type="file" multiple tabindex={-1} aria-label="Choose files to upload" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onchange={chooseUploads} />
                 <Button id="choose-file" variant="outline" type="button" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onclick={() => document.getElementById('upload-file')?.click()}>Choose files</Button>
+                {#if folderChooserSupported}
+                  <input class="sr-only" id="upload-folder" type="file" webkitdirectory multiple tabindex={-1} aria-label="Choose folder to upload" aria-describedby="folder-upload-help" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onchange={chooseFolderUploads} />
+                  <Button id="choose-folder" variant="outline" type="button" aria-describedby="folder-upload-help" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onclick={() => document.getElementById('upload-folder')?.click()}>Choose folder</Button>
+                {/if}
               </div>
               <Button variant="outline" disabled={loading || bulkBusy} onclick={() => bulkNeedsRefresh ? reconcileBulk() : refresh()} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
               <div class="folder-sort">
@@ -1771,6 +1786,7 @@
               </div>
 
             </section>
+            <p id="folder-upload-help" class="text-xs text-muted-foreground mb-3">{folderChooserSupported ? 'Choose folder skips empty folders. Drop a folder to include them.' : 'Folder selection is unavailable in this browser. Choose files or drop a folder instead.'}</p>
             {#if selectedEntries.length && !loading && !listingError}
               <div class="selection-toolbar" role="group" aria-label="Selected items">
                 <span aria-live="polite">{selectedEntries.length} selected</span>
