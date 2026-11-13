@@ -158,7 +158,19 @@ async function pdfHarness(page: import('@playwright/test').Page, contents: () =>
 }
 
 for (const width of [1280, 390]) {
-  test(`PDF renders pages and zooms at ${width}px without external requests`, async ({ page, baseURL }) => {
+  test(`PDF renders pages and zooms at ${width}px without external requests`, async ({ page, baseURL }, testInfo) => {
+    if (testInfo.project.name === 'firefox-classic') {
+      const scrollbarWidth = await page.evaluate(() => {
+        const pane = document.createElement('div');
+        pane.style.cssText = 'width:100px;height:100px;overflow:scroll';
+        pane.innerHTML = '<div style="width:200px;height:200px"></div>';
+        document.body.append(pane);
+        const width = pane.offsetWidth - pane.clientWidth;
+        pane.remove();
+        return width;
+      });
+      expect(scrollbarWidth).toBeGreaterThan(0);
+    }
     await page.setViewportSize({ width, height: 900 });
     const origin = new URL(baseURL!).origin;
     const external: string[] = [];
