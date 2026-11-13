@@ -1,9 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 
 const longNames = ['A', 'B'].map(suffix => `Annual-financial-report-${'shared-section-'.repeat(7)}${suffix}.pdf`);
-async function workspace(page: Page) {
+async function workspace(page: Page, fileNames: readonly string[] = longNames) {
   const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
-  const entries = Array.from({ length: 20 }, (_, i) => ({ id: `file-${i}`, parent_id: 'root', name: i < 2 ? longNames[i] : `Project notes ${i}.txt`, kind: 'file', size: 2048, etag: `"file-${i}:1"` }));
+  const entries = Array.from({ length: 20 }, (_, i) => ({ id: `file-${i}`, parent_id: 'root', name: i < fileNames.length ? fileNames[i] : `Project notes ${i}.txt`, kind: 'file', size: 2048, etag: `"file-${i}:1"` }));
   await page.route('**/*', route => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/instance') return route.fulfill({ json: { name: 'Sylux' } });
@@ -47,25 +47,42 @@ for (const theme of ['light', 'dark'] as const) {
     expect(await name.locator('.filename').evaluate(el => getComputedStyle(el).whiteSpace)).toBe('normal');
   });
 
-  test(`full mobile filenames and touch targets in ${theme}`, async ({ browser }) => {
+  for (const [fixture, fileNames] of [['long', longNames], ['everyday', ['2026-11 Mortgage statement.pdf', 'Family holiday photos - Cornwall - selected originals.jpg']]] as const) {
+  test(`full mobile ${fixture} filenames and touch targets in ${theme}`, async ({ browser }) => {
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, colorScheme: theme });
     const page = await context.newPage();
-    await workspace(page);
+    await workspace(page, fileNames);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    for (const fullName of longNames) {
+    for (const fullName of fileNames) {
       const row = page.getByRole('article', { name: fullName, exact: true });
       const label = row.locator('.filename');
       await expect(label).toHaveText(fullName);
       expect(await label.evaluate(el => el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1)).toBe(true);
+      const metrics = await row.evaluate(el => {
+        const name = el.querySelector('.filename')!;
+        const icon = el.querySelector('.item-name svg')!;
+        const options = el.querySelector('[data-slot="button"]')!;
+        const checkbox = el.querySelector('.entry-selection')!;
+        const metadata = el.querySelector('.mobile-file-size')!;
+        const lineHeight = parseFloat(getComputedStyle(name).lineHeight);
+        const firstLineCenter = name.getBoundingClientRect().top + lineHeight / 2;
+        const center = (node: Element) => { const box = node.getBoundingClientRect(); return box.top + Math.min(box.height, 44) / 2; };
+        return { lineHeight, iconOffset: Math.abs(center(icon) - firstLineCenter), optionsOffset: Math.abs(center(options) - firstLineCenter), checkboxOffset: Math.abs(center(checkbox) - firstLineCenter), metadataGap: metadata.getBoundingClientRect().top - name.getBoundingClientRect().bottom };
+      });
+      expect(metrics.lineHeight).toBeLessThanOrEqual(19);
+      for (const offset of [metrics.iconOffset, metrics.optionsOffset, metrics.checkboxOffset]) expect(offset).toBeLessThanOrEqual(3);
+      expect(metrics.metadataGap).toBeGreaterThanOrEqual(0);
+      expect(metrics.metadataGap).toBeLessThanOrEqual(3);
       for (const target of [row.locator('.entry-selection'), row.locator('.item-name'), row.getByRole('button', { name: `Options for ${fullName}` })]) {
         const box = await target.boundingBox();
         expect(box?.width).toBeGreaterThanOrEqual(44);
         expect(box?.height).toBeGreaterThanOrEqual(44);
       }
     }
-    await page.screenshot({ path: `/tmp/syl41-mobile-${theme}.png` });
+    await page.screenshot({ path: `/tmp/syl41-mobile-${fixture}-${theme}.png` });
     await context.close();
   });
+  }
 
   test(`200 percent layout reflows in ${theme}`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });

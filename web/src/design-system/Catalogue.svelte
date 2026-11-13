@@ -138,7 +138,7 @@
         {#if sampleSelected}<div class="selection-toolbar" role="group" aria-label="Selected sample items"><span>1 selected</span><Button.Root variant="ghost" size="sm" onclick={() => sampleSelected = false}>Clear selection</Button.Root><Button.Root variant="outline" size="sm" onclick={() => sampleNotice = 'Move selected.'}>Move selected</Button.Root></div>{/if}
         <article class="file-row selectable-row">
           <label class="entry-selection"><input type="checkbox" aria-label="Select Projects sample" bind:checked={sampleSelected} /></label>
-          <button type="button" class="item-name" onclick={() => sampleNotice = 'Folder action selected.'}><span class="folder-icon" aria-hidden="true"><FolderIcon /></span><span class="filename">Projects</span></button>
+          <button type="button" class="item-name" onclick={() => sampleNotice = 'Folder action selected.'}><span class="folder-icon" aria-hidden="true"><FolderIcon /></span><span class="item-label"><span class="filename">Projects</span></span></button>
           <span class="file-size">—</span>
           <Button.Root variant="ghost" size="icon" class="size-11" aria-label="Project actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root>
         </article>

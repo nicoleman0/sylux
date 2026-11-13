@@ -147,6 +147,9 @@ h1:focus, h2:focus { outline: none; }
 .item-name > span:first-child { flex-shrink: 0; }
 .item-name svg { width: var(--icon-file); height: var(--icon-file); color: var(--muted-foreground); }
 .item-name .folder-icon svg { color: var(--primary); fill: var(--accent); }
+.item-label { min-width: 0; }
+.item-label .filename { display: block; }
+.mobile-file-size { display: none; }
 .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-name:hover .filename { color: var(--primary); }
 .file-row:is(:hover, :focus-within) .filename { white-space: normal; overflow-wrap: anywhere; padding-block: 8px; }
@@ -235,10 +238,13 @@ h1:focus, h2:focus { outline: none; }
 .file-row.selected-row { background: var(--accent); }
 @media (max-width: 620px) {
   .file-row.selectable-row, .list-head.selectable-head { grid-template-columns: 44px minmax(0, 1fr) 44px; gap: 8px; }
-  .selectable-row .item-name { grid-column: 2; grid-row: 1; }
-  .selectable-row .file-size { grid-column: 2; text-align: left; margin: -4px 0 8px 28px; }
-  .selectable-row .entry-selection { grid-row: 1 / 3; }
-  .selectable-row > [data-slot="button"] { grid-column: 3; grid-row: 1 / 3; }
+  .selectable-row { align-items: start; }
+  .selectable-row .item-name { grid-column: 2; grid-row: 1; align-items: start; padding-block: 12px; }
+  .file-row.selectable-row .filename { padding-block: 0; line-height: 1.4; }
+  .selectable-row .mobile-file-size:not(:empty) { display: block; margin-top: 2px; color: var(--muted-foreground); font-size: var(--type-meta); line-height: 1.5; }
+  .selectable-row > .file-size { @apply sr-only; }
+  .selectable-row .entry-selection { grid-row: 1; }
+  .selectable-row > [data-slot="button"] { grid-column: 3; grid-row: 1; }
   .selectable-head > .file-size { display: none; }
 }
 
