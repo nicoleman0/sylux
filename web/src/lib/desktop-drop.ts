@@ -23,6 +23,31 @@ export function filesToUpload(files: File[]): UploadItem[] {
   });
 }
 
+export function directoryFilesToUpload(files: File[]): UploadItem[] {
+  const invalidPath = () => new Error('The selected folder contains a missing or unsupported relative path. Nothing was uploaded. Try dropping the folder instead.');
+  const paths = files.map((file) => {
+    const path = file.webkitRelativePath.split('/');
+    if (path.length < 2 || path.at(-1) !== file.name) throw invalidPath();
+    try { path.forEach(validName); } catch { throw invalidPath(); }
+    return path;
+  });
+  const filePaths = new Set(paths.map((path) => JSON.stringify(path)));
+  if (filePaths.size !== files.length || paths.some((path) => path[0] !== paths[0][0])) throw invalidPath();
+  const folders = new Map<string, string[]>();
+  for (const path of paths) {
+    for (let depth = 1; depth < path.length; depth++) {
+      const parent = path.slice(0, depth);
+      const key = JSON.stringify(parent);
+      if (filePaths.has(key)) throw invalidPath();
+      folders.set(key, parent);
+    }
+  }
+  return [
+    ...Array.from(folders.values(), (path): UploadItem => ({ kind: 'folder', path })),
+    ...files.map((file, index): UploadItem => ({ kind: 'file', path: paths[index], file })),
+  ];
+}
+
 // The browser protects DataTransfer after the drop handler yields.
 export function snapshotDesktopDrop(data: DataTransfer): (canceled?: () => boolean) => Promise<UploadItem[]> {
   const sources: Array<DropEntry | File> = [];
