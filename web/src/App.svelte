@@ -87,6 +87,7 @@
   let changePasswordOpen = $state(false);
   let passwordDialogTrigger: HTMLElement | null = null;
   let disableTarget = $state<Account | null>(null);
+  let authorityTarget = $state<{ account: Account; action: 'enable' | 'role' } | null>(null);
   let accountDialogTrigger: HTMLElement | null = null;
   const navigationPaths = new Map<string, Folder[]>();
 
@@ -629,7 +630,27 @@
       disableTarget = null; accountNotice = 'Account disabled and sessions signed out.';
       await loadAccounts();
       if (generation === sessionGeneration) { await tick(); document.getElementById('accounts-heading')?.focus(); }
-    } catch { if (generation === sessionGeneration) accountNotice = 'Account could not be disabled. Try again.'; }
+    } catch (error) { if (generation === sessionGeneration) accountNotice = accountChangeError(error); }
+    finally { if (generation === sessionGeneration) accountBusy = false; }
+  }
+  function accountChangeError(error: unknown): string {
+    if (error instanceof HttpError && error.status === 409) return 'This account changed or the action would remove administrator access. Cancel, refresh accounts and try again.';
+    if (error instanceof HttpError && error.status === 404) return 'This account no longer exists. Cancel and refresh accounts.';
+    return 'The result could not be confirmed. Cancel, then refresh accounts before trying again.';
+  }
+  async function changeAccountAuthority(): Promise<void> {
+    if (!authorityTarget || accountBusy) return;
+    const { account, action } = authorityTarget;
+    const generation = sessionGeneration; accountBusy = true; accountNotice = '';
+    try {
+      if (action === 'enable') await session.enableAccount(account.account_id);
+      else await session.changeRole(account.account_id, account.role === 'user' ? 'administrator' : 'user');
+      if (generation !== sessionGeneration) return;
+      authorityTarget = null;
+      accountNotice = action === 'enable' ? 'Account enabled. They can sign in with their current password.' : 'Role changed and sessions signed out. They can sign in again.';
+      await loadAccounts();
+      if (generation === sessionGeneration) { await tick(); document.getElementById('accounts-heading')?.focus(); }
+    } catch (error) { if (generation === sessionGeneration) accountNotice = accountChangeError(error); }
     finally { if (generation === sessionGeneration) accountBusy = false; }
   }
   async function resetAccount(event: SubmitEvent): Promise<void> {
@@ -663,7 +684,7 @@
     trashRequest++; deletedItems = []; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false;
   }
   function clearAccountForms(): void {
-    changePasswordOpen = false; createAccountOpen = false; disableTarget = null; instanceBusy = false; instanceNotice = '';
+    changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null; instanceBusy = false; instanceNotice = '';
     accountHandle = ''; accountPassword = ''; currentPassword = ''; newPassword = '';
     resetId = ''; resetPassword = ''; accounts = []; accountNotice = ''; accountBusy = false; accountsLoading = false; accountsError = ''; accountsRequest++;
   }
@@ -1593,9 +1614,23 @@
             {#if settingsTab === 'accounts'}
               <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files.</p></div><div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={accountsLoading || accountBusy} onclick={loadAccounts}>Refresh</Button><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
                 {#if accountsLoading}<p role="status">Loading accounts…</p>{:else if accountsError}<p role="alert">{accountsError}</p>{:else if accounts.length === 0}<p>No accounts to show.</p>{/if}
-                <div class="account-list">{#each accounts as account (account.account_id)}<div class="account-row"><div class="account-identity"><strong>{account.handle}</strong><span class="account-role">{account.role === 'administrator' ? 'Administrator' : 'User'}</span></div><span class:enabled={account.enabled} class="status-label">{account.enabled ? 'Active' : 'Disabled'}</span><div class="account-actions">{#if account.role === 'user' && account.enabled}<Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; resetId = account.account_id; resetPassword = ''; }}>Reset password</Button><Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; disableTarget = account; }}>Disable</Button>{/if}</div></div>{/each}</div>
+                <div class="account-list">{#each accounts as account (account.account_id)}
+                  <div class="account-row">
+                    <div class="account-identity"><strong>{account.handle}</strong><span class="account-role">{account.role === 'administrator' ? 'Administrator' : 'User'}</span></div>
+                    <span class:enabled={account.enabled} class="status-label">{account.enabled ? 'Active' : 'Disabled'}</span>
+                    <div class="account-actions">{#if account.account_id !== user?.id}
+                      {#if account.enabled}
+                        {#if account.role === 'user'}<Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; resetId = account.account_id; resetPassword = ''; }}>Reset password</Button>{/if}
+                        <Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; authorityTarget = { account, action: 'role' }; }}>{account.role === 'user' ? 'Make administrator' : 'Make user'}</Button>
+                        <Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; disableTarget = account; }}>Disable</Button>
+                      {:else}
+                        <Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; authorityTarget = { account, action: 'enable' }; }}>Enable</Button>
+                      {/if}
+                    {/if}</div>
+                  </div>
+                {/each}</div>
               </section>
-              {#if accountNotice && !createAccountOpen && !resetId && !disableTarget}<p role="status" class="form-notice">{accountNotice}</p>{/if}
+              {#if accountNotice && !createAccountOpen && !resetId && !disableTarget && !authorityTarget}<p role="status" class="form-notice">{accountNotice}</p>{/if}
             {:else}
               <section class="settings-section"><h2>Instance</h2><p class="section-description">The instance name appears for everyone, including on sign in.</p><form class="settings-form grid gap-3" onsubmit={saveInstance}><Label for="instance-name">Instance name</Label><Input id="instance-name" bind:value={instanceDraft} maxlength={40} disabled={instanceBusy || instanceLoading} required /><Button type="submit" class="justify-self-start mt-2" disabled={instanceBusy || instanceLoading || !instanceDraft.trim()}>{instanceBusy ? 'Saving…' : 'Save changes'}</Button></form>{#if instanceError}<p class="form-notice" role="alert">{instanceError}</p><Button variant="link" disabled={instanceLoading} onclick={loadInstance}>Reload instance name</Button>{/if}{#if instanceNotice}<p class="form-notice" role="status">{instanceNotice}</p>{/if}</section>
             {/if}
@@ -1795,7 +1830,21 @@
       <Dialog.Content showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title>Create account</Dialog.Title><Dialog.Description>Use 15 to 128 characters for the password. Share it through a private channel.</Dialog.Description></Dialog.Header><form class="grid gap-4" onsubmit={createAccount}><div class="grid gap-2"><Label for="account-handle">Account name</Label><Input id="account-handle" bind:value={accountHandle} pattern="[a-z0-9][a-z0-9._-]*" maxlength={64} disabled={accountBusy} required /><p class="text-muted-foreground text-xs">Lowercase letters, numbers, dots, underscores or hyphens.</p></div><div class="grid gap-2"><Label for="account-password">Password</Label><Input id="account-password" type="password" autocomplete="new-password" minlength={15} maxlength={128} bind:value={accountPassword} disabled={accountBusy} required /></div>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={accountBusy} onclick={() => { createAccountOpen = false; accountPassword = ''; }}>Cancel</Button><Button type="submit" disabled={accountBusy}>{accountBusy ? 'Creating…' : 'Create account'}</Button></Dialog.Footer></form></Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!resetId} onOpenChange={(open) => { if (!open && !accountBusy) { resetId = ''; resetPassword = ''; } }}><Dialog.Content showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title>Reset password for {accounts.find((account) => account.account_id === resetId)?.handle}</Dialog.Title><Dialog.Description>This signs out all their sessions. Share the new password through a private channel.</Dialog.Description></Dialog.Header><form class="grid gap-4" onsubmit={resetAccount}><div class="grid gap-2"><Label for="reset-password">New password</Label><Input id="reset-password" type="password" autocomplete="new-password" minlength={15} maxlength={128} bind:value={resetPassword} disabled={accountBusy} required /><p class="text-muted-foreground text-xs">Use 15 to 128 characters.</p></div>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={accountBusy} onclick={() => { resetId = ''; resetPassword = ''; }}>Cancel</Button><Button type="submit" disabled={accountBusy}>{accountBusy ? 'Resetting…' : 'Reset password'}</Button></Dialog.Footer></form></Dialog.Content></Dialog.Root>
-    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title>Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. Re-enabling accounts is not available yet.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
+    <Dialog.Root open={!!authorityTarget} onOpenChange={(open) => { if (!open && !accountBusy) authorityTarget = null; }}>
+      <Dialog.Content showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}>
+        <Dialog.Header>
+          <Dialog.Title class="pr-8 break-words">{authorityTarget?.action === 'enable' ? `Enable ${authorityTarget.account.handle}?` : `Make ${authorityTarget?.account.handle} ${authorityTarget?.account.role === 'user' ? 'an administrator' : 'a user'}?`}</Dialog.Title>
+          <Dialog.Description>
+            {#if authorityTarget?.action === 'enable'}They can sign in with their current password. Old sessions stay signed out. Their role and private files stay the same.
+            {:else if authorityTarget?.account.role === 'user'}They can manage accounts and instance settings. Other accounts’ files stay private. This signs out all their sessions.
+            {:else}They will lose access to account and instance settings. Their private files stay available. This signs out all their sessions.{/if}
+          </Dialog.Description>
+        </Dialog.Header>
+        {#if accountNotice}<p role="alert">{accountNotice}</p>{/if}
+        <Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => authorityTarget = null}>Cancel</Button><Button disabled={accountBusy} onclick={changeAccountAuthority}>{accountBusy ? 'Updating…' : authorityTarget?.action === 'enable' ? 'Enable account' : authorityTarget?.account.role === 'user' ? 'Make administrator' : 'Make user'}</Button></Dialog.Footer>
+      </Dialog.Content>
+    </Dialog.Root>
+    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. An administrator can enable the account again.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
   {/if}
   {#if !user || loggingOut}{@render betaNotice()}{/if}
 </div>

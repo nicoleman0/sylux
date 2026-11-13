@@ -12,6 +12,7 @@ use axum::body::Bytes;
 use common::FixtureRoot;
 use rusqlite::{Connection, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -83,10 +84,9 @@ impl TestFixture {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let origin = format!("http://{address}");
-        let mut state = AuthState::new(workers.clone(), origin.clone());
-        state.instance_settings = Some(Arc::new(
-            sylux::persistence::instance::InstanceSettings::open(&product).unwrap(),
-        ));
+        let state = AuthState::new(workers.clone(), origin.clone())
+            .with_storage_root(&product)
+            .unwrap();
         let app = http::router(state);
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -777,4 +777,584 @@ fn instance_settings_reject_symlinks_and_corrupt_persisted_names() {
     );
     assert_eq!(store.name().unwrap(), "Restored");
     fs::remove_dir_all(directory).unwrap();
+}
+
+const SECOND_ACCOUNT: &str = "00000000000000000000000000000002";
+const DISABLED_ACCOUNT: &str = "00000000000000000000000000000003";
+const OTHER_ADMIN: &str = "00000000000000000000000000000004";
+const PRIVATE_ROOT: &str = "00000000000000000000000000000011";
+const PRIVATE_FILE: &str = "00000000000000000000000000000012";
+const PRIVATE_REVISION: &str = "00000000000000000000000000000013";
+
+impl TestFixture {
+    fn seed_account(&self, id: &str, handle: &str, role: &str, enabled: bool) {
+        self.db().lock().unwrap().execute(
+            "INSERT INTO account(account_id,handle,role,enabled,credential_epoch,password_verifier)
+             SELECT ?1,?2,?3,?4,0,password_verifier FROM account WHERE account_id=?5",
+            params![id, handle, role, enabled, ACCOUNT_ID],
+        ).unwrap();
+    }
+
+    async fn sign_in(&self, handle: &str) -> Authenticated {
+        let response = self.login(&self.bootstrap().await, handle, PASSWORD).await;
+        assert_eq!(response.status, 200);
+        Authenticated::from_response(&response)
+    }
+
+    async fn account_action(
+        &self,
+        auth: &Authenticated,
+        target: &str,
+        action: &str,
+        role: Option<&str>,
+    ) -> TestResponse {
+        self.request(
+            "POST",
+            &format!("/accounts/{target}/{action}"),
+            Some(&auth.cookie),
+            Some(&self.origin),
+            Some(&auth.csrf),
+            role.map(|role| serde_json::json!({"role":role}).to_string()),
+        )
+        .await
+    }
+
+    fn account_state(&self, id: &str) -> (String, bool, i64, String, i64) {
+        self.db().lock().unwrap().query_row(
+            "SELECT role,enabled,credential_epoch,password_verifier,(SELECT count(*) FROM session WHERE account_id=?1 AND revoked=0) FROM account WHERE account_id=?1",
+            [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+        ).unwrap()
+    }
+
+    fn event_count(&self) -> i64 {
+        self.db()
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM event", [], |r| r.get(0))
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn account_authority_changes_revoke_sessions_preserve_passwords_and_private_files() {
+    let fixture = TestFixture::new("account-authority").await;
+    fixture.seed_account(SECOND_ACCOUNT, "second", "user", true);
+    fixture.db().lock().unwrap().execute(
+        "INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,NULL,'folder','',x'',1)",
+        params![PRIVATE_ROOT,ACCOUNT_ID],
+    ).unwrap();
+    let bytes = b"synthetic private content";
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let store =
+        sylux::persistence::payload::PayloadStore::open(&fixture.owner.path().join("product"))
+            .unwrap();
+    let mut staged = store
+        .start(
+            "1234567890abcdef1234567890abcdef-abcdef0123456789abcdef0123456789",
+            bytes.len() as u64,
+        )
+        .unwrap();
+    staged.write_chunk(bytes).unwrap();
+    let published = staged.publish(digest).unwrap();
+    {
+        let db = fixture.db();
+        let connection = db.lock().unwrap();
+        let tx = connection.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO blob(blob_id,shard,length,sha256) VALUES(?1,?2,?3,?4)",
+            params![
+                published.blob_id,
+                &published.blob_id[..2],
+                bytes.len() as i64,
+                digest.as_slice()
+            ],
+        )
+        .unwrap();
+        tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'file','private.txt',x'707269766174652e747874',1)", params![PRIVATE_FILE,ACCOUNT_ID,PRIVATE_ROOT]).unwrap();
+        tx.execute("INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![PRIVATE_REVISION,PRIVATE_FILE,published.blob_id,bytes.len() as i64,digest.as_slice(),unix_now(),ACCOUNT_ID]).unwrap();
+        tx.execute(
+            "UPDATE entry SET current_revision_id=?1 WHERE entry_id=?2",
+            params![PRIVATE_REVISION, PRIVATE_FILE],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let owner = fixture.authenticated().await;
+    let original = fixture.sign_in("second").await;
+    let password = fixture.account_state(SECOND_ACCOUNT).3;
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "role", Some("administrator"))
+            .await
+            .status,
+        204
+    );
+    assert_eq!(fixture.me(&original.cookie).await.status, 401);
+    let promoted = fixture.sign_in("second").await;
+    assert_eq!(
+        fixture
+            .request("GET", "/accounts", Some(&promoted.cookie), None, None, None)
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "GET",
+                &format!("/folders/{PRIVATE_ROOT}/children"),
+                Some(&owner.cookie),
+                None,
+                None,
+                None
+            )
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "GET",
+                &format!("/folders/{PRIVATE_ROOT}/children"),
+                Some(&promoted.cookie),
+                None,
+                None,
+                None
+            )
+            .await
+            .status,
+        404
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "GET",
+                &format!("/entries/{PRIVATE_FILE}/content"),
+                Some(&promoted.cookie),
+                None,
+                None,
+                None
+            )
+            .await
+            .status,
+        404
+    );
+
+    let content = fixture
+        .request(
+            "GET",
+            &format!("/entries/{PRIVATE_FILE}/content"),
+            Some(&owner.cookie),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(content.status, 200);
+    assert_eq!(content.body.as_ref(), bytes);
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "disable", None)
+            .await
+            .status,
+        204
+    );
+    assert_eq!(fixture.me(&promoted.cookie).await.status, 401);
+    assert_eq!(
+        fixture
+            .login(&fixture.bootstrap().await, "second", PASSWORD)
+            .await
+            .status,
+        401
+    );
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "enable", None)
+            .await
+            .status,
+        204
+    );
+    assert_eq!(fixture.me(&original.cookie).await.status, 401);
+    assert_eq!(fixture.me(&promoted.cookie).await.status, 401);
+    let enabled = fixture.sign_in("second").await;
+    let identity: Value = serde_json::from_slice(&fixture.me(&enabled.cookie).await.body).unwrap();
+    assert_eq!(identity["role"], "administrator");
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "role", Some("user"))
+            .await
+            .status,
+        204
+    );
+    assert_eq!(fixture.me(&enabled.cookie).await.status, 401);
+    let demoted = fixture.sign_in("second").await;
+    assert_eq!(
+        fixture
+            .request("GET", "/accounts", Some(&demoted.cookie), None, None, None)
+            .await
+            .status,
+        403
+    );
+    let (role, enabled, epoch, verifier, _) = fixture.account_state(SECOND_ACCOUNT);
+    assert_eq!((role.as_str(), enabled, epoch), ("user", true, 4));
+    assert_eq!(verifier, password);
+    let events: Vec<(String, String, String, i64)> = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .prepare("SELECT actor_account_id,action,outcome,occurred_at FROM event ORDER BY event_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        events.iter().map(|e| e.1.as_str()).collect::<Vec<_>>(),
+        [
+            "account.promoted",
+            "account.disabled",
+            "account.enabled",
+            "account.demoted"
+        ]
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e.0 == ACCOUNT_ID && e.2 == "ok" && e.3 > 0)
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn account_authority_rejects_invalid_targets_states_and_self_changes_without_audit() {
+    let fixture = TestFixture::new("account-invalid").await;
+    fixture.seed_account(SECOND_ACCOUNT, "second", "user", true);
+    fixture.seed_account(DISABLED_ACCOUNT, "disabled", "user", false);
+    let owner = fixture.authenticated().await;
+    for (target, action, role, status) in [
+        (ACCOUNT_ID, "disable", None, 409),
+        (ACCOUNT_ID, "role", Some("user"), 409),
+        (SECOND_ACCOUNT, "role", Some("user"), 409),
+        (SECOND_ACCOUNT, "role", Some("root"), 400),
+        (SECOND_ACCOUNT, "enable", None, 409),
+        (DISABLED_ACCOUNT, "disable", None, 409),
+        (DISABLED_ACCOUNT, "role", Some("administrator"), 409),
+        ("unknown", "disable", None, 404),
+        ("unknown", "enable", None, 404),
+        ("unknown", "role", Some("user"), 404),
+    ] {
+        assert_eq!(
+            fixture
+                .account_action(&owner, target, action, role)
+                .await
+                .status,
+            status,
+            "{target}/{action}"
+        );
+    }
+    assert_eq!(fixture.event_count(), 0);
+    assert_eq!(fixture.account_state(SECOND_ACCOUNT).2, 0);
+    assert_eq!(fixture.account_state(DISABLED_ACCOUNT).2, 0);
+    assert_eq!(fixture.account_state(ACCOUNT_ID).0, "administrator");
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "disable", None)
+            .await
+            .status,
+        204
+    );
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "disable", None)
+            .await
+            .status,
+        409
+    );
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "enable", None)
+            .await
+            .status,
+        204
+    );
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "enable", None)
+            .await
+            .status,
+        409
+    );
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "role", Some("administrator"))
+            .await
+            .status,
+        204
+    );
+    assert_eq!(
+        fixture
+            .account_action(&owner, SECOND_ACCOUNT, "role", Some("administrator"))
+            .await
+            .status,
+        409
+    );
+    assert_eq!(fixture.event_count(), 3);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn account_authority_requires_admin_current_session_origin_and_csrf() {
+    let fixture = TestFixture::new("account-denial").await;
+    fixture.seed_account(SECOND_ACCOUNT, "second", "user", true);
+    fixture.seed_account(DISABLED_ACCOUNT, "disabled", "user", false);
+    let owner = fixture.authenticated().await;
+    let user = fixture.sign_in("second").await;
+    let expired = fixture.authenticated().await;
+    fixture
+        .db()
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE session SET idle_expires_at=0 WHERE session_id=?1",
+            [expired
+                .cookie
+                .strip_prefix("__Host-sylux=")
+                .unwrap()
+                .split('.')
+                .next()
+                .unwrap()],
+        )
+        .unwrap();
+    let revoked = fixture.authenticated().await;
+    assert_eq!(fixture.logout(&revoked).await.status, 204);
+    for (target, action, role) in [
+        (SECOND_ACCOUNT, "role", Some("administrator")),
+        (SECOND_ACCOUNT, "disable", None),
+        (DISABLED_ACCOUNT, "enable", None),
+    ] {
+        let path = format!("/accounts/{target}/{action}");
+        let body = role.map(|role| serde_json::json!({"role":role}).to_string());
+        for (cookie, origin, csrf, status) in [
+            (
+                Some(user.cookie.as_str()),
+                Some(fixture.origin.as_str()),
+                Some(user.csrf.as_str()),
+                403,
+            ),
+            (
+                Some(expired.cookie.as_str()),
+                Some(fixture.origin.as_str()),
+                Some(expired.csrf.as_str()),
+                401,
+            ),
+            (
+                Some(revoked.cookie.as_str()),
+                Some(fixture.origin.as_str()),
+                Some(revoked.csrf.as_str()),
+                401,
+            ),
+            (
+                None,
+                Some(fixture.origin.as_str()),
+                Some(owner.csrf.as_str()),
+                401,
+            ),
+            (
+                Some(owner.cookie.as_str()),
+                None,
+                Some(owner.csrf.as_str()),
+                403,
+            ),
+            (
+                Some(owner.cookie.as_str()),
+                Some("https://foreign.example"),
+                Some(owner.csrf.as_str()),
+                403,
+            ),
+            (
+                Some(owner.cookie.as_str()),
+                Some(fixture.origin.as_str()),
+                None,
+                403,
+            ),
+            (
+                Some(owner.cookie.as_str()),
+                Some(fixture.origin.as_str()),
+                Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                403,
+            ),
+        ] {
+            assert_eq!(
+                fixture
+                    .request("POST", &path, cookie, origin, csrf, body.clone())
+                    .await
+                    .status,
+                status,
+                "{path}"
+            );
+        }
+    }
+    assert_eq!(fixture.event_count(), 0);
+    assert_eq!(fixture.account_state(SECOND_ACCOUNT).2, 0);
+    assert!(!fixture.account_state(DISABLED_ACCOUNT).1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn account_authority_audit_failure_rolls_back_account_epoch_and_sessions() {
+    let fixture = TestFixture::new("account-audit-failure").await;
+    fixture.seed_account(SECOND_ACCOUNT, "second", "user", true);
+    fixture.seed_account(DISABLED_ACCOUNT, "disabled", "user", false);
+    fixture.seed_account(OTHER_ADMIN, "otheradmin", "administrator", true);
+    let owner = fixture.authenticated().await;
+    let second = fixture.sign_in("second").await;
+    let otheradmin = fixture.sign_in("otheradmin").await;
+    fixture.db().lock().unwrap().execute_batch("CREATE TRIGGER fail_security_event BEFORE INSERT ON event BEGIN SELECT RAISE(ABORT,'synthetic audit failure'); END;").unwrap();
+    for (target, action, role) in [
+        (SECOND_ACCOUNT, "role", Some("administrator")),
+        (SECOND_ACCOUNT, "disable", None),
+        (DISABLED_ACCOUNT, "enable", None),
+        (OTHER_ADMIN, "role", Some("user")),
+    ] {
+        let before = fixture.account_state(target);
+        assert_eq!(
+            fixture
+                .account_action(&owner, target, action, role)
+                .await
+                .status,
+            500
+        );
+        assert_eq!(fixture.account_state(target), before);
+        assert_eq!(fixture.event_count(), 0);
+    }
+    assert_eq!(fixture.me(&second.cookie).await.status, 200);
+    assert_eq!(fixture.me(&otheradmin.cookie).await.status, 200);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_account_authority_changes_preserve_an_enabled_admin_and_reject_revoked_actor() {
+    for (first, second) in [
+        ("role", "role"),
+        ("disable", "disable"),
+        ("role", "disable"),
+        ("disable", "role"),
+    ] {
+        let fixture = TestFixture::new("account-concurrent").await;
+        fixture.seed_account(OTHER_ADMIN, "otheradmin", "administrator", true);
+        fixture.seed_account(SECOND_ACCOUNT, "second", "user", true);
+        fixture.seed_account(DISABLED_ACCOUNT, "disabled", "user", false);
+        let owner = fixture.authenticated().await;
+        let other = fixture.sign_in("otheradmin").await;
+        let (a, b) = tokio::join!(
+            fixture.account_action(
+                &owner,
+                OTHER_ADMIN,
+                first,
+                (first == "role").then_some("user")
+            ),
+            fixture.account_action(
+                &other,
+                ACCOUNT_ID,
+                second,
+                (second == "role").then_some("user")
+            ),
+        );
+        let mut statuses = [a.status, b.status];
+        statuses.sort();
+        assert_eq!(statuses, [204, 401]);
+        let count: i64 = fixture
+            .db()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM account WHERE role='administrator' AND enabled=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(fixture.event_count(), 1);
+        let loser = if a.status == 204 { &other } else { &owner };
+        for (target, action, role) in [
+            (SECOND_ACCOUNT, "role", Some("administrator")),
+            (SECOND_ACCOUNT, "disable", None),
+            (DISABLED_ACCOUNT, "enable", None),
+        ] {
+            let before = fixture.account_state(target);
+            assert_eq!(
+                fixture
+                    .account_action(loser, target, action, role)
+                    .await
+                    .status,
+                401
+            );
+            assert_eq!(fixture.account_state(target), before);
+        }
+        assert_eq!(fixture.event_count(), 1);
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn account_authority_maximum_epoch_conflicts_without_mutation_or_audit() {
+    let fixture = TestFixture::new("account-maximum-epoch").await;
+    fixture.seed_account(SECOND_ACCOUNT, "second", "user", true);
+    fixture.seed_account(DISABLED_ACCOUNT, "disabled", "user", false);
+    fixture.seed_account(OTHER_ADMIN, "otheradmin", "administrator", true);
+    let owner = fixture.authenticated().await;
+    let second = fixture.sign_in("second").await;
+    let otheradmin = fixture.sign_in("otheradmin").await;
+    {
+        let db = fixture.db();
+        let connection = db.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE account SET credential_epoch=?1 WHERE account_id!=?2",
+                params![i64::MAX, ACCOUNT_ID],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE session SET credential_epoch=?1 WHERE account_id!=?2",
+                params![i64::MAX, ACCOUNT_ID],
+            )
+            .unwrap();
+    }
+    for (target, action, role) in [
+        (SECOND_ACCOUNT, "role", Some("administrator")),
+        (OTHER_ADMIN, "role", Some("user")),
+        (SECOND_ACCOUNT, "disable", None),
+        (OTHER_ADMIN, "disable", None),
+        (DISABLED_ACCOUNT, "enable", None),
+    ] {
+        let before = fixture.account_state(target);
+        assert_eq!(before.2, i64::MAX);
+        assert_eq!(
+            fixture
+                .account_action(&owner, target, action, role)
+                .await
+                .status,
+            409
+        );
+        assert_eq!(fixture.account_state(target), before);
+        assert_eq!(fixture.event_count(), 0);
+        let kind: String = fixture
+            .db()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT typeof(credential_epoch) FROM account WHERE account_id=?1",
+                [target],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "integer");
+    }
+    assert_eq!(fixture.me(&second.cookie).await.status, 200);
+    assert_eq!(fixture.me(&otheradmin.cookie).await.status, 200);
+    let fresh = fixture.sign_in("second").await;
+    assert_eq!(fixture.me(&fresh.cookie).await.status, 200);
+    fixture.close().await;
 }

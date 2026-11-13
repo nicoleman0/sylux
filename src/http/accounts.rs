@@ -23,6 +23,11 @@ pub struct Create {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Role {
+    role: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Reset {
     password: String,
 }
@@ -175,10 +180,17 @@ pub async fn create(
         Ok(())
     }).await)
 }
-pub async fn disable(
-    State(state): State<AuthState>,
-    Path(target): Path<String>,
+enum AuthorityChange {
+    Disable,
+    Enable,
+    Role(String),
+}
+
+async fn change_authority(
+    state: AuthState,
+    target: String,
     headers: HeaderMap,
+    change: AuthorityChange,
 ) -> Response {
     let (cookie, csrf) = match credentials(&headers, &state, true) {
         Ok(v) => v,
@@ -186,12 +198,65 @@ pub async fn disable(
     };
     response(state.workers.transact_result(move |tx| {
         let actor = authorize(tx, &cookie, csrf.as_ref(), true)?;
-        if actor == target { return Err(StatusCode::CONFLICT); }
-        let changed = tx.execute("UPDATE account SET enabled=0,credential_epoch=credential_epoch+1 WHERE account_id=?1 AND enabled=1 AND role='user'", [&target]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if changed != 1 { return Err(StatusCode::NOT_FOUND); }
+        if let AuthorityChange::Role(role) = &change
+            && !matches!(role.as_str(), "administrator" | "user")
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let (role, enabled): (String, bool) = tx.query_row(
+            "SELECT role,enabled FROM account WHERE account_id=?1", [&target],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        let (new_role, new_enabled, action) = match &change {
+            AuthorityChange::Disable if enabled && actor != target =>
+                (role.as_str(), false, "account.disabled"),
+            AuthorityChange::Enable if !enabled && actor != target =>
+                (role.as_str(), true, "account.enabled"),
+            AuthorityChange::Role(new_role) if enabled && new_role != &role
+                && !(actor == target && new_role == "user") =>
+                (new_role.as_str(), true, if new_role == "administrator" { "account.promoted" } else { "account.demoted" }),
+            _ => return Err(StatusCode::CONFLICT),
+        };
+        if role == "administrator" && enabled && (!new_enabled || new_role != "administrator") {
+            let administrators: i64 = tx.query_row(
+                "SELECT count(*) FROM account WHERE role='administrator' AND enabled=1", [], |r| r.get(0),
+            ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if administrators <= 1 { return Err(StatusCode::CONFLICT); }
+        }
+        let changed = tx.execute("UPDATE account SET role=?1,enabled=?2,credential_epoch=credential_epoch+1 WHERE account_id=?3 AND credential_epoch<9223372036854775807",
+            params![new_role,new_enabled,target]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if changed != 1 { return Err(StatusCode::CONFLICT); }
         tx.execute("UPDATE session SET revoked=1 WHERE account_id=?1", [&target]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        tx.execute("INSERT INTO event(actor_account_id,action,occurred_at,outcome) VALUES(?1,?2,?3,'ok')",
+            params![actor,action,now()]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         Ok(())
     }).await)
+}
+
+pub async fn disable(
+    State(state): State<AuthState>,
+    Path(target): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    change_authority(state, target, headers, AuthorityChange::Disable).await
+}
+
+pub async fn enable(
+    State(state): State<AuthState>,
+    Path(target): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    change_authority(state, target, headers, AuthorityChange::Enable).await
+}
+
+pub async fn role(
+    State(state): State<AuthState>,
+    Path(target): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<Role>,
+) -> Response {
+    change_authority(state, target, headers, AuthorityChange::Role(input.role)).await
 }
 pub async fn reset(
     State(state): State<AuthState>,

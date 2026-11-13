@@ -23,6 +23,7 @@ run npm --prefix web run build
 
 run cargo fmt --all -- --check
 run cargo clippy --locked --all-targets -- -D warnings
+run cargo test --locked --features test-harness --test contract_setup_auth --test integration_revocation
 run cargo test --locked
 run cargo build --locked
 
