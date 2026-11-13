@@ -482,13 +482,14 @@
     searchTimer = setTimeout(() => { searchTimer = null; void runSearch(); }, 250);
   }
 
-  async function runSearch(cursor: string | null = null, targetPage = 0): Promise<boolean> {
+  async function runSearch(cursor: string | null = null, targetPage = 0, onRequest?: (request: number) => void): Promise<boolean> {
     if (!user || !searchQuery || searchInputError) return false;
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = null;
     searchController?.abort();
     const controller = new AbortController(); searchController = controller;
     const request = ++searchRequest;
+    onRequest?.(request);
     const generation = sessionGeneration;
     const query = searchQuery;
     searchLoading = true; searchError = '';
@@ -509,7 +510,13 @@
     } catch (error) {
       if (request !== searchRequest || generation !== sessionGeneration || query !== searchQuery) return false;
       if (error instanceof HttpError && error.status === 409) {
-        if (cursor) { await runSearch(); notice = 'Files changed. Search results have been restarted.'; }
+        if (cursor) {
+          let restartRequest = request;
+          const restarted = await runSearch(null, 0, value => { restartRequest = value; onRequest?.(value); });
+          if (restartRequest !== searchRequest || generation !== sessionGeneration || query !== searchQuery) return false;
+          notice = 'Files changed. Search results have been restarted.';
+          return restarted;
+        }
       } else {
         searchRetryCursor = cursor; searchRetryPage = targetPage;
         searchError = 'Could not search files. Try again.';
@@ -521,11 +528,35 @@
   }
 
   async function searchNext(): Promise<void> {
-    if (searchHasMore && searchNextCursor && !searchLoading) await runSearch(searchNextCursor, searchPageIndex + 1);
+    if (!searchHasMore || !searchNextCursor || searchLoading) return;
+    const generation = sessionGeneration;
+    const query = searchQuery;
+    let request = searchRequest + 1;
+    const page = searchPageIndex + 1;
+    const isCurrent = () => generation === sessionGeneration && request === searchRequest && query === searchQuery && !accountView && !settingsView && !showTrash;
+    if (await runSearch(searchNextCursor, page, value => { request = value; })) await focusPagedResults(isCurrent);
+    else if (isCurrent() && searchError) await focusPagedResults(isCurrent, 'search-page-retry');
   }
 
   async function searchPrevious(): Promise<void> {
-    if (searchPageIndex > 0 && !searchLoading) await runSearch(searchPageCursors[searchPageIndex - 1], searchPageIndex - 1);
+    if (searchPageIndex === 0 || searchLoading) return;
+    const generation = sessionGeneration;
+    const query = searchQuery;
+    let request = searchRequest + 1;
+    const page = searchPageIndex - 1;
+    const isCurrent = () => generation === sessionGeneration && request === searchRequest && query === searchQuery && !accountView && !settingsView && !showTrash;
+    if (await runSearch(searchPageCursors[page], page, value => { request = value; })) await focusPagedResults(isCurrent);
+    else if (isCurrent() && searchError) await focusPagedResults(isCurrent, 'search-page-retry');
+  }
+
+  async function focusPagedResults(isCurrent: () => boolean, retryId?: string): Promise<void> {
+    await tick();
+    if (!isCurrent()) return;
+    if (retryId) {
+      document.getElementById(retryId)?.focus();
+      return;
+    }
+    (document.querySelector<HTMLElement>('.search-results .item-name, .file-drop-region .item-name') ?? document.getElementById('folder-title'))?.focus();
   }
 
   async function openSearchFolder(hit: SearchHit, containing = false): Promise<void> {
@@ -550,6 +581,7 @@
     const folderId = currentFolder.id;
     const cursor = nextCursor;
     const requestId = ++listingRequest;
+    const isCurrent = () => generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest && !searchQuery && !accountView && !settingsView && !showTrash;
     loading = true; listingError = '';
     try {
       const page = await listing.children(folderId, cursor, folderSort);
@@ -558,13 +590,24 @@
       pageIndex += 1; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       nextCursor = page.next_cursor; hasMore = page.has_more;
+      loading = false;
+      await focusPagedResults(isCurrent);
     } catch (error) {
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
       if (error instanceof HttpError && error.status === 409) {
-        await refresh();
-        if (generation !== sessionGeneration) return;
+        const refreshed = refresh();
+        const restartRequest = listingRequest;
+        const restarted = await refreshed;
+        const isRestartCurrent = () => generation === sessionGeneration && currentFolder.id === folderId && restartRequest === listingRequest && !searchQuery && !accountView && !settingsView && !showTrash;
+        if (!isRestartCurrent()) return;
         notice = 'This folder changed. The listing has been restarted.';
-      } else listingError = 'Could not load the next page. Try again.';
+        if (restarted) await focusPagedResults(isRestartCurrent);
+        else if (listingError) await focusPagedResults(isRestartCurrent, 'folder-page-retry');
+      } else {
+        listingError = 'Could not load the next page. Try again.';
+        loading = false;
+        await focusPagedResults(isCurrent, 'folder-page-retry');
+      }
     } finally { if (generation === sessionGeneration && requestId === listingRequest) loading = false; }
   }
 
@@ -575,6 +618,7 @@
     const generation = sessionGeneration;
     const folderId = currentFolder.id;
     const requestId = ++listingRequest;
+    const isCurrent = () => generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest && !searchQuery && !accountView && !settingsView && !showTrash;
     loading = true; listingError = '';
     const target = pageIndex - 1;
     try {
@@ -583,13 +627,24 @@
       pageIndex = target; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       nextCursor = page.next_cursor; hasMore = page.has_more;
+      loading = false;
+      await focusPagedResults(isCurrent);
     } catch (error) {
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
       if (error instanceof HttpError && error.status === 409) {
-        await refresh();
-        if (generation !== sessionGeneration) return;
+        const refreshed = refresh();
+        const restartRequest = listingRequest;
+        const restarted = await refreshed;
+        const isRestartCurrent = () => generation === sessionGeneration && currentFolder.id === folderId && restartRequest === listingRequest && !searchQuery && !accountView && !settingsView && !showTrash;
+        if (!isRestartCurrent()) return;
         notice = 'This folder changed. The listing has been restarted.';
-      } else listingError = 'Could not load the previous page. Try again.';
+        if (restarted) await focusPagedResults(isRestartCurrent);
+        else if (listingError) await focusPagedResults(isRestartCurrent, 'folder-page-retry');
+      } else {
+        listingError = 'Could not load the previous page. Try again.';
+        loading = false;
+        await focusPagedResults(isCurrent, 'folder-page-retry');
+      }
     } finally { if (generation === sessionGeneration && requestId === listingRequest) loading = false; }
   }
 
@@ -1748,7 +1803,7 @@
               <section aria-label="Search results" aria-busy={searchLoading} class="search-results">
                 {#if searchLoading}<p role="status">Searching…</p>
                 {:else if searchInputError}<p role="alert">{searchInputError}</p>
-                {:else if searchError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Search failed</Alert.Title><Alert.Description><p>{searchError}</p><Button variant="outline" size="sm" class="mt-2" onclick={() => runSearch(searchRetryCursor, searchRetryPage)}>Try again</Button></Alert.Description></Alert.Root>
+                {:else if searchError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Search failed</Alert.Title><Alert.Description><p>{searchError}</p><Button id="search-page-retry" variant="outline" size="sm" class="mt-2" onclick={() => runSearch(searchRetryCursor, searchRetryPage)}>Try again</Button></Alert.Description></Alert.Root>
                 {:else if searchItems.length === 0}<p>No matching files or folders.</p>
                 {:else}<div class="file-list"><div class="list-head"><span>Name and location</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>
                   {#each searchItems as hit (hit.entry.id)}
@@ -1798,7 +1853,7 @@
             <section class="file-drop-region" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
             {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span><span>Name</span><span class="file-size">Size</span><span class="sr-only">Options</span></div></div>{/if}
             {#if loading}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
-            {:else if listingError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Could not open this folder</Alert.Title><Alert.Description><p>{listingError}</p><Button variant="outline" size="sm" class="mt-2" onclick={refresh}>Try again</Button></Alert.Description></Alert.Root>
+            {:else if listingError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Could not open this folder</Alert.Title><Alert.Description><p>{listingError}</p><Button id="folder-page-retry" variant="outline" size="sm" class="mt-2" onclick={refresh}>Try again</Button></Alert.Description></Alert.Root>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
             {:else}<div class="file-list">{#each entries as entry (entry.id)}
               <article aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
