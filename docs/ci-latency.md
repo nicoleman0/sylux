@@ -40,4 +40,35 @@ For a cold repeat, list caches with `gh cache list --ref refs/heads/BRANCH` and 
 
 [Cold qualification 43486047136](https://github.com/nicoleman0/sylux/actions/runs/43486047136) passed on runner image `20261111.370.1`. Both added caches missed. End to end was 678 seconds, including a 3-second queue and 675-second job. Cargo-deny installation took 99 seconds; source checks 56 seconds; browser setup 15 seconds; beta checks 321 seconds; packaging 115 seconds; recovery 12 seconds. Saving the two caches took 6 seconds. The existing npm cache hit, so this is cold for the added release caches only.
 
-Warm and changed-input results remain to be recorded.
+[Warm qualification 43487917552](https://github.com/nicoleman0/sylux/actions/runs/43487917552) passed on the same runner image with exact hits for both caches. End to end fell from 11m18s to 7m44s, a 3m34s reduction (32%) in this pair of runs. This measures qualification with publication disabled; publication and GHCR time are excluded.
+
+| Step | Cold seconds | Warm seconds |
+| --- | ---: | ---: |
+| Initial queue | 3 | 4 |
+| Set up job / checkout | 6 | 3 |
+| Rust toolchain | 9 | 8 |
+| Restore Rust dependencies | 1 | 2 |
+| Node setup / npm cache restore | 11 | 2 |
+| Install npm and OS check tools | 16 | 12 |
+| Restore cargo-deny | 0 | 0 |
+| Install cargo-deny | 99 | skipped |
+| Source checks | 56 | 26 |
+| Browser prerequisites | 15 | 15 |
+| Beta qualification | 321 | 265 |
+| Packaging | 115 | 113 |
+| Packaged-image recovery | 12 | 10 |
+| Artifact upload | 3 | 1 |
+| Save release caches | 6 | 1 |
+| Qualification job total | 675 | 460 |
+| End to end | 678 | 464 |
+
+The warm revision added a temporary metadata marker to `web/index.html`. The logs show Sylux recompiling, and the real TLS asset test passed against the current web/dist hash. Both runs passed the full Rust, browser, smoke and packaged-image recovery gates. The marker was removed after verification. Lockfile/compiler changes were not exercised in these runs; their expected behavior above follows the pinned cache action's key construction. This is one cold/warm sample, not a timing guarantee.
+
+Both runs used these keys (miss then exact hit):
+
+```text
+release-cargo-deny-Linux-X64-20261111.370.1-667628d943d8159ce0ad1043c21a3f090b4e3c78f0a4f00784d7ad36dff963cf
+release-host-v1-20261111.370.1-5def8629f04eb4ba67771a821d4ef1077801124d677bace3ec9e4586ac2b7214-qualify-Linux-x64-01b81e85-cac136ed
+```
+
+The added caches occupied about 232 MiB. Browser setup, beta tests and fresh Docker packaging remain on the critical path. Buildx layer caching and parallelizing independent checks are possible follow-ups; neither was implemented here.
