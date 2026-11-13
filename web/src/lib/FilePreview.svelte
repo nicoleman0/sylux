@@ -4,6 +4,7 @@
   import type { ApiClient } from './api';
   import type { Entry } from './listing';
   import { loadPreview, type Preview } from './preview';
+  import { getPdfPreviewCompatibilityError } from './pdf-compatibility';
 
   let { entry, url, client, onclose, ondownload }: {
     entry: Entry | null;
@@ -56,13 +57,18 @@
       {:else if preview?.kind === 'image'}
         <img src={imageUrl} alt={entry?.name ?? 'File preview'} class="mx-auto max-h-full max-w-full object-contain" onerror={() => { error = 'This image could not be displayed. Download the file to open it.'; }} />
       {:else if preview?.kind === 'pdf'}
-        {#await import('./PdfPreview.svelte')}
-          <p role="status">Opening PDF…</p>
-        {:then component}
-          <component.default bytes={preview.bytes} onretry={() => attempt++} />
-        {:catch}
-          <div class="grid gap-3"><p role="alert">Could not load the PDF viewer. Retry or download the file.</p><Button variant="outline" class="justify-self-start" onclick={() => attempt++}>Retry preview</Button></div>
-        {/await}
+        {@const compatibilityError = getPdfPreviewCompatibilityError()}
+        {#if compatibilityError}
+          <p role="alert">{compatibilityError}</p>
+        {:else}
+          {#await import('./PdfPreview.svelte')}
+            <p role="status">Opening PDF…</p>
+          {:then component}
+            <component.default bytes={preview.bytes} onretry={() => attempt++} />
+          {:catch}
+            <div class="grid gap-3"><p role="alert">Could not load the PDF viewer. Retry or download the file.</p><Button variant="outline" class="justify-self-start" onclick={() => attempt++}>Retry preview</Button></div>
+          {/await}
+        {/if}
       {:else if preview?.kind === 'unsupported'}
         <p role="status">{preview.message}</p>
       {:else}

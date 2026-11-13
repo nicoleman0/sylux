@@ -10,7 +10,8 @@ It covers installing a versioned image, local accounts, private HTTPS access, ba
 
 The beta includes local account administration, isolated private storage, folders,
 file moves, recoverable deletion and replacement uploads. OIDC, shared folders,
-public sharing links, previews and WebDAV are not included.
+public sharing links and WebDAV are not included. Text, image and
+[PDF previews](docs/pdf-preview.md) are available in the browser.
 
 [Folder listings](docs/folder-listings.md) support name and file-size sorting.
 
