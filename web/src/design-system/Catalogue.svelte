@@ -35,6 +35,7 @@
   let darkMode = $state(false);
   let samples = $state<ColorSample[]>(colorTokens.map((color) => ({ ...color, value: '' })));
   let sampleNotice = $state('');
+  let sampleSelected = $state(false);
   let typeSizes = $state<Record<string, string>>({});
 
   function readColors(): void {
@@ -134,10 +135,12 @@
     <section class="catalogue-section" aria-labelledby="rows-title">
       <div class="section-heading"><h2 id="rows-title">Rows</h2><p>Everyday file and account details.</p></div>
       <div class="sample-rows">
-        <article class="file-row">
+        {#if sampleSelected}<div class="selection-toolbar" role="group" aria-label="Selected sample items"><span>1 selected</span><Button.Root variant="ghost" size="sm" onclick={() => sampleSelected = false}>Clear selection</Button.Root><Button.Root variant="outline" size="sm" onclick={() => sampleNotice = 'Move selected.'}>Move selected</Button.Root></div>{/if}
+        <article class="file-row selectable-row">
+          <label class="entry-selection"><input type="checkbox" aria-label="Select Projects sample" bind:checked={sampleSelected} /></label>
           <button type="button" class="item-name" onclick={() => sampleNotice = 'Folder action selected.'}><span class="folder-icon" aria-hidden="true"><FolderIcon /></span><span class="filename">Projects</span></button>
           <span class="file-size">—</span>
-          <Button.Root variant="ghost" size="icon" aria-label="Project actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root>
+          <Button.Root variant="ghost" size="icon" class="size-11" aria-label="Project actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root>
         </article>
         <div class="account-row">
           <div class="account-identity"><strong>alex</strong><span class="account-role">User</span></div>
