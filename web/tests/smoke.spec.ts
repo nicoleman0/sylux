@@ -1059,7 +1059,7 @@ test('wrong current password and rejected upload tickets do not end a valid sess
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   await page.route('**/mutation-tickets', (route) => route.fulfill({ status: 401, json: { code: 'invalid_mutation_ticket' } }));
   await page.getByLabel('Choose files to upload').setInputFiles({ name: 'ticket.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-  await expect(page.locator('.workspace-notice')).toContainText('Upload was not admitted');
+  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toContainText('Upload was not admitted');
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
 });
 
