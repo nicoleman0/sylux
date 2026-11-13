@@ -46,6 +46,26 @@ async fn main() -> ExitCode {
         Ok(configuration) => match configuration.command {
             CommandKind::Init => run_init(&configuration),
             CommandKind::Serve => run_serve(configuration).await,
+            CommandKind::AdminResetPassword => {
+                match sylux::admin::reset_password_from_stdin(
+                    &configuration.root,
+                    configuration
+                        .admin_handle
+                        .as_deref()
+                        .expect("parser requires handle"),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        eprintln!("sylux: administrator_password_reset");
+                        ExitCode::SUCCESS
+                    }
+                    Err(reason) => {
+                        eprintln!("sylux: {reason}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
         },
         Err(error) => {
             eprintln!("sylux: {}", error.reason());

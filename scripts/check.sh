@@ -24,6 +24,7 @@ run npm --prefix web run build
 run cargo fmt --all -- --check
 run cargo clippy --locked --all-targets -- -D warnings
 run cargo test --locked
+run cargo test --locked --features test-harness --test integration_admin_recovery --test contract_setup_auth --test integration_binding --test integration_local_lifecycle
 run cargo build --locked
 
 run npm --prefix web run audit:dependencies

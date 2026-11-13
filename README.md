@@ -7,6 +7,8 @@ Self-hosted multi-user file storage with a Rust server, Svelte interface and SQL
 Docker is the primary installation option. Start with the [Docker beta guide](docs/docker-beta.md).
 It covers installing a versioned image, local accounts, private HTTPS access, backup and restore.
 [Native LXC installation](docs/lxc.md) is secondary and has separate qualification limits.
+Lost administrator credentials can be [recovered offline](docs/docker-beta.md#recover-administrator-access)
+with host access and the service stopped.
 
 The beta includes local account administration, isolated private storage, folders,
 file moves, recoverable deletion and replacement uploads. OIDC, shared folders,
