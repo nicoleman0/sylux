@@ -26,6 +26,8 @@ __pycache__/
 _bmad-output/
 FILE-STORAGE-HANDOFF.md
 docs/project-status.md
+/reports/
+/research_notes/
 
 # Transient provenance and runtime evidence output
 **/evidence/

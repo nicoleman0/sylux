@@ -9,10 +9,10 @@
   fast, efficient and focused file server for self-hosters and small groups.
 - Linear owns priorities and scope; use its Projects to group outcomes.
   See [direction and delivery](https://linear.app/corvus-dev/document/sylux-direction-and-delivery-5a323553eb7b).
-- Post a Linear project update after meaningful milestones: merged features,
-  completed research or verification, or material scope/blocker changes.
+- Post a Linear project update after work ships: merged changes, published
+  releases or deployments. Skip ready-for-review and other pre-shipping posts.
   Summarize outcomes, evidence, limits and next steps; link relevant issues/PRs.
-  Distinguish planned, merged, published and deployed work. Check the latest
+  Distinguish merged, published and deployed work. Check the latest
   update first and batch related work; avoid per-commit or no-change updates.
 - Build the smallest useful end-to-end slice. State the user outcome,
   exclusions and observable acceptance criteria in the issue; split work
