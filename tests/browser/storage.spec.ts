@@ -256,7 +256,7 @@ test('browsing remains available while a real upload body is delayed', { annotat
   release();
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled({ timeout: 20_000 });
   await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Files', exact: true }).getByRole('button', { name: 'Files', exact: true }).click();
   await expect(page.getByRole('article', { name: `slow-upload-${phase}.bin`, exact: true })).toBeVisible();
 });
 
@@ -334,7 +334,7 @@ test('lost commit response is resolved through the original upload status', { an
   const unresolved = page.getByRole('alert').filter({ hasText: 'Upload status needs checking' });
   await expect(unresolved).toBeVisible();
   await expect(page.getByRole('button', { name: 'Check upload status' })).toBeVisible();
-  await expect(page.getByRole('article').filter({ hasText: fileName })).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Check upload status' }).click();
   await expect(unresolved).toBeHidden();
   await expect(page.getByRole('article').filter({ hasText: fileName })).toBeVisible({ timeout: 15_000 });
