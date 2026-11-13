@@ -496,6 +496,141 @@ async fn search_reaches_nested_literal_matches_and_isolates_paths_and_pages() {
 }
 
 #[tokio::test]
+async fn search_page_moves_fifty_files_through_http_with_ownership_etags_and_conflicts() {
+    let fixture = HttpFixture::new("search-bulk-move", 0).await;
+    let (destination, blocker) = fixture.workers.as_ref().unwrap().transact(|tx| {
+        let alpha = namespace::create_folder(tx, OWNER, ROOT, "Alpha").unwrap();
+        let beta = namespace::create_folder(tx, OWNER, ROOT, "Beta").unwrap();
+        let destination = namespace::create_folder(tx, OWNER, ROOT, "Destination").unwrap();
+        for index in 0..50 {
+            let id = format!("{:032x}", 0x3000 + index);
+            insert_sized_file(tx, &id, &format!("batch-{index:02}.bin"), index);
+            let parent = if index % 2 == 0 { &alpha.id } else { &beta.id };
+            tx.execute("UPDATE entry SET parent_id=?1 WHERE entry_id=?2", params![parent, id])?;
+        }
+        let blocker = namespace::create_folder(tx, OWNER, &destination.id, "batch-00.bin").unwrap();
+        tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES('0000000000000000000000000000ffff',?1,?2,'file','batch-private.bin',?3,1)", params![OTHER, OTHER_ROOT, b"batch-private.bin"])?;
+        Ok((destination, blocker))
+    }).await.unwrap();
+    let (status, body) = fixture.search("?q=batch-&limit=100").await;
+    assert_eq!(status, 200);
+    let found: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let selected: Vec<_> = found["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|hit| hit["entry"]["kind"] == "file")
+        .cloned()
+        .collect();
+    assert_eq!(selected.len(), 50);
+    assert!(
+        selected
+            .iter()
+            .all(|hit| hit["entry"]["name"] != "batch-private.bin")
+    );
+    let (status, body) = fixture
+        .search_as("?q=batch-", OTHER_SESSION, OTHER_SECRET)
+        .await;
+    assert_eq!(status, 200);
+    let other: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(other["items"].as_array().unwrap().len(), 1);
+    assert_eq!(other["items"][0]["entry"]["name"], "batch-private.bin");
+    let first = selected
+        .iter()
+        .find(|hit| hit["entry"]["name"] == "batch-00.bin")
+        .unwrap();
+    let path = format!("/entries/{}/move", first["entry"]["id"].as_str().unwrap());
+    let body = serde_json::to_vec(&serde_json::json!({ "parent_id": destination.id })).unwrap();
+    let (status, response) = fixture
+        .request_bytes(
+            &path,
+            &format!("If-Match: {}\r\n", first["entry"]["etag"].as_str().unwrap()),
+            &body,
+        )
+        .await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&response).unwrap()["code"],
+        "name_conflict"
+    );
+    assert_eq!(
+        fixture
+            .request_bytes(&path, "If-Match: \"stale\"\r\n", &body)
+            .await
+            .0,
+        412
+    );
+    assert_eq!(
+        fixture
+            .request_bytes(
+                "/entries/0000000000000000000000000000ffff/move",
+                "If-Match: \"g1\"\r\n",
+                &body
+            )
+            .await
+            .0,
+        404
+    );
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(move |tx| {
+            namespace::trash(tx, OWNER, &blocker.id, &blocker.etag).unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for hit in &selected {
+        let entry = &hit["entry"];
+        let (status, response) = fixture
+            .request_bytes(
+                &format!("/entries/{}/move", entry["id"].as_str().unwrap()),
+                &format!("If-Match: {}\r\n", entry["etag"].as_str().unwrap()),
+                &body,
+            )
+            .await;
+        assert_eq!(
+            status,
+            200,
+            "{}: {}",
+            entry["name"],
+            String::from_utf8_lossy(&response)
+        );
+    }
+    let (status, body) = fixture.search("?q=batch-&limit=100").await;
+    assert_eq!(status, 200);
+    let refreshed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let hits = refreshed["items"].as_array().unwrap();
+    assert_eq!(hits.len(), 50);
+    for hit in hits {
+        assert_eq!(hit["entry"]["parent_id"], destination.id);
+        assert_eq!(hit["location"][1]["name"], "Destination");
+        let original = selected
+            .iter()
+            .find(|original| original["entry"]["id"] == hit["entry"]["id"])
+            .unwrap();
+        assert_ne!(hit["entry"]["etag"], original["entry"]["etag"]);
+    }
+    let (status, body) = fixture
+        .get_as(
+            &format!("/folders/{}/children?limit=100", destination.id),
+            SESSION,
+            SECRET,
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        50
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn search_rejects_invalid_inputs_and_restarts_after_nested_changes() {
     let fixture = HttpFixture::new("search-changes", 2).await;
     for query in ["?q=", "?q=%0A", "?q=a&limit=0", "?q=a&limit=101"] {
