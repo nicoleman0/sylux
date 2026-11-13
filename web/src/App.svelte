@@ -297,15 +297,28 @@
   let controller: AbortController | null = null;
   let uploadBatchBusy = $state(false);
   let uploadBatchStatus = $state('');
-  type UploadResult = { path: string; kind: 'file' | 'folder'; status: 'waiting' | 'active' | 'saved' | 'created' | 'failed' | 'unknown' | 'canceled' };
+  type UploadResult = { path: string; kind: 'file' | 'folder'; size: number; sent: number; sentComplete: boolean; status: 'waiting' | 'active' | 'saved' | 'created' | 'failed' | 'unknown' | 'canceled' };
   let uploadResults = $state<UploadResult[]>([]);
+  let uploadBatchDestination = $state('');
+  let uploadBatchStage = $state('Preparing');
+  let uploadBatchCanceled = $state(false);
+  const batchFiles = $derived(uploadResults.filter((item) => item.kind === 'file'));
+  const batchBytes = $derived(batchFiles.reduce((total, item) => total + item.size, 0));
+  const batchSent = $derived(batchFiles.reduce((total, item) => total + item.sent, 0));
+  const batchSaved = $derived(batchFiles.filter((item) => item.status === 'saved').length);
+  const batchFoldersCreated = $derived(uploadResults.filter((item) => item.status === 'created').length);
+  const batchActive = $derived(uploadResults.find((item) => item.status === 'active'));
+  let uploadBatchCurrentIndex = $state(-1);
+  const batchCurrent = $derived(uploadResults[uploadBatchCurrentIndex]);
+  const batchCurrentDestination = $derived([uploadBatchDestination, ...(batchCurrent?.path.split('/').slice(0, -1) ?? [])].join(' / '));
+  const batchDisplayStage = $derived(!uploadBatchCanceled ? uploadBatchStage : uploadBatchStage === 'Saving' ? 'Stopping after this save' : uploadBatchStage === 'Creating folder' ? 'Stopping after this folder' : uploadBatchStage === 'Sending' ? 'Canceling current upload' : 'Stopping upload');
+  const batchSendPercent = $derived(Math.floor(100 * (batchBytes ? batchSent / batchBytes : batchFiles.length ? batchFiles.filter((item) => item.sentComplete).length / batchFiles.length : 0)));
   let uploadResultsExpanded = $state(false);
   let uploadReportVisible = $state(false);
   const uploadComplete = $derived(!uploadBatchBusy && uploadResults.length > 0 && uploadResults.every((item) => item.status === 'saved' || item.status === 'created'));
 
   function hideUploadReport(): void { uploadReportVisible = false; uploadResultsExpanded = false; }
   let unresolvedUploadResult: number | null = null;
-  let uploadBatchCanceled = false;
   let replacementDecision: ((prompt: ReplacementPrompt | null) => void) | null = null;
   const fileMutationBusy = $derived(bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || folderBusy || transferBusy || uploadBatchBusy);
 
@@ -1063,6 +1076,7 @@
     if (uploadBatchBusy || transferBusy || unresolvedUploadId) return;
     const generation = sessionGeneration;
     uploadReportVisible = true;
+    uploadBatchDestination = destination.name; uploadBatchStage = 'Preparing'; uploadBatchCurrentIndex = -1;
     uploadBatchBusy = true; uploadBatchCanceled = false; uploadBatchStatus = 'Reading files and folders…'; notice = '';
     uploadResults = []; uploadResultsExpanded = false; unresolvedUploadResult = null;
     let saved = 0; let created = 0; let complete = false;
@@ -1073,12 +1087,13 @@
       const items = await read(() => uploadBatchCanceled || generation !== sessionGeneration);
       if (generation !== sessionGeneration) return;
       if (!items.length) { uploadBatchStatus = 'No files or folders were selected.'; return; }
-      uploadResults = items.map((item) => ({ path: item.path.join('/'), kind: item.kind, status: 'waiting' }));
+      uploadResults = items.map((item) => ({ path: item.path.join('/'), kind: item.kind, size: item.kind === 'file' ? item.file.size : 0, sent: 0, sentComplete: false, status: 'waiting' }));
       const destinations = new Map<string, Folder>([['[]', destination]]);
       for (const [index, item] of items.entries()) {
         if (uploadBatchCanceled || generation !== sessionGeneration) break;
-        currentIndex = index;
+        currentIndex = index; uploadBatchCurrentIndex = index;
         uploadResults[index].status = 'active';
+        uploadBatchStage = item.kind === 'folder' ? 'Creating folder' : 'Preparing';
         currentPath = item.path.join('/');
         const remaining = uploadResults.filter((result) => result.kind === 'file' && result.status === 'waiting').length;
         uploadBatchStatus = `Adding ${currentPath} to ${destination.name}… ${remaining} ${remaining === 1 ? 'file' : 'files'} left after this item.`;
@@ -1097,6 +1112,7 @@
           let committed = await startUpload(item.file, null, undefined, folder);
           if (generation !== sessionGeneration) return;
           if (!committed && replacementPrompt && !uploadBatchCanceled) {
+            uploadBatchStage = 'Waiting for replacement decision';
             const prompt = await new Promise<ReplacementPrompt | null>((resolve) => { replacementDecision = resolve; });
             if (generation !== sessionGeneration) return;
             if (prompt && !uploadBatchCanceled) {
@@ -1116,6 +1132,7 @@
       }
       complete = !uploadBatchCanceled && !unresolvedUploadId && saved + created === items.length;
       if (currentIndex >= 0 && uploadResults[currentIndex].status === 'active') uploadResults[currentIndex].status = 'canceled';
+      uploadBatchStage = 'Refreshing files';
       uploadResultsExpanded = !complete;
       uploadBatchStatus = complete ? '' : `Upload stopped${currentPath ? ` at ${currentPath}` : ''}.`;
     } catch (error) {
@@ -1223,6 +1240,10 @@
   async function showCommittedUpload(): Promise<void> {
     const generation = sessionGeneration;
     progress = 100; transferPhase = 'complete';
+    if (uploadBatchBusy) {
+      if (batchActive?.kind === 'file') batchActive.status = 'saved';
+      uploadBatchStage = 'Refreshing files';
+    }
     notice = uploadReplacement ? 'Replacement complete. The previous file is in trash. Rename the current file before restoring the previous one.' : '';
     try { if (!await refreshRoot()) return; } catch { /* Keep the confirmed commit outcome visible. */ }
     if (generation !== sessionGeneration) return;
@@ -1278,12 +1299,19 @@
       progress = 0;
       uploadCancelable = true;
       if (uploadBatchBusy && uploadBatchCanceled) throw new DOMException('Upload canceled', 'AbortError');
-      await activeTransfers.send(admission.id, file, uploadController.signal, (sent, total) => { if (generation === sessionGeneration) progress = total ? Math.floor((sent / total) * 100) : 0; });
+      if (uploadBatchBusy) uploadBatchStage = 'Sending';
+      await activeTransfers.send(admission.id, file, uploadController.signal, (sent, total) => {
+        if (generation !== sessionGeneration) return;
+        progress = total ? Math.floor((sent / total) * 100) : 0;
+        if (batchActive?.kind === 'file') batchActive.sent = Math.max(batchActive.sent, Math.min(file.size, sent));
+      });
       if (generation !== sessionGeneration) return committed;
       if (uploadBatchBusy && uploadBatchCanceled) throw new DOMException('Upload canceled', 'AbortError');
       uploadCancelable = false;
       progress = 100;
       transferPhase = 'saving';
+      if (batchActive?.kind === 'file') { batchActive.sent = file.size; batchActive.sentComplete = true; }
+      if (uploadBatchBusy) uploadBatchStage = 'Saving';
       try { await activeTransfers.commit(admission.id); }
       catch (error) {
         if (generation !== sessionGeneration) return committed;
@@ -1632,10 +1660,33 @@
               <section class="upload-batch-report" aria-label="Upload results">
                 {#if uploadBatchStatus && !uploadBatchBusy && !uploadComplete}<p class="upload-batch-status" role="status">{uploadBatchStatus}</p>{/if}
                 {#if uploadBatchBusy}
-                  <div class="upload-pending">
-                    <span role="status" aria-label="Uploading"><LoaderCircleIcon class="refreshing" aria-hidden="true" /><span class="sr-only">{transferName ? `Uploading ${transferName}. ${progress}%.` : 'Reading files and folders.'}</span></span>
-                    <Button variant="ghost" size="icon" aria-label="Cancel upload" title="Cancel upload" onclick={cancelUploadBatch}><XIcon /></Button>
-                  </div>
+                  {#if batchFiles.length > 1}
+                    <div class="upload-batch-progress">
+                      <div class="upload-batch-heading">
+                        <span>{batchSaved} of {batchFiles.length} files saved{#if batchFoldersCreated} · {batchFoldersCreated} {batchFoldersCreated === 1 ? 'folder' : 'folders'} created{/if}</span>
+                        <Button variant="ghost" size="icon" aria-label="Cancel upload" title="Cancel upload" disabled={uploadBatchCanceled} onclick={cancelUploadBatch}><XIcon /></Button>
+                      </div>
+                      <div class="upload-batch-current" role="status" aria-label="Uploading" aria-atomic="true">
+                        <span>{batchDisplayStage}{batchCurrent ? ':' : ''}</span>
+                        {#if batchCurrent}<span class="upload-current-path" title={batchCurrent.path}>{batchCurrent.path.split('/').at(-1)}</span>{/if}
+                        <span class="sr-only">To {batchCurrentDestination}. {batchSaved} of {batchFiles.length} files saved. At least {Math.floor(batchSendPercent / 10) * 10}% sent.</span>
+                      </div>
+                      <div class="upload-batch-destination" title={batchCurrentDestination}>To {batchCurrentDestination}</div>
+                      <div class="upload-byte-progress" role="progressbar" aria-label={batchBytes ? 'Batch bytes sent' : 'Batch files sent'} aria-valuemin="0" aria-valuemax="100" aria-valuenow={batchSendPercent} aria-valuetext={`${batchSendPercent}% sent. ${batchSaved} of ${batchFiles.length} files saved.`}>
+                        <span style:width={`${batchSendPercent}%`}></span>
+                      </div>
+                      <div class="upload-batch-bytes">{#if batchBytes}{formatSize(batchSent)} of {formatSize(batchBytes)} sent{:else}No file bytes to send{/if}<span>{batchSendPercent}% sent</span></div>
+                      <details class="upload-location-details">
+                        <summary>Upload location</summary>
+                        <dl><dt>File or folder</dt><dd>{batchCurrent?.path ?? 'Preparing'}</dd><dt>Destination</dt><dd>{batchCurrentDestination}</dd></dl>
+                      </details>
+                    </div>
+                  {:else}
+                    <div class="upload-pending">
+                      <span role="status" aria-label="Uploading"><LoaderCircleIcon class="refreshing" aria-hidden="true" /><span class="sr-only">{transferName ? `Uploading ${transferName}. ${progress}%.` : 'Reading files and folders.'}</span></span>
+                      <Button variant="ghost" size="icon" aria-label="Cancel upload" title="Cancel upload" disabled={uploadBatchCanceled} onclick={cancelUploadBatch}><XIcon /></Button>
+                    </div>
+                  {/if}
                 {/if}
                 {#if !uploadBatchBusy && uploadReportVisible && uploadResults.length}
                   <details open={uploadResultsExpanded} ontoggle={(event) => uploadResultsExpanded = event.currentTarget.open}>
@@ -1761,6 +1812,22 @@
   .upload-pending { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); }
   .upload-pending [role="status"] { display: flex; }
   .upload-pending :global(svg) { width: var(--icon-file); height: var(--icon-file); }
+  .upload-batch-progress { display: grid; gap: 6px; width: min(100%, 640px); min-width: 0; font-size: var(--type-ui); font-variant-numeric: tabular-nums; }
+  .upload-batch-heading, .upload-batch-bytes { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .upload-batch-heading > span { font-weight: var(--weight-heading); }
+  .upload-batch-current { display: flex; gap: 5px; min-width: 0; }
+  .upload-batch-current > span:first-child { flex-shrink: 0; }
+  .upload-current-path, .upload-batch-destination { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .upload-batch-destination, .upload-batch-bytes { color: var(--muted-foreground); font-size: var(--type-meta); }
+  .upload-location-details { font-size: var(--type-meta); }
+  .upload-location-details summary { min-height: var(--control-height); align-content: center; }
+  @media (pointer: coarse) { .upload-location-details summary { min-height: var(--control-height-touch); } }
+  .upload-location-details dl { display: grid; gap: 4px; margin-top: 8px; }
+  .upload-location-details dt { color: var(--muted-foreground); }
+  .upload-location-details dd { overflow-wrap: anywhere; margin: 0 0 4px; }
+  .upload-byte-progress { height: 6px; overflow: hidden; border-radius: var(--radius); background: var(--muted); }
+  .upload-byte-progress > span { display: block; height: 100%; background: var(--primary); transition: width 150ms linear; }
+  @media (prefers-reduced-motion: reduce) { .upload-byte-progress > span { transition: none; } }
   .upload-batch-report summary { cursor: pointer; font-size: var(--type-ui); }
   .upload-batch-report li { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-block: 8px; font-size: var(--type-ui); }
   .upload-batch-report li > span:last-child { flex-shrink: 0; }
