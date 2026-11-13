@@ -19,6 +19,8 @@ pub enum CommandKind {
     Init,
     /// Serve the bound installation (never initializes anything).
     Serve,
+    /// Reset an existing administrator password while the service is stopped.
+    AdminResetPassword,
 }
 
 /// Parsed process configuration.
@@ -35,6 +37,7 @@ pub struct CliConfig {
     pub public_origin: Option<String>,
     /// Compiled static assets directory (environment override only).
     pub assets: PathBuf,
+    pub admin_handle: Option<String>,
 }
 
 /// Why the configuration was refused. Redacted codes only: never echo
@@ -71,8 +74,18 @@ where
     let command = match arguments.next().as_deref().and_then(|value| value.to_str()) {
         Some("init") => CommandKind::Init,
         Some("serve") => CommandKind::Serve,
+        Some("admin") => {
+            if arguments.next().as_deref().and_then(|value| value.to_str())
+                != Some("reset-password")
+            {
+                return Err(ConfigError::Usage("admin_subcommand_required"));
+            }
+            CommandKind::AdminResetPassword
+        }
         _ => return Err(ConfigError::Usage("subcommand_required")),
     };
+    let mut admin_handle = None;
+    let mut password_stdin = false;
     let mut root: Option<PathBuf> = None;
     let mut listen: Option<String> = None;
     let mut tls_cert: Option<PathBuf> = None;
@@ -83,7 +96,25 @@ where
         let flag = argument
             .to_str()
             .ok_or(ConfigError::Usage("argument_not_utf8"))?;
+        if command == CommandKind::AdminResetPassword
+            && !matches!(flag, "--root" | "--handle" | "--password-stdin")
+        {
+            return Err(ConfigError::Usage("unknown_argument"));
+        }
         match flag {
+            "--handle" if command == CommandKind::AdminResetPassword => {
+                set_once(
+                    &mut admin_handle,
+                    value_string(&mut arguments, "handle_value_missing")?,
+                    "duplicate_handle",
+                )?;
+            }
+            "--password-stdin" if command == CommandKind::AdminResetPassword => {
+                if password_stdin {
+                    return Err(ConfigError::Usage("duplicate_password_stdin"));
+                }
+                password_stdin = true;
+            }
             "--root" => {
                 set_once(
                     &mut root,
@@ -125,8 +156,20 @@ where
     if command == CommandKind::Serve && (tls_cert.is_none() || tls_key.is_none()) {
         return Err(ConfigError::Usage("tls_required_for_serve"));
     }
+    if command == CommandKind::AdminResetPassword {
+        if admin_handle.as_deref().is_none_or(str::is_empty) {
+            return Err(ConfigError::Usage("handle_required"));
+        }
+        if !password_stdin {
+            return Err(ConfigError::Usage("password_stdin_required"));
+        }
+    }
     let listen = listen
-        .or_else(|| env::var("SYLUX_LISTEN").ok())
+        .or_else(|| {
+            (command != CommandKind::AdminResetPassword)
+                .then(|| env::var("SYLUX_LISTEN").ok())
+                .flatten()
+        })
         .unwrap_or_else(|| "127.0.0.1:3000".to_owned());
     let listen: SocketAddr = listen
         .parse()
@@ -144,6 +187,7 @@ where
         allow_non_loopback,
         public_origin,
         assets,
+        admin_handle,
     })
 }
 
@@ -227,6 +271,71 @@ mod tests {
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn recovery_parser_requires_explicit_complete_and_isolated_arguments() {
+        let base = [
+            "admin",
+            "reset-password",
+            "--root",
+            "/x",
+            "--handle",
+            "owner",
+            "--password-stdin",
+        ];
+        let parsed = parse(args(&base)).unwrap();
+        assert_eq!(parsed.command, CommandKind::AdminResetPassword);
+        assert_eq!(parsed.admin_handle.as_deref(), Some("owner"));
+        for (input, reason) in [
+            (vec!["admin"], "admin_subcommand_required"),
+            (vec!["admin", "reset-password"], "root_required"),
+            (
+                vec!["admin", "reset-password", "--root", "/x"],
+                "handle_required",
+            ),
+            (
+                vec![
+                    "admin",
+                    "reset-password",
+                    "--root",
+                    "/x",
+                    "--handle",
+                    "owner",
+                ],
+                "password_stdin_required",
+            ),
+            (
+                vec!["admin", "reset-password", "--root"],
+                "root_value_missing",
+            ),
+            (
+                vec!["admin", "reset-password", "--root", "/x", "--handle"],
+                "handle_value_missing",
+            ),
+            (vec!["serve", "--handle", "owner"], "unknown_argument"),
+            (vec!["init", "--password-stdin"], "unknown_argument"),
+        ] {
+            assert_eq!(parse(args(&input)).unwrap_err().reason(), reason);
+        }
+        for (extra, reason) in [
+            (vec!["--root", "/y"], "duplicate_root"),
+            (vec!["--handle", "other"], "duplicate_handle"),
+            (vec!["--password-stdin"], "duplicate_password_stdin"),
+            (vec!["--listen", "127.0.0.1:0"], "unknown_argument"),
+            (vec!["--tls-cert", "x"], "unknown_argument"),
+            (vec!["--tls-key", "x"], "unknown_argument"),
+            (
+                vec!["--public-origin", "https://example.test"],
+                "unknown_argument",
+            ),
+            (vec!["--allow-non-loopback"], "unknown_argument"),
+            (vec!["--password", "secret"], "unknown_argument"),
+        ] {
+            let mut input = base.to_vec();
+            input.extend(extra);
+            assert_eq!(parse(args(&input)).unwrap_err().reason(), reason);
+        }
     }
 
     #[test]

@@ -106,7 +106,7 @@ impl TestFixture {
         Arc::clone(self.db.as_ref().unwrap())
     }
 
-    async fn close(mut self) {
+    async fn stop(&mut self) {
         if let Some(server) = self.server.take() {
             server.abort();
             let _ = server.await;
@@ -115,6 +115,41 @@ impl TestFixture {
             workers.shutdown().await.unwrap();
         }
         self.db.take();
+    }
+
+    async fn restart_with_storage(&mut self) {
+        self.stop().await;
+        let product = self.owner.path().join("product");
+        let connection = sqlite::open_writer(&self.db_path, BUSY).unwrap();
+        let workers = SqliteWorkers::from_writer(
+            connection,
+            &self.db_path,
+            WorkerConfig {
+                busy_timeout: BUSY,
+                ..WorkerConfig::default()
+            },
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        self.address = listener.local_addr().unwrap().to_string();
+        self.origin = format!("http://{}", self.address);
+        let setup = fs::read_to_string(product.join("secrets/setup.authorization")).unwrap();
+        let app = http::router(
+            AuthState::new_with_setup(workers.clone(), self.origin.clone(), setup)
+                .with_storage_root(&product)
+                .unwrap(),
+        );
+        self.db = Some(Arc::new(Mutex::new(
+            sqlite::open_writer(&self.db_path, BUSY).unwrap(),
+        )));
+        self.workers = Some(workers);
+        self.server = Some(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+    }
+
+    async fn close(mut self) {
+        self.stop().await;
         self.owner.cleanup_after_workers_exit().unwrap();
         fs::remove_dir(self.owner.path().parent().unwrap()).unwrap();
     }
@@ -525,6 +560,201 @@ async fn cookie_auth_mutations_require_exact_origin() {
         assert_eq!(response.status, 403);
         assert_eq!(fixture.me(&auth.cookie).await.status, 200);
     }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn offline_recovery_preserves_setup_private_inventory_and_downloads_after_restart() {
+    use sha2::{Digest, Sha256};
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let mut fixture = TestFixture::new("offline-recovery").await;
+    let product = fixture.owner.path().join("product");
+    const NEW: &str = "  recovered administrator password  ";
+    const OTHER: &str = "00000000000000000000000000000002";
+    let owner_file = "00000000000000000000000000000301";
+    let other_file = "00000000000000000000000000000302";
+    let bytes = b"private recovery fixture\x00\xff";
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    {
+        let db = fixture.db();
+        let db = db.lock().unwrap();
+        db.execute("INSERT INTO account(account_id,handle,role,enabled,credential_epoch,password_verifier) SELECT ?1,'other','user',1,0,password_verifier FROM account WHERE account_id=?2",params![OTHER,ACCOUNT_ID]).unwrap();
+        db.execute_batch("UPDATE installation SET setup_consumed=1,setup_verifier=zeroblob(32)")
+            .unwrap();
+        let store = sylux::persistence::payload::PayloadStore::open(&product).unwrap();
+        for (account, root_id, file_id, revision_id) in [
+            (
+                ACCOUNT_ID,
+                "00000000000000000000000000000101",
+                owner_file,
+                "00000000000000000000000000000401",
+            ),
+            (
+                OTHER,
+                "00000000000000000000000000000102",
+                other_file,
+                "00000000000000000000000000000402",
+            ),
+        ] {
+            let mut staged = store
+                .start(&format!("{file_id}-{revision_id}"), bytes.len() as u64)
+                .unwrap();
+            staged.write_chunk(bytes).unwrap();
+            let published = staged.publish(digest).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,NULL,'folder','',x'',1)",params![root_id,account]).unwrap();
+            db.execute(
+                "INSERT INTO blob(blob_id,shard,length,sha256) VALUES(?1,?2,?3,?4)",
+                params![
+                    published.blob_id,
+                    &published.blob_id[..2],
+                    bytes.len() as i64,
+                    digest.as_slice()
+                ],
+            )
+            .unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'file','fixture.bin',x'666978747572652e62696e',1)",params![file_id,account,root_id]).unwrap();
+            db.execute("INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES(?1,?2,?3,?4,?5,1,?6)",params![revision_id,file_id,published.blob_id,bytes.len() as i64,digest.as_slice(),account]).unwrap();
+            db.execute(
+                "UPDATE entry SET current_revision_id=?1 WHERE entry_id=?2",
+                params![revision_id, file_id],
+            )
+            .unwrap();
+        }
+    }
+    fixture.restart_with_storage().await;
+    let old_auth = fixture.authenticated().await;
+    let pre = fixture.bootstrap().await;
+    let other = fixture.login(&pre, "other", PASSWORD).await;
+    assert_eq!(other.status, 200);
+    let other_auth = Authenticated::from_response(&other);
+    let mut listings = Vec::new();
+    for (cookie, file_id) in [
+        (&old_auth.cookie, owner_file),
+        (&other_auth.cookie, other_file),
+    ] {
+        let listing = fixture
+            .request("GET", "/folders/children", Some(cookie), None, None, None)
+            .await;
+        assert_eq!(listing.status, 200);
+        listings.push(listing.body);
+        let download = fixture
+            .request(
+                "GET",
+                &format!("/entries/{file_id}/content"),
+                Some(cookie),
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(download.status, 200);
+        assert_eq!(download.body.as_ref(), bytes);
+    }
+    fixture.stop().await;
+    let identity = fs::read(product.join("installation.json")).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sylux"))
+        .args(["admin", "reset-password", "--root"])
+        .arg(&product)
+        .args(["--handle", "owner", "--password-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{NEW}\n").as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stderr, b"sylux: administrator_password_reset\n");
+    assert_eq!(
+        fs::read(product.join("installation.json")).unwrap(),
+        identity
+    );
+    fixture.restart_with_storage().await;
+    assert_eq!(fixture.me(&old_auth.cookie).await.status, 401);
+    assert_eq!(fixture.me(&other_auth.cookie).await.status, 200);
+    let pre = fixture.bootstrap().await;
+    assert_eq!(fixture.login(&pre, "owner", PASSWORD).await.status, 401);
+    let pre = fixture.bootstrap().await;
+    let response = fixture.login(&pre, "owner", NEW).await;
+    assert_eq!(response.status, 200);
+    let new_auth = Authenticated::from_response(&response);
+    for (index, (cookie, file_id, foreign_id)) in [
+        (&new_auth.cookie, owner_file, other_file),
+        (&other_auth.cookie, other_file, owner_file),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let listing = fixture
+            .request("GET", "/folders/children", Some(cookie), None, None, None)
+            .await;
+        assert_eq!(listing.status, 200);
+        assert_eq!(listing.body, listings[index]);
+        let download = fixture
+            .request(
+                "GET",
+                &format!("/entries/{file_id}/content"),
+                Some(cookie),
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(download.status, 200);
+        assert_eq!(download.body.as_ref(), bytes);
+        assert_eq!(
+            fixture
+                .request(
+                    "GET",
+                    &format!("/entries/{foreign_id}/content"),
+                    Some(cookie),
+                    None,
+                    None,
+                    None
+                )
+                .await
+                .status,
+            404
+        );
+    }
+    let setup = fs::read_to_string(product.join("secrets/setup.authorization")).unwrap();
+    for (method, path, body) in [
+        ("GET", "/setup", String::new()),
+        (
+            "POST",
+            "/setup/admin",
+            serde_json::json!({"handle":"new-admin","password":PASSWORD}).to_string(),
+        ),
+    ] {
+        let mut stream = TcpStream::connect(&fixture.address).await.unwrap();
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nOrigin: {}\r\nX-Setup-Authorization: {setup}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            fixture.address,
+            fixture.origin,
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        assert_eq!(TestResponse::parse(&response).status, 404);
+    }
+    let consumed: i64 = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row("SELECT setup_consumed FROM installation", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(consumed, 1);
     fixture.close().await;
 }
 

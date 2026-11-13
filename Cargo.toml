@@ -49,6 +49,11 @@ path = "tests/integration/local_lifecycle.rs"
 required-features = ["test-harness"]
 
 [[test]]
+name = "integration_admin_recovery"
+path = "tests/integration/admin_recovery.rs"
+required-features = ["test-harness"]
+
+[[test]]
 name = "integration_binding"
 path = "tests/integration/binding.rs"
 required-features = ["test-harness"]
@@ -156,7 +161,7 @@ base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 unicode-normalization = { version = "=0.1.26", default-features = false, features = ["std"] }
 serde = { version = "=1.0.229", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "=1.0.154", default-features = false, features = ["std"] }
-rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "process"] }
 tokio-util = { version = "=0.7.20", default-features = false, features = ["io", "rt"] }
 cookie = { version = "=0.18.2", default-features = false }
 axum-server = { version = "=0.9.0", default-features = false, features = ["tls-rustls-no-provider"] }

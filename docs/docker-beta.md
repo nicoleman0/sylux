@@ -126,6 +126,54 @@ sudo tar --numeric-owner --same-owner --same-permissions \
 
 Set `SYLUX_DATA_DIR=/srv/sylux-restore` in `.env`, then run `docker compose up -d`. Check sign-in, inventory, and byte-exact downloads before accepting the restore. Preserve the original root until the restore is verified. The documented CI exercise used a disposable archive; real operator backups remain unqualified.
 
+## Recover administrator access
+
+Recovery requires host access and an existing administrator handle. It resets that
+account's password, enables it and revokes its sessions. It does not create an
+account or reopen browser setup. Other accounts and files keep their state.
+
+Use an image built from a release that includes `admin reset-password`. Older
+images reject the command. Check the selected release before proceeding; do not
+use `init`, edit SQLite or change the installation identity to work around that.
+
+Stop Sylux and make the archive in step 4, **omitting the restart**. Verify the
+archive checksum before changing credentials. Run from the installation directory
+with its verified `.env` and Compose file. The one-shot container uses the same
+UID/GID 10001 and `/var/lib/sylux` bind mount as the service:
+
+```sh
+docker compose stop || exit 1
+RUNNING=$(docker compose ps --status running -q) || exit 1
+test -z "$RUNNING" || exit 1
+sudo sha256sum -c /mnt/backup/sylux/backup.tar.sha256 || exit 1
+bash <<'RECOVERY' || exit 1
+set +x
+set +o history
+set -o pipefail
+trap 'unset sylux_password' EXIT
+IFS= read -r -s -p 'New administrator password: ' sylux_password </dev/tty || exit 1
+printf '\n' >/dev/tty
+printf '%s' "$sylux_password" | docker compose run --rm -T sylux \
+  admin reset-password --root /var/lib/sylux \
+  --handle '<existing administrator handle>' --password-stdin
+RECOVERY
+docker compose up -d || exit 1
+```
+
+Replace the handle placeholder before running. Use a trusted local terminal with
+session recording disabled. The Bash block disables tracing and history, reads
+without echo and sends the password only through stdin. Do not put a password in
+a command, environment variable or file. Passwords require 15–128 characters;
+spaces are significant. The command refuses terminal stdin, multiple lines,
+invalid UTF-8 and unsupported or damaged installations. It does not migrate or
+repair the database and never starts a listener.
+
+After restart, sign in with the new password. Confirm the old password and an
+existing session fail, setup remains closed, and inventory and known downloads
+match. A held writer lock means the service still needs to stop. If the command
+reports an uncertain commit, restart and test the new credentials before another
+reset; do not retry automatically.
+
 ## 5. Upgrade and roll back
 
 Keep the current release archive, `.env`, and local image ID. Stop the service and make a verified pre-upgrade archive as in step 4 **without starting it again**. Download and verify all assets for the new release into a new directory as in step 1, then load and inspect its version tag. Copy the prior `.env` into the new directory, set `SYLUX_IMAGE` to the newly inspected local ID, run `docker compose config -q`, and start there with `docker compose up -d`. Check sign-in and known file downloads.

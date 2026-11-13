@@ -1,5 +1,6 @@
 //! Sylux: dependable private storage (S1 PoC foundation).
 
+pub mod admin;
 pub mod config;
 pub mod domain;
 pub mod error;
