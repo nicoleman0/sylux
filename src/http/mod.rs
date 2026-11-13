@@ -123,6 +123,8 @@ pub fn router(state: AuthState) -> Router {
         .route("/me/password", post(accounts::change_password))
         .route("/accounts", get(accounts::list).post(accounts::create))
         .route("/accounts/{id}/disable", post(accounts::disable))
+        .route("/accounts/{id}/enable", post(accounts::enable))
+        .route("/accounts/{id}/role", post(accounts::role))
         .route("/accounts/{id}/reset", post(accounts::reset))
         .route("/livez", get(status::live))
         .route("/readyz", get(status::ready))

@@ -59,3 +59,9 @@ jobs:
         env:
           CARGO_DENY_BIN: ${{ runner.temp }}/cargo-deny/bin/cargo-deny
         run: scripts/check.sh
+
+      - name: Install pinned browser prerequisites
+        run: npm --prefix web exec -- playwright install --with-deps chromium
+
+      - name: Check account authority browser journeys
+        run: npm --prefix web run smoke -- --grep 'account authority|account screens'

@@ -33,6 +33,8 @@ export class SessionApi {
   accounts(): Promise<Account[]> { return this.client.request('/accounts'); }
   createAccount(handle: string, password: string): Promise<void> { return this.client.request('/accounts', { method: 'POST', body: { handle, password } }); }
   disableAccount(id: string): Promise<void> { return this.client.request(`/accounts/${id}/disable`, { method: 'POST' }); }
+  enableAccount(id: string): Promise<void> { return this.client.request(`/accounts/${id}/enable`, { method: 'POST' }); }
+  changeRole(id: string, role: Account['role']): Promise<void> { return this.client.request(`/accounts/${id}/role`, { method: 'POST', body: { role } }); }
   resetAccount(id: string, password: string): Promise<void> { return this.client.request(`/accounts/${id}/reset`, { method: 'POST', body: { password } }); }
   changePassword(current_password: string, new_password: string): Promise<void> { return this.client.request('/me/password', { method: 'POST', body: { current_password, new_password } }); }
   logout(): Promise<void> { return this.client.request('/auth/logout', { method: 'POST' }); }

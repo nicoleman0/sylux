@@ -321,3 +321,55 @@ fn final_commit_barrier_is_injectable_for_deterministic_ordering_tests() {
     coordinator.set_final_commit_test_barrier(Some(barrier));
     coordinator.set_final_commit_test_barrier(None);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authority_change_before_final_commit_rejects_prior_session_without_effects() {
+    for (before, after) in [("user", "administrator"), ("administrator", "user")] {
+        let fixture = Fixture::create();
+        fixture
+            .workers
+            .transact(move |tx| tx.execute("UPDATE account SET role=?1", [before]))
+            .await
+            .unwrap();
+        let barrier = Arc::new(FinalCommitTestBarrier::default());
+        barrier.pause();
+        fixture
+            .coordinator
+            .set_final_commit_test_barrier(Some(barrier.clone()));
+        let effects = Arc::new(AtomicUsize::new(0));
+        let commit = spawn_commit_flow(fixture.coordinator.clone(), ticket(20), effects.clone());
+        barrier.wait_reached();
+        let changed = tokio::time::timeout(
+            WATCHDOG,
+            fixture.workers.transact(move |tx| {
+                // Leave revoked unset to prove the changed authority epoch rejects the session.
+                tx.execute(
+                    "UPDATE account SET role=?1,credential_epoch=credential_epoch+1",
+                    [after],
+                )
+            }),
+        )
+        .await;
+        if changed.is_err() {
+            barrier.release();
+        }
+        assert_eq!(
+            changed
+                .expect("authority change could not acquire writer")
+                .unwrap(),
+            1
+        );
+        barrier.release();
+        let (ticket, result) = await_commit(commit).await;
+        assert_eq!(result, Err(CoordinatorError::InvalidSession));
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        assert_revoked_credentials_cannot_read_or_replay(&fixture.coordinator, &ticket).await;
+        let revisions: i64 = fixture
+            .workers
+            .read(|db| db.query_row("SELECT count(*) FROM revision", [], |r| r.get(0)))
+            .await
+            .unwrap();
+        assert_eq!(revisions, 0);
+        fixture.cleanup().await;
+    }
+}

@@ -42,9 +42,21 @@ export class MockTransport implements ApiTransport {
     }
     if (route.startsWith('/accounts/') && method === 'POST') {
       const account = this.accounts.find((item) => item.account_id === route.split('/')[2]);
-      if (!account || account.role !== 'user' || !account.enabled) throw new HttpError(409);
-      if (route.endsWith('/disable')) account.enabled = false;
-      else if (!route.endsWith('/reset')) throw new HttpError(404);
+      if (this.user?.role !== 'administrator') throw new HttpError(403);
+      if (!account) throw new HttpError(404);
+      if (account.account_id === this.user.id) throw new HttpError(409);
+      if (route.endsWith('/enable')) {
+        if (account.enabled) throw new HttpError(409);
+        account.enabled = true;
+      } else if (route.endsWith('/role')) {
+        const { role } = options.body as { role: Account['role'] };
+        if (role !== 'administrator' && role !== 'user') throw new HttpError(400);
+        if (!account.enabled || role === account.role) throw new HttpError(409);
+        account.role = role;
+      } else if (route.endsWith('/disable')) {
+        if (!account.enabled) throw new HttpError(409);
+        account.enabled = false;
+      } else if (!route.endsWith('/reset') || account.role !== 'user' || !account.enabled) throw new HttpError(404);
       return undefined as T;
     }
     if (route === '/me/password' && method === 'POST') { this.user = null; return undefined as T; }
