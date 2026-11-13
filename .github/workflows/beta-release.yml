@@ -37,6 +37,16 @@ jobs:
           toolchain: 1.99.1
           components: rustfmt, clippy
           targets: x86_64-unknown-linux-gnu
+      - name: Identify runner image
+        id: runner-image
+        run: echo "version=${ImageVersion:?runner image version is missing}" >> "$GITHUB_OUTPUT"
+      - name: Restore host Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2 snapshot
+        with:
+          prefix-key: release-host-v1-${{ steps.runner-image.outputs.version }}-${{ hashFiles('.github/workflows/beta-release.yml') }}
+          cache-bin: false
+          cache-workspace-crates: false
+          cache-all-crates: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
@@ -45,18 +55,29 @@ jobs:
       - name: Install check tools
         run: |
           npm install --global npm@11.19.1
-          cargo install cargo-deny --version 0.20.2 --locked --root "$RUNNER_TEMP/cargo-deny"
           sudo apt-get update
           sudo apt-get install --yes libnss3-tools openssh-server
           sudo systemctl stop ssh.service ssh.socket
           sudo systemctl disable ssh.service ssh.socket
-      - name: Check source and browser journeys
+      - name: Restore cargo-deny
+        id: cargo-deny-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/cargo-deny
+          key: release-cargo-deny-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-${{ hashFiles('.github/workflows/beta-release.yml', 'rust-toolchain.toml') }}
+      - name: Install pinned cargo-deny
+        if: steps.cargo-deny-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --version 0.20.2 --locked --root "$RUNNER_TEMP/cargo-deny"
+      - name: Check source
         env:
           CARGO_DENY_BIN: ${{ runner.temp }}/cargo-deny/bin/cargo-deny
-        run: |
-          scripts/check.sh
-          npm --prefix web exec -- playwright install --with-deps chromium
-          scripts/check-beta.sh
+        run: scripts/check.sh
+      - name: Install browser prerequisites
+        run: npm --prefix web exec -- playwright install --with-deps chromium
+      - name: Qualify beta
+        env:
+          CARGO_DENY_BIN: ${{ runner.temp }}/cargo-deny/bin/cargo-deny
+        run: scripts/check-beta.sh
       - name: Package the exact checked source
         env:
           VERSION: ${{ inputs.version }}
