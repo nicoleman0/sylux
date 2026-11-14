@@ -6,6 +6,8 @@ import { defineConfig } from 'vite';
 import { webNoticesPlugin } from '../tools/collect-web-notices.mjs';
 
 export default defineConfig({
+  // Prebundle the lazy PDF import before it can reload an active preview.
+  optimizeDeps: { include: ['pdfjs-dist'] },
   plugins: [tailwindcss(), svelte(), webNoticesPlugin()],
   resolve: {
     alias: { $lib: path.resolve('./src/lib') },
