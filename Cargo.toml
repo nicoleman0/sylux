@@ -28,6 +28,12 @@ path = "tests/harness_self.rs"
 required-features = ["test-harness"]
 
 [[test]]
+name = "performance_fixture"
+path = "tests/performance_fixture.rs"
+harness = false
+required-features = ["test-harness"]
+
+[[test]]
 name = "browser_fixture"
 path = "tests/browser_fixture.rs"
 harness = false

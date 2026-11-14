@@ -24,6 +24,7 @@ run npm --prefix web run build
 run cargo fmt --all -- --check
 run cargo clippy --locked --all-targets -- -D warnings
 run cargo test --locked --features test-harness --test contract_setup_auth --test integration_revocation
+run cargo test --locked --features test-harness --test performance_fixture -- --list
 run cargo test --locked
 run cargo test --locked --features test-harness --test integration_admin_recovery --test contract_setup_auth --test integration_binding --test integration_local_lifecycle
 run cargo build --locked
@@ -33,6 +34,7 @@ run npm --prefix web run test:dependency-policy
 run python3 tools/test-dependency-verifier.py
 run python3 tools/test-rust-notices.py
 run node --test tools/test-web-notices.mjs
+run node --test scripts/workflow-measurement-helpers.test.mjs
 artifact_check_pending=0
 if [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]; then
   run python3 tools/verify-dependency-locks.py
