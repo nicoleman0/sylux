@@ -826,3 +826,96 @@ async fn revoked_principal_cannot_retry_final_candidate_after_restart() {
     );
     app.close().await;
 }
+
+#[tokio::test]
+async fn folder_recovery_lost_trash_and_restore_replies_are_inspected_after_restart() {
+    let mut app = App::seeded("tree-response-loss").await;
+    let bytes = b"tree response loss preserves exact bytes\x00";
+    let (upload_id, ticket) = app.stage("lost.bin", bytes).await;
+    let committed = app.commit(&upload_id, &ticket, bytes).await;
+    assert_eq!(committed.status, 201, "{}", committed.text());
+    let file_id = committed.json()["id"].as_str().unwrap().to_owned();
+    let file_for_tx = file_id.clone();
+    let (top, old_tag) = app
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(move |tx| {
+            use sylux::domain::namespace;
+            let top = namespace::create_folder(tx, OWNER, OWNER_ROOT, "Tree").unwrap();
+            let nested = namespace::create_folder(tx, OWNER, &top.id, "Nested").unwrap();
+            let file = namespace::list(tx, OWNER, OWNER_ROOT, None, 100)
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.id == file_for_tx)
+                .unwrap();
+            namespace::move_entry(tx, OWNER, &file.id, &nested.id, &file.etag).unwrap();
+            let top = namespace::folder_path(tx, OWNER, &top.id)
+                .unwrap()
+                .pop()
+                .unwrap();
+            Ok((top.id, top.etag))
+        })
+        .await
+        .unwrap();
+    for restore in [false, true] {
+        let tag = if restore {
+            let trash = app
+                .request("GET", "/trash", &app.auth_headers(), &[])
+                .await
+                .json();
+            trash["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == top)
+                .unwrap()["etag"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            old_tag.clone()
+        };
+        let mut headers = app.auth_headers();
+        headers.push(("If-Match", tag));
+        let path = if restore {
+            format!("/trash/{top}/restore")
+        } else {
+            format!("/entries/{top}")
+        };
+        let reply = app
+            .request(
+                if restore { "POST" } else { "DELETE" },
+                &path,
+                &headers,
+                &[],
+            )
+            .await;
+        assert_eq!(reply.status, 204, "{}", reply.text());
+        drop(reply);
+        assert!(app.restart_and_reconcile().await.ready);
+        let content = app
+            .request(
+                "GET",
+                &format!("/entries/{file_id}/content"),
+                &app.auth_headers(),
+                &[],
+            )
+            .await;
+        if restore {
+            assert_eq!(content.status, 200);
+            assert_eq!(content.body, bytes);
+        } else {
+            assert_eq!(content.status, 404);
+        }
+    }
+    let mut headers = app.auth_headers();
+    headers.push(("If-Match", old_tag));
+    assert_eq!(
+        app.request("DELETE", &format!("/entries/{top}"), &headers, &[])
+            .await
+            .status,
+        412
+    );
+    app.close().await;
+}

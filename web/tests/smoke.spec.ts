@@ -348,14 +348,14 @@ test('search validates a long Unicode query before sending it and returns focus 
 test('mock search cursors support Unicode and reject malformed or stale pages', async () => {
   const mock = new MockTransport();
   await mock.request('/auth/local', { method: 'POST', body: { handle: 'owner' } });
-  const first = await mock.request<{ id: string }>('/folders/children', { method: 'POST', body: { parent_id: 'root', name: '資料📁 A' } });
+  const first = await mock.request<{ id: string; etag: string }>('/folders/children', { method: 'POST', body: { parent_id: 'root', name: '資料📁 A' } });
   await mock.request('/folders/children', { method: 'POST', body: { parent_id: 'root', name: '資料📁 B' } });
   const page = await mock.request<{ items: Array<{ entry: { name: string } }>; next_cursor: string }>('/entries/search?q=%E8%B3%87%E6%96%99%F0%9F%93%81&limit=1');
   expect(page.items).toHaveLength(1);
   const next = await mock.request<{ items: Array<{ entry: { name: string } }> }>(`/entries/search?q=%E8%B3%87%E6%96%99%F0%9F%93%81&limit=1&cursor=${encodeURIComponent(page.next_cursor)}`);
   expect(next.items[0]?.entry.name).toBe('資料📁 B');
   await expect(mock.request(`/entries/search?q=%E8%B3%87%E6%96%99%F0%9F%93%81&cursor=${encodeURIComponent(btoa('null'))}`)).rejects.toMatchObject({ status: 400 });
-  await mock.request(`/entries/${first.id}`, { method: 'DELETE' });
+  await mock.request(`/entries/${first.id}`, { method: 'DELETE', headers: { 'If-Match': first.etag } });
   await expect(mock.request(`/entries/search?q=%E8%B3%87%E6%96%99%F0%9F%93%81&cursor=${encodeURIComponent(page.next_cursor)}`)).rejects.toMatchObject({ status: 409 });
 });
 
@@ -431,7 +431,7 @@ test('delete confirmation and restore work at mobile width', async ({ page }) =>
   await login(page);
   await page.getByRole('button', { name: 'Options for Welcome.txt', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
-  await expect(page.getByRole('dialog')).toContainText('Permanent removal is not available');
+  await expect(page.getByRole('dialog')).toContainText('Move this file to trash. You can restore it later.');
   await page.getByRole('button', { name: 'Move to trash' }).click();
   await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toHaveCount(0);
   await page.locator('[data-slot=sidebar-trigger]').click();
@@ -1065,12 +1065,12 @@ test('wrong current password and rejected upload tickets do not end a valid sess
 test('mobile delete failure, cancellation, confirmation and restore keep focus reachable', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
-  await page.route('**/entries/file-1', (route) => route.fulfill({ status: 503 }));
+  await page.route('**/entries/file-1', (route) => route.fulfill({ status: 412, json: { code: 'stale_etag' } }));
   const trigger = page.getByRole('button', { name: 'Options for Welcome.txt', exact: true });
   await trigger.click();
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await page.getByRole('button', { name: 'Move to trash' }).click();
-  await expect(page.getByRole('dialog').getByRole('alert')).toContainText('Could not delete this item');
+  await expect(page.getByRole('dialog').getByRole('alert')).toContainText('This item changed. Refresh the folder before trying again.');
   await page.keyboard.press('Escape'); await expect(trigger).toBeFocused();
   await page.unroute('**/entries/file-1');
   await trigger.click(); await page.getByRole('menuitem', { name: 'Delete', exact: true }).click(); await page.getByRole('button', { name: 'Move to trash' }).click();

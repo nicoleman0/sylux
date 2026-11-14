@@ -20,7 +20,6 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, KeyInit, Mac};
-use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
@@ -430,6 +429,8 @@ pub async fn folder_path(
     let result = s
         .workers
         .read(move |db| {
+            let snapshot = db.unchecked_transaction()?;
+            let db = &snapshot;
             let Some((current, _, _)) = authz::validate_session(
                 db,
                 &cookie.session_id,
@@ -478,19 +479,29 @@ pub async fn listing(
         "modified_desc" => namespace::ListingSort::ModifiedDesc,
         _ => return error(StatusCode::BAD_REQUEST, "invalid_sort"),
     };
+    let Some(cookie) = session_cookie(&headers) else {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
     let key = cursor_key(&s);
     let result = s
         .workers
         .read(move |db| {
-            Ok(build_listing(
-                db,
-                &account,
-                q.folder_id,
-                q.cursor,
-                sort,
-                limit,
-                key,
-            ))
+            let snapshot = db.unchecked_transaction()?;
+            let Some((current, _, _)) = authz::validate_session(
+                &snapshot,
+                &cookie.session_id,
+                &cookie.secret,
+                crate::http::auth::now(),
+            ) else {
+                return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
+            };
+            if current != account {
+                return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
+            }
+            let result =
+                build_listing(&snapshot, &account, q.folder_id, q.cursor, sort, limit, key);
+            snapshot.commit()?;
+            Ok(result)
         })
         .await;
     match result {
@@ -514,18 +525,11 @@ fn build_listing(
     let root_id = root.id.clone();
     let is_root = folder_id.is_none();
     let folder = folder_id.unwrap_or_else(|| root_id.clone());
-    let generation: Option<i64> = db
-        .query_row(
-            "SELECT generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder' AND state='active'",
-            params![folder, account],
-            |r| r.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten();
-    let Some(generation) = generation else {
-        return Err(error(StatusCode::NOT_FOUND, "not_found"));
-    };
+    let path = namespace::folder_path(db, account, &folder).map_err(|failure| match failure {
+        NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
+        _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    })?;
+    let generation = path.last().expect("validated folder path").generation;
     let after = if let Some(value) = cursor {
         let Some(decoded) = decode_cursor(&key, &value) else {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
@@ -784,6 +788,8 @@ pub async fn trash_listing(State(s): State<AuthState>, headers: HeaderMap) -> Re
     match s
         .workers
         .read(move |db| {
+            let snapshot = db.unchecked_transaction()?;
+            let db = &snapshot;
             let Some((current, _, _)) = authz::validate_session(
                 db,
                 &cookie.session_id,
@@ -883,9 +889,6 @@ async fn change_trash(s: AuthState, id: String, headers: HeaderMap, restore: boo
         }
         Ok(Err(WriteFailure::Namespace(NamespaceError::Stale))) => {
             error(StatusCode::PRECONDITION_FAILED, "stale_etag")
-        }
-        Ok(Err(WriteFailure::Namespace(NamespaceError::NotEmpty))) => {
-            error(StatusCode::CONFLICT, "folder_not_empty")
         }
         Ok(Err(WriteFailure::Namespace(NamespaceError::ParentUnavailable))) => {
             error(StatusCode::CONFLICT, "parent_unavailable")

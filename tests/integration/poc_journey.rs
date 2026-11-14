@@ -1292,3 +1292,477 @@ async fn trash_restores_bytes_and_refuses_other_accounts_and_conflicts() {
     assert_eq!(journey.download(&owner, &id).await.body.as_ref(), bytes);
     journey.close().await;
 }
+
+fn recovery_inventory(journey: &Journey, original: &str) -> (i64, i64, i64, String) {
+    let db = journey.db.as_ref().unwrap().lock().unwrap();
+    (
+        db.query_row("SELECT count(*) FROM entry", [], |row| row.get(0))
+            .unwrap(),
+        db.query_row("SELECT count(*) FROM revision", [], |row| row.get(0))
+            .unwrap(),
+        db.query_row("SELECT count(*) FROM blob", [], |row| row.get(0))
+            .unwrap(),
+        db.query_row(
+            "SELECT current_revision_id FROM entry WHERE entry_id=?1",
+            [original],
+            |row| row.get(0),
+        )
+        .unwrap(),
+    )
+}
+
+async fn recovery_restart(journey: &mut Journey) {
+    journey.stop().await;
+    let connection = sqlite::open_writer(&journey.db_path, BUSY).unwrap();
+    let workers = SqliteWorkers::from_writer(
+        connection,
+        &journey.db_path,
+        WorkerConfig {
+            busy_timeout: BUSY,
+            ..WorkerConfig::default()
+        },
+    )
+    .unwrap();
+    let report = sylux::persistence::reconcile::reconcile(&workers, &journey.product)
+        .await
+        .unwrap();
+    assert!(report.ready, "folder recovery reconcile: {report:?}");
+    workers.shutdown().await.unwrap();
+    journey
+        .start(sqlite::open_writer(&journey.db_path, BUSY).unwrap())
+        .await;
+}
+
+async fn recovery_folder(journey: &Journey, auth: &Auth, id: &str) -> Value {
+    let response = journey
+        .request(
+            "GET",
+            &format!("/folders/{id}/path"),
+            Some(&auth.cookie),
+            &[],
+            vec![],
+        )
+        .await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    response.json()["items"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone()
+}
+
+async fn recovery_entry(journey: &Journey, auth: &Auth, parent: &str, id: &str) -> Value {
+    let response = journey
+        .request(
+            "GET",
+            &format!("/folders/{parent}/children"),
+            Some(&auth.cookie),
+            &[],
+            vec![],
+        )
+        .await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    response.json()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == id)
+        .unwrap()
+        .clone()
+}
+
+async fn recovery_change(journey: &Journey, auth: &Auth, entry: &Value, restore: bool) -> Response {
+    journey
+        .request(
+            if restore { "POST" } else { "DELETE" },
+            &if restore {
+                format!("/trash/{}/restore", entry["id"].as_str().unwrap())
+            } else {
+                format!("/entries/{}", entry["id"].as_str().unwrap())
+            },
+            Some(&auth.cookie),
+            &[
+                ("Origin", journey.origin.clone()),
+                ("X-CSRF-Token", auth.csrf.clone()),
+                ("If-Match", entry["etag"].as_str().unwrap().to_owned()),
+            ],
+            vec![],
+        )
+        .await
+}
+
+async fn recovery_deleted(journey: &Journey, auth: &Auth, id: &str) -> Value {
+    let response = journey
+        .request("GET", "/trash", Some(&auth.cookie), &[], vec![])
+        .await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    response.json()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == id)
+        .unwrap()
+        .clone()
+}
+
+#[tokio::test]
+async fn folder_recovery_hides_direct_ids_and_restores_exact_tree_bytes_after_restart() {
+    let mut journey = Journey::new("folder-recovery-bytes").await;
+    journey.setup_admin().await;
+    let auth = journey.login(OWNER_HANDLE, OWNER_PASSWORD).await;
+    let root = journey.list_root(&auth).await["root"].clone();
+    let top = journey
+        .create_folder(&auth, root["id"].as_str().unwrap(), "Tree")
+        .await;
+    let top_id = top["id"].as_str().unwrap();
+    let nested = journey.create_folder(&auth, top_id, "Nested").await;
+    let nested_id = nested["id"].as_str().unwrap();
+    let bytes = b"tree bytes\x00\xff\r\n";
+    let file = journey
+        .upload(
+            &auth,
+            nested_id,
+            nested["etag"].as_str().unwrap(),
+            "exact.bin",
+            bytes,
+        )
+        .await;
+    let file = recovery_entry(&journey, &auth, nested_id, file["id"].as_str().unwrap()).await;
+    let file_id = file["id"].as_str().unwrap();
+    let parent = recovery_folder(&journey, &auth, nested_id).await;
+    let earlier = journey
+        .upload(
+            &auth,
+            nested_id,
+            parent["etag"].as_str().unwrap(),
+            "earlier.bin",
+            b"earlier deletion",
+        )
+        .await;
+    let earlier = recovery_entry(&journey, &auth, nested_id, earlier["id"].as_str().unwrap()).await;
+    assert_eq!(
+        recovery_change(&journey, &auth, &earlier, false)
+            .await
+            .status,
+        204
+    );
+    let earlier_deleted = recovery_deleted(&journey, &auth, earlier["id"].as_str().unwrap()).await;
+    let download = journey.download(&auth, file_id).await;
+    let content_etag = download.header("etag").unwrap().to_owned();
+    let top = recovery_folder(&journey, &auth, top_id).await;
+    assert_eq!(
+        recovery_change(&journey, &auth, &top, false).await.status,
+        204
+    );
+    let trash = journey
+        .request("GET", "/trash", Some(&auth.cookie), &[], vec![])
+        .await
+        .json();
+    assert_eq!(
+        trash["items"].as_array().unwrap().len(),
+        2,
+        "descendants must not become separate deletions"
+    );
+    for (method, headers) in [
+        ("GET", vec![]),
+        ("HEAD", vec![]),
+        ("GET", vec![("Range", "bytes=0-2".into())]),
+        ("GET", vec![("If-None-Match", content_etag)]),
+    ] {
+        let response = journey
+            .request(
+                method,
+                &format!("/entries/{file_id}/content"),
+                Some(&auth.cookie),
+                &headers,
+                vec![],
+            )
+            .await;
+        assert_eq!(response.status, 404, "hidden content {method}");
+    }
+    for path in [
+        format!("/folders/{nested_id}/children"),
+        format!("/folders/{nested_id}/path"),
+    ] {
+        assert_eq!(
+            journey
+                .request("GET", &path, Some(&auth.cookie), &[], vec![])
+                .await
+                .status,
+            404
+        );
+    }
+    let mut headers = vec![
+        ("Origin", journey.origin.clone()),
+        ("X-CSRF-Token", auth.csrf.clone()),
+        ("Content-Type", "application/json".into()),
+        ("If-Match", file["etag"].as_str().unwrap().into()),
+    ];
+    for (method, path, body) in [
+        (
+            "PATCH",
+            format!("/entries/{file_id}"),
+            json!({"name":"hidden.bin"}),
+        ),
+        (
+            "POST",
+            format!("/entries/{file_id}/move"),
+            json!({"parent_id":root["id"]}),
+        ),
+        (
+            "POST",
+            format!("/folders/{nested_id}/children"),
+            json!({"name":"hidden"}),
+        ),
+        ("DELETE", format!("/entries/{file_id}"), json!({})),
+    ] {
+        assert_eq!(
+            journey
+                .request(
+                    method,
+                    &path,
+                    Some(&auth.cookie),
+                    &headers,
+                    serde_json::to_vec(&body).unwrap()
+                )
+                .await
+                .status,
+            404,
+            "{method} {path}"
+        );
+    }
+    assert_eq!(
+        recovery_change(&journey, &auth, &earlier_deleted, true)
+            .await
+            .status,
+        409
+    );
+    assert_eq!(
+        recovery_change(&journey, &auth, &root, false).await.status,
+        404
+    );
+    recovery_restart(&mut journey).await;
+    let auth = journey.login(OWNER_HANDLE, OWNER_PASSWORD).await;
+    let deleted = recovery_deleted(&journey, &auth, top_id).await;
+    assert_eq!(
+        recovery_change(&journey, &auth, &deleted, true)
+            .await
+            .status,
+        204
+    );
+    assert_eq!(journey.download(&auth, file_id).await.body.as_ref(), bytes);
+    assert_eq!(
+        recovery_deleted(&journey, &auth, earlier["id"].as_str().unwrap()).await["etag"],
+        earlier_deleted["etag"]
+    );
+    assert_eq!(
+        recovery_change(&journey, &auth, &top, false).await.status,
+        412
+    );
+    headers[0].1 = journey.origin.clone();
+    headers[1].1 = auth.csrf.clone();
+    assert_eq!(
+        journey
+            .request(
+                "PATCH",
+                &format!("/entries/{file_id}"),
+                Some(&auth.cookie),
+                &headers,
+                br#"{"name":"stale.bin"}"#.to_vec()
+            )
+            .await
+            .status,
+        412
+    );
+    journey.close().await;
+}
+
+#[tokio::test]
+async fn folder_recovery_invalidates_staged_create_and_replacement_without_losing_reconciliation() {
+    for replace in [false, true] {
+        let mut journey = Journey::new("folder-recovery-staged").await;
+        journey.setup_admin().await;
+        let auth = journey.login(OWNER_HANDLE, OWNER_PASSWORD).await;
+        let root = journey.list_root(&auth).await["root"].clone();
+        let top = journey
+            .create_folder(&auth, root["id"].as_str().unwrap(), "Tree")
+            .await;
+        let top_id = top["id"].as_str().unwrap();
+        let nested = journey.create_folder(&auth, top_id, "Nested").await;
+        let nested_id = nested["id"].as_str().unwrap();
+        let old = journey
+            .upload(
+                &auth,
+                nested_id,
+                nested["etag"].as_str().unwrap(),
+                "same.bin",
+                b"original bytes",
+            )
+            .await;
+        let old = recovery_entry(&journey, &auth, nested_id, old["id"].as_str().unwrap()).await;
+        let parent = recovery_folder(&journey, &auth, nested_id).await;
+        let bytes = b"staged bytes";
+        let digest = sha256_hex(bytes);
+        let mut admission = json!({"parent_id":nested_id,"parent_etag":parent["etag"],"name":if replace {"same.bin"} else {"new.bin"},"length":bytes.len(),"sha256":digest});
+        if replace {
+            admission["replacement"] = json!({"entry_id":old["id"],"etag":old["etag"]});
+        }
+        let mut headers = vec![
+            ("Origin", journey.origin.clone()),
+            ("X-CSRF-Token", auth.csrf.clone()),
+            ("Content-Type", "application/json".into()),
+        ];
+        let mut ticket_body = admission.clone();
+        ticket_body["scope"] = json!("upload_create");
+        let ticket = journey
+            .request(
+                "POST",
+                "/mutation-tickets",
+                Some(&auth.cookie),
+                &headers,
+                serde_json::to_vec(&ticket_body).unwrap(),
+            )
+            .await;
+        assert_eq!(ticket.status, 201, "{}", ticket.text());
+        headers.push((
+            "X-Mutation-ID",
+            ticket.header("x-mutation-id").unwrap().into(),
+        ));
+        headers.push(if replace {
+            ("If-Match", old["etag"].as_str().unwrap().into())
+        } else {
+            ("If-None-Match", "*".into())
+        });
+        let admitted = journey
+            .request(
+                "POST",
+                "/uploads",
+                Some(&auth.cookie),
+                &headers,
+                serde_json::to_vec(&admission).unwrap(),
+            )
+            .await;
+        assert_eq!(admitted.status, 201, "{}", admitted.text());
+        let upload_id = admitted.json()["upload_id"].as_str().unwrap().to_owned();
+        let body_path = format!("/uploads/{upload_id}/content");
+        let mut body_headers = headers.clone();
+        body_headers[2].1 = "application/octet-stream".into();
+        let staged = journey
+            .request(
+                "PUT",
+                &body_path,
+                Some(&auth.cookie),
+                &body_headers,
+                bytes.to_vec(),
+            )
+            .await;
+        assert_eq!(staged.status, 200, "{}", staged.text());
+        let top = recovery_folder(&journey, &auth, top_id).await;
+        let before = recovery_inventory(&journey, old["id"].as_str().unwrap());
+        journey.commit_barrier.arm();
+        let commit_path = format!("/uploads/{upload_id}/commit");
+        let commit_body =
+            serde_json::to_vec(&json!({"sha256":digest,"parent_etag":parent["etag"]})).unwrap();
+        let commit = journey.request(
+            "POST",
+            &commit_path,
+            Some(&auth.cookie),
+            &headers,
+            commit_body.clone(),
+        );
+        let trash = async {
+            tokio::time::timeout(Duration::from_secs(5), journey.commit_barrier.wait_paused())
+                .await
+                .expect("commit did not pause");
+            let result = recovery_change(&journey, &auth, &top, false).await;
+            journey.commit_barrier.release();
+            result
+        };
+        let (commit, trash) = tokio::join!(commit, trash);
+        assert_eq!(trash.status, 204);
+        assert_eq!(commit.status, 404, "{}", commit.text());
+        recovery_restart(&mut journey).await;
+        headers[0].1 = journey.origin.clone();
+        let replay = journey
+            .request(
+                "POST",
+                "/uploads",
+                Some(&auth.cookie),
+                &headers,
+                serde_json::to_vec(&admission).unwrap(),
+            )
+            .await;
+        assert_eq!(
+            replay.status,
+            200,
+            "durable admission replay survives hidden namespace: {}",
+            replay.text()
+        );
+        let status = journey
+            .request(
+                "GET",
+                &format!("/uploads/{upload_id}"),
+                Some(&auth.cookie),
+                &[],
+                vec![],
+            )
+            .await;
+        assert_eq!(status.status, 200);
+        assert_eq!(status.json()["status"], "staged");
+        let deleted = recovery_deleted(&journey, &auth, top_id).await;
+        assert_eq!(
+            recovery_change(&journey, &auth, &deleted, true)
+                .await
+                .status,
+            204
+        );
+        let commit = journey
+            .request(
+                "POST",
+                &commit_path,
+                Some(&auth.cookie),
+                &headers,
+                commit_body,
+            )
+            .await;
+        assert_eq!(commit.status, 412, "{}", commit.text());
+        assert_eq!(
+            recovery_inventory(&journey, old["id"].as_str().unwrap()),
+            before,
+            "rejected commits cannot create entries, revisions or blobs, or replace the current revision"
+        );
+        let new_entries: i64 = journey
+            .db
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM entry WHERE original_name='new.bin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_entries, 0);
+        let canceled = journey
+            .request(
+                "DELETE",
+                &format!("/uploads/{upload_id}"),
+                Some(&auth.cookie),
+                &headers,
+                vec![],
+            )
+            .await;
+        assert_eq!(canceled.status, 204, "{}", canceled.text());
+        assert_eq!(
+            journey
+                .download(&auth, old["id"].as_str().unwrap())
+                .await
+                .body
+                .as_ref(),
+            b"original bytes"
+        );
+        journey.close().await;
+    }
+}
