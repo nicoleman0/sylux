@@ -1458,10 +1458,11 @@
       other.original_path.length === item.original_path.length &&
       other.original_path.every((part, index) => part === item.original_path[index]));
   }
-  async function restoreEntry(item: Entry): Promise<void> {
+  async function restoreEntry(item: Entry, trigger: HTMLElement): Promise<void> {
     if (trashBusy) return;
     trashBusy = true; trashError = '';
     const sessionVersion = sessionGeneration;
+    let failed = false;
     try {
       await listing.restore(item.id, item.etag);
       if (sessionVersion !== sessionGeneration) return;
@@ -1470,8 +1471,14 @@
       if (sessionVersion === sessionGeneration) { await refresh(); await tick(); if (sessionVersion === sessionGeneration) document.getElementById('trash-heading')?.focus(); }
     } catch (error) {
       if (sessionVersion !== sessionGeneration) return;
+      failed = true;
       trashError = error instanceof HttpError && error.status === 409 ? 'Restore its parent folder first, or rename the item occupying its original name.' : 'Could not restore this item. Refresh trash and try again.';
-    } finally { if (sessionVersion === sessionGeneration) trashBusy = false; }
+    } finally {
+      if (sessionVersion === sessionGeneration) {
+        trashBusy = false;
+        if (failed) { await tick(); if (sessionVersion === sessionGeneration && showTrash) restoreFocus(trigger, 'trash-heading'); }
+      }
+    }
   }
 
   async function uploadOutcome(id: string): Promise<'committed' | 'canceled' | 'rejected' | 'unknown'> {
@@ -1969,7 +1976,22 @@
             {/if}
           </section>
         {:else if showTrash}
-            <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h1 id="trash-heading" tabindex="-1">Trash</h1><p class="text-sm">Restore a parent folder before its children. Permanent removal is not available yet.</p><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={trashBusy} aria-label="Refresh trash" onclick={() => { if (trashLoading || trashBusy) return; void refreshWorkspace(); }} />{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore</Button></li>{/each}</ul>{/if}</section>
+            <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}>
+              <div class="trash-heading-row"><h1 id="trash-heading" tabindex="-1">Trash</h1><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={trashBusy} onclick={refreshWorkspace} /></div>
+              {#if trashError}<p role="alert">{trashError}</p>{/if}
+              {#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}
+              {#if deletedItems.length > 0}
+                <ul>
+                  {#each deletedItems as item (item.id)}
+                    <li class="trash-row">
+                      <span class="trash-kind" class:folder-icon={item.kind === 'folder'} aria-hidden="true">{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span>
+                      <span class="trash-item"><span class="trash-name">{item.name}</span><span class="sr-only">{item.kind}</span><span class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}</span>{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span>
+                      <Button variant="outline" size="sm" disabled={trashBusy || trashLoading} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>Restore</Button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </section>
 
         {:else}
           <section class="files-content" aria-labelledby="folder-title">
