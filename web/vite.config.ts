@@ -6,8 +6,17 @@ import { defineConfig } from 'vite';
 import { webNoticesPlugin } from '../tools/collect-web-notices.mjs';
 
 export default defineConfig({
-  // Prebundle the lazy PDF import before it can reload an active preview.
-  optimizeDeps: { include: ['pdfjs-dist'] },
+  // Late icon prebundles can replace Svelte's runtime during a lazy preview import.
+  optimizeDeps: {
+    include: [
+      'pdfjs-dist',
+      'pdfjs-dist/web/pdf_viewer.mjs',
+      '@lucide/svelte/icons/chevron-up',
+      '@lucide/svelte/icons/chevron-down',
+      '@lucide/svelte/icons/minus',
+      '@lucide/svelte/icons/search',
+    ],
+  },
   plugins: [tailwindcss(), svelte(), webNoticesPlugin()],
   resolve: {
     alias: { $lib: path.resolve('./src/lib') },

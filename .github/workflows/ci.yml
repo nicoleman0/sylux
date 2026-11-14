@@ -65,3 +65,6 @@ jobs:
 
       - name: Check account authority browser journeys
         run: npm --prefix web run smoke -- --grep 'account authority|account screens'
+
+      - name: Check PDF reader and failure recovery
+        run: npm --prefix web run smoke -- preview.spec.ts pdf-render.spec.ts pdf-compatibility.spec.ts
