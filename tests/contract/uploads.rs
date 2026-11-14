@@ -1529,6 +1529,7 @@ async fn explicit_replacement_preserves_prior_bytes_in_deleted_items_and_restore
     let old_bytes = b"old bytes\x00\xff\r\n";
     let new_bytes = b"new bytes\x00\xfe";
     let old = fixture.upload("same.bin", old_bytes).await;
+    let old_time = assert_listing_modified_at(&fixture, &old).await;
     let middle_bytes = b"middle bytes";
     let (middle_id, middle_ticket) = fixture
         .admit(&owner_auth(), OWNER_ROOT, 2, "middle.bin", middle_bytes)
@@ -1588,6 +1589,7 @@ async fn explicit_replacement_preserves_prior_bytes_in_deleted_items_and_restore
     let committed = fixture.replacement_commit(&id, &ticket, &admission).await;
     assert_eq!(committed.status, 201, "{}", committed.text());
     let new = committed.json();
+    let new_time = assert_listing_modified_at(&fixture, &new).await;
     assert_eq!(new["replaced_entry_id"], old["id"]);
     let stale = fixture
         .request(
@@ -1659,6 +1661,8 @@ async fn explicit_replacement_preserves_prior_bytes_in_deleted_items_and_restore
     assert_eq!(restored.status, 204, "{}", restored.text());
     fixture.assert_content(&old, old_bytes).await;
     fixture.assert_content(&new, new_bytes).await;
+    assert_eq!(assert_listing_modified_at(&fixture, &old).await, old_time);
+    assert_eq!(assert_listing_modified_at(&fixture, &new).await, new_time);
     fixture.close().await;
 }
 
@@ -1958,4 +1962,30 @@ async fn assert_folder_total(fixture: &Fixture, folder: &Value, expected: usize)
         .find(|entry| entry["id"] == folder["id"])
         .unwrap();
     assert_eq!(item["size"], expected);
+}
+
+async fn assert_listing_modified_at(fixture: &Fixture, entry: &Value) -> i64 {
+    let expected: i64 = fixture.db().lock().unwrap().query_row(
+        "SELECT r.committed_at FROM entry e JOIN revision r ON r.revision_id=e.current_revision_id WHERE e.entry_id=?1",
+        [entry["id"].as_str().unwrap()], |row| row.get(0),
+    ).unwrap();
+    let listing = fixture
+        .request(
+            "GET",
+            "/folders/children?sort=modified_desc",
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(listing.status, 200, "{}", listing.text());
+    let listing = listing.json();
+    let item = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == entry["id"])
+        .unwrap();
+    assert_eq!(item["modified_at"], expected);
+    expected
 }

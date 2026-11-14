@@ -26,6 +26,7 @@
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import XIcon from '@lucide/svelte/icons/x';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
+  import { modifiedTime } from './lib/modified-time';
   import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
@@ -1775,6 +1776,12 @@
   }
 </script>
 
+{#snippet modifiedDateLabel(entry: Entry)}
+  {@const date = modifiedTime(entry)}
+  {#if date}<time datetime={date.datetime} title={date.full}><span aria-hidden="true">{date.compact}</span><span class="sr-only">Modified {date.full}</span></time>
+  {:else}{@const label = entry.kind === 'folder' ? 'Modified date not applicable' : 'Modified date unknown'}<span title={label}><span class="sr-only">{label}</span><span aria-hidden="true">—</span></span>{/if}
+{/snippet}
+
 <svelte:window ondragover={externalDrag} ondrop={externalDrag} />
 <svelte:head>
   <title>{instanceName} · Private files</title>
@@ -2046,6 +2053,8 @@
                   <option value="name_desc">Name: Z to A</option>
                   <option value="size_asc">Size: smallest first</option>
                   <option value="size_desc">Size: largest first</option>
+                  <option value="modified_desc">Modified: newest first</option>
+                  <option value="modified_asc">Modified: oldest first</option>
                 </select>
               </div>
 
@@ -2053,14 +2062,14 @@
             <p id="folder-upload-help" class="text-xs text-muted-foreground mb-3">{folderChooserSupported ? 'Choose folder skips empty folders. Drop a folder to include them.' : 'Folder selection is unavailable in this browser. Choose files or drop a folder instead.'}</p>
             {@render selectionToolbar()}
             <section class="file-drop-region" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
-            {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span><span>Name</span><span class="file-size">Size</span><span class="sr-only">Options</span></div></div>{/if}
+            {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head modified-head"><span aria-hidden="true"></span><span>Name</span><span class="file-modified">Modified</span><span class="file-size">Size</span><span class="sr-only">Options</span></div></div>{/if}
             {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy} class="mt-2" onclick={retryFolder} />{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
             {:else if loading && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
             {:else}<div class="file-list">{#each entries as entry (entry.id)}
-              <article aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
+              <article aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row modified-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
                 <label class="entry-selection"><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, entry.id)} /></label>
-                <button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span></span></button><span class="file-size">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span>
+                <button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'} · {@render modifiedDateLabel(entry)}</span></span></button><span class="file-modified">{@render modifiedDateLabel(entry)}</span><span class="file-size">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span>
                 <EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
               </article>
             {/each}</div>{/if}

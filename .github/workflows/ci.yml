@@ -60,6 +60,9 @@ jobs:
           CARGO_DENY_BIN: ${{ runner.temp }}/cargo-deny/bin/cargo-deny
         run: scripts/check.sh
 
+      - name: Check listing metadata contracts
+        run: cargo test --locked --features test-harness --test integration_names_listing --test contract_uploads
+
       - name: Install pinned browser prerequisites
         run: npm --prefix web exec -- playwright install --with-deps chromium
 
@@ -71,3 +74,6 @@ jobs:
 
       - name: Check PDF reader and failure recovery
         run: npm --prefix web run smoke -- preview.spec.ts pdf-render.spec.ts pdf-compatibility.spec.ts
+
+      - name: Check listing metadata browser journeys
+        run: npm --prefix web run smoke -- folder-sizes.spec.ts modified-dates.spec.ts sorting.spec.ts compact-files.spec.ts design-system.spec.ts

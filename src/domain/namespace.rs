@@ -138,6 +138,8 @@ pub enum ListingSort {
     NameDesc,
     SizeAsc,
     SizeDesc,
+    ModifiedAsc,
+    ModifiedDesc,
 }
 
 #[derive(Debug)]
@@ -145,6 +147,7 @@ pub struct ListingPosition {
     pub kind_rank: u8,
     pub name_key: Vec<u8>,
     pub size: i64,
+    pub modified_at: Option<i64>,
     pub id: String,
 }
 
@@ -152,6 +155,7 @@ pub struct ListingPosition {
 pub struct ListedEntry {
     pub entry: Entry,
     pub size: Option<i64>,
+    pub modified_at: Option<i64>,
     pub position: ListingPosition,
 }
 
@@ -213,6 +217,7 @@ pub fn list_sorted(
                 after.map(|position| position.name_key.as_slice()),
                 after.map(|position| position.size),
                 after.map(|position| position.id.as_str()),
+                after.and_then(|position| position.modified_at),
                 (limit.min(500) + 1) as i64,
                 limit.min(500) as i64
             ],
@@ -221,10 +226,12 @@ pub fn list_sorted(
                 let generation: i64 = r.get(4)?;
                 Ok(ListedEntry {
                     size: r.get(8)?,
+                    modified_at: r.get(9)?,
                     position: ListingPosition {
                         kind_rank: r.get(6)?,
                         name_key: r.get(5)?,
                         size: r.get(7)?,
+                        modified_at: r.get(9)?,
                         id: id.clone(),
                     },
                     entry: Entry {
@@ -255,6 +262,14 @@ fn listing_sql(sort: ListingSort) -> String {
             "(byte_size>?5 OR (byte_size=?5 AND (name_key>?4 OR (name_key=?4 AND entry_id>?6))))",
             "kind_rank,byte_size ASC,name_key,entry_id",
         ),
+        ListingSort::ModifiedAsc => (
+            "((?7 IS NOT NULL AND (modified_at IS NULL OR modified_at>?7 OR (modified_at=?7 AND (name_key>?4 OR (name_key=?4 AND entry_id>?6))))) OR (?7 IS NULL AND modified_at IS NULL AND (name_key>?4 OR (name_key=?4 AND entry_id>?6))))",
+            "kind_rank,modified_at IS NULL,modified_at ASC,name_key,entry_id",
+        ),
+        ListingSort::ModifiedDesc => (
+            "((?7 IS NOT NULL AND (modified_at IS NULL OR modified_at<?7 OR (modified_at=?7 AND (name_key>?4 OR (name_key=?4 AND entry_id>?6))))) OR (?7 IS NULL AND modified_at IS NULL AND (name_key>?4 OR (name_key=?4 AND entry_id>?6))))",
+            "kind_rank,modified_at IS NULL,modified_at DESC,name_key,entry_id",
+        ),
         ListingSort::SizeDesc => (
             "(byte_size<?5 OR (byte_size=?5 AND (name_key>?4 OR (name_key=?4 AND entry_id>?6))))",
             "kind_rank,byte_size DESC,name_key,entry_id",
@@ -271,15 +286,16 @@ fn listing_sql(sort: ListingSort) -> String {
         ), listing AS (
             SELECT e.entry_id,e.parent_id,e.original_name,e.kind,e.generation,e.name_key,
                 CASE e.kind WHEN 'folder' THEN 0 ELSE 1 END AS kind_rank,
-                CASE e.kind WHEN 'folder' THEN 0 ELSE r.length END AS byte_size
+                CASE e.kind WHEN 'folder' THEN 0 ELSE r.length END AS byte_size,
+                CASE e.kind WHEN 'file' THEN r.committed_at END AS modified_at
             FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id
             WHERE e.owner_account_id=?1 AND e.parent_id=?2 AND e.state='active'
                 AND EXISTS(SELECT 1 FROM ancestors WHERE parent_id IS NULL)
         ), page AS MATERIALIZED (
         SELECT * FROM listing WHERE ?3 IS NULL OR kind_rank>?3 OR (kind_rank=?3 AND (
             (kind_rank=0 AND {ascending_name}) OR (kind_rank=1 AND {file_after})
-        )) ORDER BY {order} LIMIT ?7
-        ), visible AS (SELECT * FROM page ORDER BY {order} LIMIT ?8),
+        )) ORDER BY {order} LIMIT ?8
+        ), visible AS (SELECT * FROM page ORDER BY {order} LIMIT ?9),
         descendants(folder_id,entry_id,kind,current_revision_id) AS (
             SELECT e.entry_id,e.entry_id,e.kind,e.current_revision_id
             FROM visible v JOIN entry e ON e.entry_id=v.entry_id
@@ -296,7 +312,7 @@ fn listing_sql(sort: ListingSort) -> String {
             GROUP BY d.folder_id
         ) SELECT page.entry_id,page.parent_id,page.original_name,page.kind,page.generation,
             page.name_key,page.kind_rank,page.byte_size,
-            CASE WHEN page.kind_rank=0 THEN totals.total_bytes ELSE page.byte_size END
+            CASE WHEN page.kind_rank=0 THEN totals.total_bytes ELSE page.byte_size END,page.modified_at
         FROM page LEFT JOIN totals ON totals.folder_id=page.entry_id ORDER BY {order}"
     )
 }
@@ -544,6 +560,8 @@ mod tests {
             ListingSort::NameDesc,
             ListingSort::SizeAsc,
             ListingSort::SizeDesc,
+            ListingSort::ModifiedAsc,
+            ListingSort::ModifiedDesc,
         ] {
             let sql = format!("EXPLAIN QUERY PLAN {}", listing_sql(sort));
             let mut statement = db.prepare(&sql).unwrap();
@@ -556,6 +574,7 @@ mod tests {
                         Option::<Vec<u8>>::None,
                         Option::<i64>::None,
                         Option::<String>::None,
+                        Option::<i64>::None,
                         101,
                         100
                     ],

@@ -119,6 +119,7 @@ struct ListingItem {
     entry: namespace::Entry,
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<i64>,
+    modified_at: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -285,13 +286,14 @@ struct Cursor {
     key_version: i64,
     last_kind_rank: u8,
     last_size: i64,
+    last_modified_at: Option<i64>,
     last_key: String,
     last_id: String,
 }
 fn encode_cursor(key: &[u8; 32], cursor: &Cursor) -> Option<String> {
     let body = serde_json::to_vec(cursor).ok()?;
     let mut mac = HmacSha256::new_from_slice(key).ok()?;
-    mac.update(b"sylux:entry-list-cursor:v2\0");
+    mac.update(b"sylux:entry-list-cursor:v3\0");
     mac.update(&body);
     let token = format!(
         "{}.{}",
@@ -308,7 +310,7 @@ fn decode_cursor(key: &[u8; 32], value: &str) -> Option<Cursor> {
     let body = URL_SAFE_NO_PAD.decode(a).ok()?;
     let sig = URL_SAFE_NO_PAD.decode(b).ok()?;
     let mut mac = HmacSha256::new_from_slice(key).ok()?;
-    mac.update(b"sylux:entry-list-cursor:v2\0");
+    mac.update(b"sylux:entry-list-cursor:v3\0");
     mac.update(&body);
     mac.verify_slice(&sig).ok()?;
     serde_json::from_slice(&body).ok()
@@ -431,6 +433,8 @@ pub async fn listing(
         "name_desc" => namespace::ListingSort::NameDesc,
         "size_asc" => namespace::ListingSort::SizeAsc,
         "size_desc" => namespace::ListingSort::SizeDesc,
+        "modified_asc" => namespace::ListingSort::ModifiedAsc,
+        "modified_desc" => namespace::ListingSort::ModifiedDesc,
         _ => return error(StatusCode::BAD_REQUEST, "invalid_sort"),
     };
     let key = cursor_key(&s);
@@ -485,7 +489,7 @@ fn build_listing(
         let Some(decoded) = decode_cursor(&key, &value) else {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
         };
-        if decoded.version != 2
+        if decoded.version != 3
             || decoded.actor != account
             || decoded.root != root_id
             || decoded.folder != folder
@@ -502,8 +506,10 @@ fn build_listing(
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
         };
         if decoded.last_kind_rank > 1
+            || decoded.last_modified_at.is_some_and(|time| time < 0)
             || decoded.last_size < 0
             || (decoded.last_kind_rank == 0 && decoded.last_size != 0)
+            || (decoded.last_kind_rank == 0 && decoded.last_modified_at.is_some())
             || last_key.is_empty()
             || last_key.len() > crate::domain::names::MAX_NAME_BYTES
             || decoded.last_id.len() != 32
@@ -518,6 +524,7 @@ fn build_listing(
             kind_rank: decoded.last_kind_rank,
             name_key: last_key,
             size: decoded.last_size,
+            modified_at: decoded.last_modified_at,
             id: decoded.last_id,
         })
     } else {
@@ -535,7 +542,7 @@ fn build_listing(
             encode_cursor(
                 &key,
                 &Cursor {
-                    version: 2,
+                    version: 3,
                     actor: account.to_owned(),
                     root: root_id,
                     folder: folder.clone(),
@@ -545,6 +552,7 @@ fn build_listing(
                     key_version: crate::domain::names::NAME_KEY_VERSION,
                     last_kind_rank: last.position.kind_rank,
                     last_size: last.position.size,
+                    last_modified_at: last.position.modified_at,
                     last_key: URL_SAFE_NO_PAD.encode(&last.position.name_key),
                     last_id: last.position.id.clone(),
                 },
@@ -559,6 +567,7 @@ fn build_listing(
             .into_iter()
             .map(|row| ListingItem {
                 size: row.size,
+                modified_at: row.modified_at,
                 entry: row.entry,
             })
             .collect(),
@@ -844,5 +853,47 @@ async fn change_trash(s: AuthState, id: String, headers: HeaderMap, restore: boo
             error(StatusCode::CONFLICT, "name_conflict")
         }
         _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn listing_cursor_rejects_correctly_signed_v2_domain() {
+        let key = [7; 32];
+        let body = serde_json::to_vec(&serde_json::json!({
+            "version": 2,
+            "actor": "owner",
+            "root": "root",
+            "folder": "root",
+            "generation": 1,
+            "filter": "all",
+            "sort": "name_asc",
+            "key_version": 1,
+            "last_kind_rank": 0,
+            "last_size": 0,
+            "last_key": "QQ",
+            "last_id": "00000000000000000000000000000001"
+        }))
+        .unwrap();
+        let cursor: Cursor = serde_json::from_slice(&body).unwrap();
+        let mut mac = HmacSha256::new_from_slice(&key).unwrap();
+        mac.update(b"sylux:entry-list-cursor:v2\0");
+        mac.update(&body);
+        let signature = mac.finalize().into_bytes();
+        let mut verifier = HmacSha256::new_from_slice(&key).unwrap();
+        verifier.update(b"sylux:entry-list-cursor:v2\0");
+        verifier.update(&body);
+        verifier.verify_slice(&signature).unwrap();
+        let obsolete = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(&body),
+            URL_SAFE_NO_PAD.encode(signature)
+        );
+        assert!(decode_cursor(&key, &obsolete).is_none());
+        // The old payload is readable; the signing domain causes the rejection.
+        assert!(decode_cursor(&key, &encode_cursor(&key, &cursor).unwrap()).is_some());
     }
 }

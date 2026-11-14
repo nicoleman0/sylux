@@ -946,6 +946,10 @@ fn deleted_entries_include_owner_folder_paths_even_when_parent_is_deleted() {
 }
 
 fn insert_sized_file(db: &Connection, id: &str, name: &str, size: i64) {
+    insert_sized_file_at(db, id, name, size, 1);
+}
+
+fn insert_sized_file_at(db: &Connection, id: &str, name: &str, size: i64, time: i64) {
     let key = EntryName::parse(name).unwrap().key;
     db.execute(
         "INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'file',?4,?5,1)",
@@ -957,8 +961,8 @@ fn insert_sized_file(db: &Connection, id: &str, name: &str, size: i64) {
     )
     .unwrap();
     db.execute(
-        "INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES(?1,?1,?1,?2,zeroblob(32),1,?3)",
-        params![id, size, OWNER],
+        "INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES(?1,?1,?1,?2,zeroblob(32),?4,?3)",
+        params![id, size, OWNER, time],
     ).unwrap();
     db.execute(
         "UPDATE entry SET current_revision_id=?1 WHERE entry_id=?1",
@@ -1110,7 +1114,7 @@ async fn folder_sorting_orders_complete_listing_before_paging_and_returns_file_s
 #[tokio::test]
 async fn folder_sorting_rejects_invalid_modes_and_cross_sort_cursors() {
     let fixture = HttpFixture::new("sort-cursors", 3).await;
-    for invalid in ["", "NAME_ASC", "modified_desc", "size"] {
+    for invalid in ["", "NAME_ASC", "modified", "size"] {
         let (status, body) = fixture.list(&format!("?sort={invalid}")).await;
         assert_eq!(status, 400);
         assert_eq!(
@@ -1118,7 +1122,14 @@ async fn folder_sorting_rejects_invalid_modes_and_cross_sort_cursors() {
             "invalid_sort"
         );
     }
-    let sorts = ["name_asc", "name_desc", "size_asc", "size_desc"];
+    let sorts = [
+        "name_asc",
+        "name_desc",
+        "size_asc",
+        "size_desc",
+        "modified_asc",
+        "modified_desc",
+    ];
     for sort in sorts {
         let (status, body) = fixture.list(&format!("?sort={sort}&limit=1")).await;
         assert_eq!(status, 200);
@@ -1177,6 +1188,8 @@ fn folder_sorting_breaks_equal_name_keys_by_id_on_every_page() {
         namespace::ListingSort::NameDesc,
         namespace::ListingSort::SizeAsc,
         namespace::ListingSort::SizeDesc,
+        namespace::ListingSort::ModifiedAsc,
+        namespace::ListingSort::ModifiedDesc,
     ] {
         let mut cursor = None;
         let mut ids = Vec::new();
@@ -1517,6 +1530,8 @@ fn recursive_folder_sizes_exclude_populated_lookahead_until_next_page() {
         namespace::ListingSort::NameDesc,
         namespace::ListingSort::SizeAsc,
         namespace::ListingSort::SizeDesc,
+        namespace::ListingSort::ModifiedAsc,
+        namespace::ListingSort::ModifiedDesc,
     ] {
         let first = namespace::list_sorted(&db, OWNER, ROOT, sort, None, 1).unwrap();
         assert_eq!(first.len(), 2);
@@ -1533,4 +1548,119 @@ fn recursive_folder_sizes_exclude_populated_lookahead_until_next_page() {
         assert_eq!(next[0].entry.id, b.id);
         assert_eq!(next[0].size, Some(29));
     }
+}
+
+#[tokio::test]
+async fn modified_dates_sort_complete_listing_and_preserve_epoch_zero() {
+    let fixture = HttpFixture::new("modified-pages", 0).await;
+    let expected = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            namespace::create_folder(tx, OWNER, ROOT, "Z folder").unwrap();
+            namespace::create_folder(tx, OWNER, ROOT, "A folder").unwrap();
+            let mut files = Vec::new();
+            for n in (0..113).rev() {
+                let id = format!("{:032x}", n + 0xc000);
+                let name = format!("file-{n:03}");
+                let time = (n % 7) as i64 * 100;
+                insert_sized_file_at(tx, &id, &name, n as i64, time);
+                files.push((id, name, time));
+            }
+            Ok(files)
+        })
+        .await
+        .unwrap();
+    for sort in ["modified_asc", "modified_desc"] {
+        let mut files = expected.clone();
+        files.sort_by(|a, b| {
+            (if sort == "modified_asc" {
+                a.2.cmp(&b.2)
+            } else {
+                b.2.cmp(&a.2)
+            })
+            .then(a.1.cmp(&b.1))
+            .then(a.0.cmp(&b.0))
+        });
+        for limit in [1, 3, 100] {
+            let mut cursor = None;
+            let mut names = Vec::new();
+            let mut ids = std::collections::HashSet::new();
+            loop {
+                let query = format!(
+                    "?sort={sort}&limit={limit}{}",
+                    cursor
+                        .as_ref()
+                        .map(|c| format!("&cursor={c}"))
+                        .unwrap_or_default()
+                );
+                let (status, body) = fixture.list(&query).await;
+                assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+                let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                for item in page["items"].as_array().unwrap() {
+                    assert!(ids.insert(item["id"].as_str().unwrap().to_owned()));
+                    names.push(item["name"].as_str().unwrap().to_owned());
+                    if item["kind"] == "folder" {
+                        assert!(item["modified_at"].is_null());
+                    } else {
+                        let expected_time = expected
+                            .iter()
+                            .find(|entry| entry.0 == item["id"])
+                            .unwrap()
+                            .2;
+                        assert_eq!(item["modified_at"], expected_time);
+                    }
+                }
+                cursor = page["next_cursor"].as_str().map(str::to_owned);
+                if cursor.is_none() {
+                    break;
+                }
+                assert!(names.len() < 115);
+            }
+            let expected_names = ["A folder".to_owned(), "Z folder".to_owned()]
+                .into_iter()
+                .chain(files.iter().map(|entry| entry.1.clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(names, expected_names, "{sort}, page size {limit}");
+        }
+    }
+    fixture.close().await;
+}
+
+#[test]
+fn modified_dates_survive_namespace_mutations() {
+    let mut db = namespace_db();
+    let tx = db.transaction().unwrap();
+    let id = "0000000000000000000000000000d001";
+    insert_sized_file(&tx, id, "original.txt", 42);
+    let destination = namespace::create_folder(&tx, OWNER, ROOT, "Destination").unwrap();
+    let assert_time = |folder: &str| {
+        let rows = namespace::list_sorted(
+            &tx,
+            OWNER,
+            folder,
+            namespace::ListingSort::ModifiedDesc,
+            None,
+            100,
+        )
+        .unwrap();
+        let row = rows.into_iter().find(|row| row.entry.id == id).unwrap();
+        assert_eq!(row.modified_at, Some(1));
+        row.entry
+    };
+    let original = assert_time(ROOT);
+    namespace::rename(&tx, OWNER, id, "renamed.txt", &original.etag).unwrap();
+    let renamed = assert_time(ROOT);
+    namespace::move_entry(&tx, OWNER, id, &destination.id, &renamed.etag).unwrap();
+    let moved = assert_time(&destination.id);
+    namespace::trash(&tx, OWNER, id, &moved.etag).unwrap();
+    let deleted = namespace::trashed(&tx, OWNER)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entry.id == id)
+        .unwrap();
+    namespace::restore(&tx, OWNER, id, &deleted.entry.etag).unwrap();
+    assert_time(&destination.id);
+    tx.commit().unwrap();
 }
