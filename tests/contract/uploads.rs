@@ -1411,13 +1411,14 @@ async fn declared_length_and_client_digest_are_checked_before_byte_zero_retry() 
 
 impl Fixture {
     async fn replacement(&self, existing: &Value, bytes: &[u8]) -> (String, String, Value) {
+        let parent = existing["parent_id"].as_str().unwrap();
         let parent_generation: i64 = self
             .db()
             .lock()
             .unwrap()
             .query_row(
                 "SELECT generation FROM entry WHERE entry_id=?1",
-                [OWNER_ROOT],
+                [parent],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1433,7 +1434,7 @@ impl Fixture {
             )
             .unwrap();
         let admission = serde_json::json!({
-            "parent_id": OWNER_ROOT, "parent_etag": folder_etag(OWNER_ROOT, parent_generation as u64),
+            "parent_id": parent, "parent_etag": folder_etag(parent, parent_generation as u64),
             "name": existing["name"], "length": bytes.len(), "sha256": hex(&Sha256::digest(bytes)),
             "replacement": { "entry_id": id, "etag": folder_etag(id, generation as u64) },
         });
@@ -1851,4 +1852,110 @@ async fn replacement_revalidates_move_delete_and_target_generation() {
         );
         fixture.close().await;
     }
+}
+
+#[tokio::test]
+async fn folder_total_tracks_real_upload_replacement_trash_and_restore() {
+    let fixture = Fixture::new("folder-size-replacement").await;
+    let old_bytes = b"original bytes";
+    let old = fixture.upload("same.bin", old_bytes).await;
+    let folder = fixture
+        .mutate(
+            "POST",
+            "/folders/children",
+            &owner_auth(),
+            None,
+            &[("Content-Type", "application/json".to_owned())],
+            serde_json::to_vec(&serde_json::json!({"parent_id": OWNER_ROOT, "name": "Archive"}))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(folder.status, 201, "{}", folder.text());
+    let folder = folder.json();
+    let moved = fixture
+        .mutate(
+            "POST",
+            &format!("/entries/{}/move", old["id"].as_str().unwrap()),
+            &owner_auth(),
+            None,
+            &[
+                ("Content-Type", "application/json".to_owned()),
+                ("If-Match", folder_etag(old["id"].as_str().unwrap(), 1)),
+            ],
+            serde_json::to_vec(&serde_json::json!({"parent_id": folder["id"]})).unwrap(),
+        )
+        .await;
+    assert_eq!(moved.status, 200, "{}", moved.text());
+    assert_folder_total(&fixture, &folder, old_bytes.len()).await;
+    let new_bytes = b"replacement";
+    let (id, ticket, admission) = fixture.replacement(&moved.json(), new_bytes).await;
+    assert_eq!(
+        fixture
+            .replacement_content(&id, &ticket, new_bytes)
+            .await
+            .status,
+        200
+    );
+    assert_folder_total(&fixture, &folder, old_bytes.len()).await;
+    let committed = fixture.replacement_commit(&id, &ticket, &admission).await;
+    assert_eq!(committed.status, 201, "{}", committed.text());
+    let new = committed.json();
+    assert_folder_total(&fixture, &folder, new_bytes.len()).await;
+    let trashed = fixture
+        .mutate(
+            "DELETE",
+            &format!("/entries/{}", new["id"].as_str().unwrap()),
+            &owner_auth(),
+            None,
+            &[("If-Match", folder_etag(new["id"].as_str().unwrap(), 1))],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(trashed.status, 204, "{}", trashed.text());
+    assert_folder_total(&fixture, &folder, 0).await;
+    let deleted = fixture
+        .request("GET", "/trash", Some(&owner_auth()), &[], Vec::new())
+        .await;
+    assert_eq!(deleted.status, 200);
+    let deleted = deleted.json();
+    let prior = deleted["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == old["id"])
+        .unwrap();
+    let restored = fixture
+        .mutate(
+            "POST",
+            &format!("/trash/{}/restore", old["id"].as_str().unwrap()),
+            &owner_auth(),
+            None,
+            &[("If-Match", prior["etag"].as_str().unwrap().to_owned())],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(restored.status, 204, "{}", restored.text());
+    assert_folder_total(&fixture, &folder, old_bytes.len()).await;
+    fixture.close().await;
+}
+
+async fn assert_folder_total(fixture: &Fixture, folder: &Value, expected: usize) {
+    let listing = fixture
+        .request(
+            "GET",
+            "/folders/children",
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(listing.status, 200, "{}", listing.text());
+    let listing = listing.json();
+    let item = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == folder["id"])
+        .unwrap();
+    assert_eq!(item["size"], expected);
 }

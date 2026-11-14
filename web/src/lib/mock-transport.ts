@@ -135,7 +135,30 @@ export class MockTransport implements ApiTransport {
         if (sort.startsWith('size_')) return (a.size - b.size) * (sort === 'size_desc' ? -1 : 1) || name || compare(a.id, b.id);
         return name * (sort === 'name_desc' ? -1 : 1) || compare(a.id, b.id);
       });
-      return { ...(route === '/folders/children' ? { root } : {}), items, next_cursor: null, has_more: false } as T;
+      const children = new Map<string, Entry[]>();
+      for (const entry of this.entries) {
+        if (!entry.parent_id) continue;
+        let siblings = children.get(entry.parent_id);
+        if (!siblings) { siblings = []; children.set(entry.parent_id, siblings); }
+        siblings.push(entry);
+      }
+      const total = (folder: Folder): number | null => {
+        let bytes = 0;
+        const pending = [folder.id];
+        const seen = new Set<string>();
+        while (pending.length) {
+          const id = pending.pop()!;
+          if (seen.has(id)) throw new Error('Folder cycle');
+          seen.add(id);
+          for (const entry of children.get(id) ?? []) {
+            if (entry.kind === 'folder') pending.push(entry.id);
+            else if (!Number.isFinite(entry.size)) return null;
+            else bytes += entry.size;
+          }
+        }
+        return bytes;
+      };
+      return { ...(route === '/folders/children' ? { root } : {}), items: items.map(entry => entry.kind === 'folder' ? { ...entry, size: total(entry) } : entry), next_cursor: null, has_more: false } as T;
     }
     if (route.endsWith('/children') && method === 'POST') {
       const body = options.body as { name: string; parent_id: string };

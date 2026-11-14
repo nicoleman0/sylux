@@ -1,6 +1,6 @@
 import type { ApiClient } from './api';
 
-export type Folder = { id: string; parent_id: string | null; name: string; kind: 'folder'; etag: string };
+export type Folder = { id: string; parent_id: string | null; name: string; kind: 'folder'; size?: number | null; etag: string };
 export type FileEntry = { id: string; parent_id: string; name: string; kind: 'file'; size: number; etag: string };
 export type Entry = Folder | FileEntry;
 export type FolderSort = 'name_asc' | 'name_desc' | 'size_asc' | 'size_desc';

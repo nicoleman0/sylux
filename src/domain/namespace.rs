@@ -151,6 +151,7 @@ pub struct ListingPosition {
 #[derive(Debug)]
 pub struct ListedEntry {
     pub entry: Entry,
+    pub size: Option<i64>,
     pub position: ListingPosition,
 }
 
@@ -212,12 +213,14 @@ pub fn list_sorted(
                 after.map(|position| position.name_key.as_slice()),
                 after.map(|position| position.size),
                 after.map(|position| position.id.as_str()),
-                (limit.min(500) + 1) as i64
+                (limit.min(500) + 1) as i64,
+                limit.min(500) as i64
             ],
             |r| {
                 let id: String = r.get(0)?;
                 let generation: i64 = r.get(4)?;
                 Ok(ListedEntry {
+                    size: r.get(8)?,
                     position: ListingPosition {
                         kind_rank: r.get(6)?,
                         name_key: r.get(5)?,
@@ -259,16 +262,42 @@ fn listing_sql(sort: ListingSort) -> String {
     };
     // Only fixed SQL fragments vary; filtering and ordering cover every sibling before LIMIT.
     format!(
-        "WITH listing AS (
+        "WITH RECURSIVE ancestors(entry_id,parent_id) AS (
+            SELECT entry_id,parent_id FROM entry
+            WHERE entry_id=?2 AND owner_account_id=?1 AND kind='folder' AND state='active'
+            UNION ALL
+            SELECT e.entry_id,e.parent_id FROM entry e JOIN ancestors a ON e.entry_id=a.parent_id
+            WHERE e.owner_account_id=?1 AND e.kind='folder' AND e.state='active'
+        ), listing AS (
             SELECT e.entry_id,e.parent_id,e.original_name,e.kind,e.generation,e.name_key,
                 CASE e.kind WHEN 'folder' THEN 0 ELSE 1 END AS kind_rank,
                 CASE e.kind WHEN 'folder' THEN 0 ELSE r.length END AS byte_size
             FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id
             WHERE e.owner_account_id=?1 AND e.parent_id=?2 AND e.state='active'
-        ) SELECT entry_id,parent_id,original_name,kind,generation,name_key,kind_rank,byte_size
-        FROM listing WHERE ?3 IS NULL OR kind_rank>?3 OR (kind_rank=?3 AND (
+                AND EXISTS(SELECT 1 FROM ancestors WHERE parent_id IS NULL)
+        ), page AS MATERIALIZED (
+        SELECT * FROM listing WHERE ?3 IS NULL OR kind_rank>?3 OR (kind_rank=?3 AND (
             (kind_rank=0 AND {ascending_name}) OR (kind_rank=1 AND {file_after})
-        )) ORDER BY {order} LIMIT ?7"
+        )) ORDER BY {order} LIMIT ?7
+        ), visible AS (SELECT * FROM page ORDER BY {order} LIMIT ?8),
+        descendants(folder_id,entry_id,kind,current_revision_id) AS (
+            SELECT e.entry_id,e.entry_id,e.kind,e.current_revision_id
+            FROM visible v JOIN entry e ON e.entry_id=v.entry_id
+            WHERE v.kind_rank=0 AND e.owner_account_id=?1 AND e.state='active'
+            UNION ALL
+            SELECT d.folder_id,e.entry_id,e.kind,e.current_revision_id
+            FROM descendants d JOIN entry e ON e.parent_id=d.entry_id
+            WHERE d.kind='folder' AND e.owner_account_id=?1 AND e.state='active'
+        ), totals AS (
+            SELECT d.folder_id,
+                CASE WHEN SUM(CASE WHEN d.kind='file' AND r.length IS NULL THEN 1 ELSE 0 END)>0
+                    THEN NULL ELSE COALESCE(SUM(CASE WHEN d.kind='file' THEN r.length ELSE 0 END),0) END AS total_bytes
+            FROM descendants d LEFT JOIN revision r ON r.revision_id=d.current_revision_id AND r.entry_id=d.entry_id
+            GROUP BY d.folder_id
+        ) SELECT page.entry_id,page.parent_id,page.original_name,page.kind,page.generation,
+            page.name_key,page.kind_rank,page.byte_size,
+            CASE WHEN page.kind_rank=0 THEN totals.total_bytes ELSE page.byte_size END
+        FROM page LEFT JOIN totals ON totals.folder_id=page.entry_id ORDER BY {order}"
     )
 }
 
@@ -506,7 +535,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sorted_listing_limits_sql_work_to_indexed_siblings() {
+    fn sorted_listing_uses_active_sibling_index() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(include_str!("../../migrations/sqlite/0001_s1.sql"))
             .unwrap();
@@ -527,7 +556,8 @@ mod tests {
                         Option::<Vec<u8>>::None,
                         Option::<i64>::None,
                         Option::<String>::None,
-                        101
+                        101,
+                        100
                     ],
                     |row| row.get::<_, String>(3),
                 )
