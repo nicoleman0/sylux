@@ -313,7 +313,7 @@ test('search moves 50 loaded matches with their ETags and shows changed location
     await page.getByRole('button', { name: 'Switch to light mode', exact: true }).click();
   }
   await moveSelected(page);
-  await expect(page.getByRole('region', { name: 'Move results' }).getByText('50 of 50 succeeded.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Move results' }).getByText('50 items moved', { exact: true })).toBeVisible();
   expect(backend.mutations).toEqual(Array.from({ length: 50 }, (_, index) => ({ id: `match-${index}`, action: 'move', parent: 'destination', etag: `"match-${index}:1"` })));
   await expect(page.getByRole('checkbox', { name: 'Select match-00.bin in Files / Destination', exact: true })).toBeVisible();
   expect(backend.entries.find(entry => entry.id === 'match-50')!.parent_id).toBe('source-0');
@@ -330,7 +330,7 @@ test('search bulk retries conflicts across original folders and reconciles appli
   await page.getByRole('button', { name: 'Retry failed items', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Destination', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Move here', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Move results' }).getByText('2 of 2 succeeded.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Move results' }).getByText(/2 items moved/)).toBeVisible();
   expect(backend.mutations.map(item => item.id)).toEqual(['match-0', 'match-1', 'match-1']);
   await page.getByRole('button', { name: 'Dismiss results', exact: true }).click();
   backend.failures.set('match-0', { status: 503, code: 'unavailable' });
@@ -341,7 +341,7 @@ test('search bulk retries conflicts across original folders and reconciles appli
   await expect(page.getByRole('button', { name: 'Refresh before retry', exact: true })).toBeVisible();
   backend.failures.clear();
   await page.getByRole('button', { name: 'Refresh before retry', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Trash results' }).getByText('2 of 2 succeeded.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Trash results' }).getByText(/2 items moved/)).toBeVisible();
   expect(backend.mutations.map(item => item.id)).toEqual(['match-0', 'match-1', 'match-1', 'match-0', 'match-1']);
 });
 
@@ -360,7 +360,7 @@ test('search trash reports a populated folder failure and keeps it available', a
   expect(backend.mutations.map(item => item.id)).toEqual(['match-0', 'match-1', 'match-folder']);
 });
 
-test('search retry does not replay a failed item outside the refreshed loaded page or with a changed ETag', async ({ page }) => {
+test('search changes clear completed failures without retrying their mutations', async ({ page }) => {
   const backend = await installSearchBulkBackend(page, 2);
   backend.failures.set('match-0', { status: 409, code: 'name_conflict' });
   backend.failures.set('match-1', { status: 409, code: 'name_conflict' });
@@ -369,12 +369,86 @@ test('search retry does not replay a failed item outside the refreshed loaded pa
   await moveSelected(page);
   await expect(page.getByRole('region', { name: 'Move results' }).getByText('0 of 2 succeeded.', { exact: true })).toBeVisible();
   backend.failures.clear();
-  backend.entries.find(entry => entry.id === 'match-1')!.etag = '"match-1:2"';
   await page.getByRole('searchbox').fill('alpha');
-  await expect(page.getByRole('checkbox', { name: 'Select alpha.bin in Files', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Retry failed items', exact: true }).click();
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByRole('region', { name: 'Move results' })).toContainText('This version is no longer on the loaded page. Find and select the item again');
-  await expect(page.getByRole('region', { name: 'Move results' })).toContainText('This item changed. Select it again');
+  await expect(page.getByRole('region', { name: 'Move results' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Retry failed items', exact: true })).toHaveCount(0);
   expect(backend.mutations.map(item => item.id)).toEqual(['match-0', 'match-1']);
 });
+
+for (const action of ['move', 'trash'] as const) {
+  for (const boundary of ['refresh', 'folder', 'account', 'trash', 'search', 'page']) {
+    test(`completed ${action} clears on ${boundary} without replay`, async ({ page }) => {
+      const store = await installBulkBackend(page, true);
+      await select(page, 'alpha.bin');
+      if (action === 'move') await moveSelected(page);
+      else await trashSelected(page);
+      const report = page.getByRole('region', { name: action === 'move' ? 'Move results' : 'Trash results' });
+      await expect(report.getByRole('status')).toHaveText(action === 'move' ? 'Moved to Destination' : 'Moved to trash');
+      await expect(report.locator('li')).toHaveCount(0);
+      await expect(report.getByRole('heading')).toHaveCount(0);
+      if (boundary === 'refresh') await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
+      if (boundary === 'folder') await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+      if (boundary === 'account' || boundary === 'trash') await page.getByRole('button', { name: boundary === 'account' ? 'Account' : 'Trash', exact: true }).click();
+      if (boundary === 'search') await page.getByRole('searchbox').fill('alpha');
+      if (boundary === 'page') await page.getByRole('button', { name: 'Next page', exact: true }).click();
+      await expect(report).toHaveCount(0);
+      await page.getByRole('button', { name: 'Account', exact: true }).click();
+      await page.getByRole('button', { name: 'Files', exact: true }).click();
+      await expect(report).toHaveCount(0);
+      expect(store.mutations.map(item => item.id)).toEqual(['alpha']);
+    });
+  }
+}
+
+test('unconfirmed bulk results remain reachable in other destinations without old success rows', async ({ page }) => {
+  const store = await installBulkBackend(page);
+  store.failures.set('beta', { status: 503, code: 'unavailable' });
+  await select(page, 'alpha.bin', 'beta.bin');
+  await trashSelected(page);
+  await expect(page.getByRole('region', { name: 'Trash results' })).toContainText('1 of 2 succeeded. 1 unconfirmed.');
+  // Absence from both checked locations must remain unconfirmed.
+  store.entries.splice(store.entries.findIndex(entry => entry.id === 'beta'), 1);
+  await page.getByRole('button', { name: 'Refresh before retry', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Refresh before retry', exact: true })).toBeVisible();
+  for (const destination of ['Account', 'Trash', 'Files']) {
+    await page.getByRole('button', { name: destination, exact: true }).click();
+    const report = page.getByRole('region', { name: 'Trash results' });
+    await expect(report).toBeVisible();
+    await expect(report.locator('li')).toHaveCount(1);
+    await expect(report.locator('li')).not.toContainText('alpha.bin');
+    await expect(report.getByRole('button', { name: 'Dismiss results', exact: true })).toHaveCount(0);
+  }
+  expect(store.mutations.map(item => item.id)).toEqual(['alpha', 'beta']);
+});
+
+for (const scenario of ['single-success', 'large-success', 'partial-failure', 'uncertainty']) {
+  test(`feedback visual comparison ${scenario}`, async ({ page }) => {
+    const store = await installBulkBackend(page);
+    if (scenario === 'large-success') {
+      for (let index = 0; index < 60; index++) store.entries.push({ id: `batch-${index}`, parent_id: 'root', name: `batch-${index}.bin`, kind: 'file', size: 3, etag: `"batch-${index}:1"` });
+      await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
+    }
+    if (scenario === 'partial-failure' || scenario === 'uncertainty') store.failures.set('beta', { status: scenario === 'uncertainty' ? 503 : 403, code: scenario === 'uncertainty' ? 'unavailable' : 'forbidden' });
+    await select(page, 'alpha.bin');
+    if (scenario !== 'single-success') {
+      if (scenario === 'large-success') {
+        await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+        await page.getByRole('checkbox', { name: 'Select Destination', exact: true }).uncheck();
+      }
+      else await select(page, 'beta.bin');
+    }
+    await moveSelected(page);
+    const report = page.getByRole('region', { name: 'Move results' });
+    await expect(report).toHaveAttribute('aria-busy', 'false');
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      for (const theme of ['light', 'dark']) {
+        if (theme === 'dark') await page.getByRole('button', { name: 'Switch to dark mode', exact: true }).click();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        await page.screenshot({ path: test.info().outputPath(`feedback-${scenario}-${width}-${theme}.png`), fullPage: true, animations: 'disabled' });
+      }
+      await page.getByRole('button', { name: 'Switch to light mode', exact: true }).click();
+    }
+  });
+}

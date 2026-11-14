@@ -130,9 +130,10 @@
     }
   }
 
-  async function navigate(destination: 'files' | 'trash' | 'account' | 'settings', record = true): Promise<void> {
+  async function navigate(destination: 'files' | 'trash' | 'account' | 'settings', record = true, clearFeedback = true): Promise<void> {
     if (!user) { view = 'login'; return; }
     if (bulkBusy) return;
+    if (clearFeedback) clearCompletedFeedback();
     clearSelection(); closeBulk();
     if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
     if (destination !== 'files') clearSearch();
@@ -148,6 +149,7 @@
   async function restoreNavigation(event: PopStateEvent): Promise<void> {
     if (!user) return;
     if (bulkBusy) { recordNavigation(); return; }
+    clearCompletedFeedback();
     closeBulk();
 
     clearSearch();
@@ -162,14 +164,14 @@
       folderPath = [folders[0]]; currentFolder = folders[0]; await refresh();
     }
     if (generation !== sessionGeneration) return;
-    await navigate(target, false);
+    await navigate(target, false, false);
   }
 
   async function home(event: MouseEvent): Promise<void> {
     event.preventDefault();
     if (!user) { view = 'login'; return; }
     if (folders[0]) await openFolder(folders[0]);
-    await navigate('files');
+    await navigate('files', true, false);
   }
 
   function formatSize(bytes: number): string {
@@ -234,6 +236,8 @@
   let bulkTargets = $state<Entry[]>([]);
   let bulkReport = $state<BulkReport | null>(null);
   let bulkBusy = $state(false);
+  const bulkSucceeded = $derived(bulkReport?.results.filter((result) => result.status === 'succeeded').length ?? 0);
+  const bulkComplete = $derived(!!bulkReport && !bulkBusy && bulkSucceeded === bulkReport.results.length);
   let bulkNeedsRefresh = $state(false);
   let bulkError = $state('');
   let bulkRetry = false;
@@ -267,6 +271,8 @@
   let searchController: AbortController | null = null;
   let browseDirty = false;
   let notice = $state('');
+  let actionNotice = $state('');
+  let feedbackRevision = $state(0);
   let folderName = $state('');
   let folderBusy = $state(false);
   let createOpen = $state(false);
@@ -321,7 +327,7 @@
   let controller: AbortController | null = null;
   let uploadBatchBusy = $state(false);
   let uploadBatchStatus = $state('');
-  type UploadResult = { path: string; kind: 'file' | 'folder'; size: number; sent: number; sentComplete: boolean; status: 'waiting' | 'active' | 'saved' | 'created' | 'failed' | 'unknown' | 'canceled' };
+  type UploadResult = { path: string; kind: 'file' | 'folder'; size: number; sent: number; sentComplete: boolean; parent?: Folder; inspected?: boolean; inspectionError?: string; status: 'waiting' | 'active' | 'saved' | 'created' | 'failed' | 'unknown' | 'canceled' };
   let uploadResults = $state<UploadResult[]>([]);
   let uploadBatchDestination = $state('');
   let uploadNotice = $state('');
@@ -340,6 +346,7 @@
   const batchSendPercent = $derived(Math.floor(100 * (batchBytes ? batchSent / batchBytes : batchFiles.length ? batchFiles.filter((item) => item.sentComplete).length / batchFiles.length : 0)));
   let uploadResultsExpanded = $state(false);
   let uploadReportVisible = $state(false);
+  let compactUnresolvedUpload = $state(false);
   const uploadComplete = $derived(!uploadBatchBusy && uploadResults.length > 0 && uploadResults.every((item) => item.status === 'saved' || item.status === 'created'));
 
   type UploadReport = { id: number; destination: string; status: string; notice: string; results: UploadResult[]; expanded: boolean };
@@ -347,17 +354,71 @@
   let uploadReportSequence = 0;
 
   function retainUploadReport(): void {
-    if (!uploadReportVisible || (!uploadResults.length && !uploadBatchStatus)) return;
+    if (!uploadReportVisible || !uploadResults.some((result) => result.status === 'unknown')) return;
     previousUploadReports.push({ id: ++uploadReportSequence, destination: uploadBatchDestination, status: uploadBatchStatus, notice: uploadNotice, results: uploadResults.map((result) => ({ ...result })), expanded: uploadResultsExpanded });
+  }
+
+  function clearCompletedFeedback(): void {
+    feedbackRevision++;
+    notice = ''; actionNotice = '';
+    if (!bulkBusy) {
+      if (!bulkNeedsRefresh) { bulkReport = null; bulkError = ''; }
+    }
+    previousUploadReports = previousUploadReports.filter((report) => report.results.some((result) => result.status === 'unknown'));
+    if (!uploadBatchBusy) {
+      if (unresolvedUploadId || uploadResults.some((result) => result.status === 'unknown')) compactUnresolvedUpload = true;
+      else { uploadReportVisible = false; uploadResultsExpanded = false; }
+    }
+  }
+
+  async function dismissActionNotice(): Promise<void> {
+    feedbackRevision++; actionNotice = '';
+    await tick();
+    document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title')?.focus();
+  }
+
+  async function dismissBulkReport(): Promise<void> {
+    if (bulkBusy || bulkNeedsRefresh) return;
+    bulkReport = null; bulkError = '';
+    await tick();
+    document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title')?.focus();
+  }
+
+  async function refreshWorkspace(): Promise<void> {
+    clearCompletedFeedback();
+    if (bulkNeedsRefresh) await reconcileBulk();
+    else if (showTrash) await loadTrash();
+    else await refresh();
+  }
+
+  function uploadSuccessMessage(): string {
+    return uploadResults.length === 1 ? `Uploaded to ${uploadBatchDestination}` : `${uploadResults.length} items uploaded`;
+  }
+
+  async function inspectUploadDestination(result: UploadResult): Promise<void> {
+    if (!result.parent) return;
+    const generation = sessionGeneration;
+    result.inspectionError = '';
+    const parent = await freshUploadFolder(result.parent).catch(() => null);
+    if (generation !== sessionGeneration) return;
+    if (!parent) { result.inspectionError = 'Could not open this destination. Check your connection and try again.'; return; }
+    const loaded = await openFolder(parent);
+    if (generation !== sessionGeneration) return;
+    if (loaded) result.inspected = true;
+    else result.inspectionError = 'Destination was not opened. Inspect it before dismissing this result.';
+  }
+
+  function uploadReportDismissible(results: UploadResult[]): boolean {
+    return results.every((result) => result.status !== 'unknown' || (result.kind === 'folder' && result.inspected));
   }
 
   async function dismissUploadReport(id?: number): Promise<void> {
     if (id !== undefined) {
       const report = previousUploadReports.find((report) => report.id === id);
-      if (!report) return;
+      if (!report || !uploadReportDismissible(report.results)) return;
       previousUploadReports = previousUploadReports.filter((report) => report.id !== id);
     } else {
-      if (uploadBatchBusy || unresolvedUploadId) return;
+      if (uploadBatchBusy || unresolvedUploadId || !uploadReportDismissible(uploadResults)) return;
       uploadReportVisible = false; uploadResultsExpanded = false;
     }
     await tick();
@@ -426,6 +487,7 @@
 
   async function setFolderSort(sort: FolderSort): Promise<void> {
 
+    clearCompletedFeedback();
     folderSort = sort;
     clearSelection();
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false;
@@ -447,6 +509,7 @@
   }
 
   async function clearSearchFromButton(): Promise<void> {
+    clearCompletedFeedback();
     clearSearch(true);
     await tick();
     document.getElementById('file-search')?.focus();
@@ -476,6 +539,7 @@
   function searchChanged(): void {
     if (bulkBusy) return;
 
+    clearCompletedFeedback();
     clearSelection();
     if (!searchInput) { clearSearch(true); return; }
     if (searchTimer) clearTimeout(searchTimer);
@@ -547,6 +611,7 @@
 
   async function searchNext(): Promise<void> {
     if (!searchHasMore || !searchNextCursor || searchLoading) return;
+    clearCompletedFeedback();
     const generation = sessionGeneration;
     const query = searchQuery;
     let request = searchRequest + 1;
@@ -558,6 +623,7 @@
 
   async function searchPrevious(): Promise<void> {
     if (searchPageIndex === 0 || searchLoading) return;
+    clearCompletedFeedback();
     const generation = sessionGeneration;
     const query = searchQuery;
     let request = searchRequest + 1;
@@ -578,6 +644,7 @@
   }
 
   async function openSearchFolder(hit: SearchHit, containing = false): Promise<void> {
+    clearCompletedFeedback();
     const path = containing ? hit.location : [...hit.location, hit.entry as Folder];
     const folder = path.at(-1);
     if (!folder) return;
@@ -593,6 +660,7 @@
 
   async function loadMore(): Promise<void> {
     if (!hasMore || !nextCursor || loading || bulkBusy) return;
+    clearCompletedFeedback();
 
     clearSelection();
     const generation = sessionGeneration;
@@ -631,6 +699,7 @@
 
   async function loadPrevious(): Promise<void> {
     if (pageIndex === 0 || loading || bulkBusy) return;
+    clearCompletedFeedback();
 
     clearSelection();
     const generation = sessionGeneration;
@@ -762,6 +831,7 @@
   }
   function clearWorkspace(): void {
     clearSearch();
+    actionNotice = ''; compactUnresolvedUpload = false;
     bulkAction = null; bulkTargets = []; bulkReport = null; bulkBusy = false; bulkNeedsRefresh = false; bulkError = '';
     navigationPaths.clear();
     controller?.abort(); controller = null;
@@ -930,11 +1000,12 @@
     }
     if (generation !== sessionGeneration) return;
     closeMove(); moveBusy = false;
-    notice = `${target.name} moved to ${destination.name}.`;
+    clearCompletedFeedback(); actionNotice = `Moved to ${destination.name}`;
+    const completion = feedbackRevision;
     try {
       await refreshRoot();
       if (generation === sessionGeneration) await refresh();
-    } catch { if (generation === sessionGeneration) notice = `${target.name} moved to ${destination.name}. Refresh your files to update the folder list.`; }
+    } catch { if (generation === sessionGeneration && feedbackRevision === completion) actionNotice = `Moved to ${destination.name}. Refresh your files to update the folder list.`; }
   }
 
   async function beginBulk(action: BulkAction, trigger: HTMLElement, targets = selectedEntries, retry = false): Promise<void> {
@@ -971,6 +1042,7 @@
       action, destination, results: targets.map((entry) => ({ entry, location: searchItems.find((hit) => hit.entry.id === entry.id) ? searchLocation(searchItems.find((hit) => hit.entry.id === entry.id)!) : folderPath.map((folder) => folder.name).join(' / '), status: 'pending', message: 'Waiting.' })),
     };
     report.destination = destination;
+    if (!bulkRetry) clearCompletedFeedback();
     bulkReport = report;
     bulkBusy = true; bulkError = ''; clearSelection();
     for (const target of targets) {
@@ -995,8 +1067,6 @@
     if (generation !== sessionGeneration) return;
     if (action === 'move') closeMove();
     bulkAction = null; bulkTargets = [];
-    const succeeded = bulkReport!.results.filter((result) => result.status === 'succeeded').length;
-    notice = `${succeeded} of ${bulkReport!.results.length} items ${action === 'move' ? 'moved' : 'moved to trash'}.`;
     try {
       await refreshRoot();
       if (generation === sessionGeneration && !await refresh()) bulkError = 'Could not refresh your files. The item results are kept below.';
@@ -1042,7 +1112,7 @@
         if (completed) { result.status = 'succeeded'; result.message = report.action === 'move' ? `Moved to ${report.destination!.name}.` : 'Moved to trash.'; }
         else if (live && live.etag === result.entry.etag) { result.status = 'failed'; result.message = 'Still in the original folder. Ready to retry.'; }
         else if (live) { result.status = 'changed'; result.message = 'This item changed. Select it again to act on its current version.'; }
-        else { result.status = 'changed'; result.message = 'Outcome could not be confirmed. Item is no longer in the original folder. Check its location before selecting it again.'; }
+        else { result.status = 'uncertain'; result.message = 'Outcome could not be confirmed. Item is no longer in the original folder. Check its location before selecting it again.'; }
       }
       bulkNeedsRefresh = report.results.some((result) => result.status === 'uncertain');
       if (!await refresh()) {
@@ -1136,9 +1206,10 @@
       await listing.move(target.id, destination.id, target.etag);
       if (generation === sessionGeneration) knownParents.set(target.id, destination.id);
       if (generation !== sessionGeneration) return;
-      notice = `${target.name} moved to ${destination.name}.`;
+      clearCompletedFeedback(); actionNotice = `Moved to ${destination.name}`;
+      const completion = feedbackRevision;
       try { await refreshRoot(); if (generation === sessionGeneration) await refresh(); }
-      catch { if (generation === sessionGeneration) notice += ' Refresh your files to update the folder list.'; }
+      catch { if (generation === sessionGeneration && feedbackRevision === completion) actionNotice += '. Refresh your files to update the folder list.'; }
     } catch (error) { if (generation === sessionGeneration) { dropError = moveFailure(error); if (moveOutcomeUncertain(error)) moveNeedsRefresh = true; } }
     finally { if (generation === sessionGeneration) dropPending = null; }
   }
@@ -1206,8 +1277,9 @@
   async function runUploadBatch(read: (canceled: () => boolean) => Promise<UploadItem[]>, destination: Folder): Promise<void> {
     if (uploadBatchBusy || transferBusy || unresolvedUploadId) return;
     const generation = sessionGeneration;
+    clearCompletedFeedback();
     retainUploadReport();
-    uploadNotice = '';
+    uploadNotice = ''; actionNotice = ''; compactUnresolvedUpload = false;
     uploadReportVisible = true;
     uploadBatchDestination = destination.name; uploadBatchStage = 'Preparing'; uploadBatchCurrentIndex = -1;
     uploadBatchBusy = true; uploadBatchCanceled = false; uploadBatchStatus = 'Reading files and folders…'; notice = '';
@@ -1233,6 +1305,7 @@
         const parent = destinations.get(JSON.stringify(item.path.slice(0, -1)));
         if (!parent) throw new Error('The destination for this item could not be found.');
         if (item.kind === 'folder') {
+          uploadResults[index].parent = { ...parent };
           creatingFolder = true;
           const folder = await listing.createFolder(parent.id, item.path.at(-1)!, parent.etag);
           if (generation !== sessionGeneration) return;
@@ -1328,7 +1401,7 @@
     try {
       await listing.trash(target.id, target.etag);
       if (sessionVersion !== sessionGeneration) return;
-      notice = `${target.name} moved to trash.`;
+      clearCompletedFeedback(); actionNotice = 'Moved to trash';
       await refresh();
       if (sessionVersion !== sessionGeneration) return;
       trashTarget = null;
@@ -1351,7 +1424,7 @@
     try {
       await listing.restore(item.id, item.etag);
       if (sessionVersion !== sessionGeneration) return;
-      notice = `${item.name} restored.`;
+      clearCompletedFeedback(); actionNotice = 'Restored';
       await loadTrash();
       if (sessionVersion === sessionGeneration) { await refresh(); await tick(); if (sessionVersion === sessionGeneration) document.getElementById('trash-heading')?.focus(); }
     } catch (error) {
@@ -1635,17 +1708,22 @@
     } catch { notice = 'Download could not be completed.'; }
   }
 
-  async function openFolder(folder: Folder): Promise<void> {
-    if (bulkBusy) return;
+  async function openFolder(folder: Folder): Promise<boolean> {
+    if (bulkBusy) return false;
+    clearCompletedFeedback();
     closeBulk();
 
     clearSearch();
     const index = folderPath.findIndex((item) => item.id === folder.id);
     folderPath = index >= 0 ? folderPath.slice(0, index + 1) : [...folderPath, folder];
     const generation = sessionGeneration;
-    currentFolder = folder; accountView = false; settingsView = false; showTrash = false; recordNavigation(); await refresh();
-    if (generation !== sessionGeneration) return;
-    await tick(); document.getElementById('folder-title')?.focus();
+    currentFolder = folder; accountView = false; settingsView = false; showTrash = false; recordNavigation();
+    const loaded = await refresh();
+    if (generation !== sessionGeneration) return false;
+    await tick();
+    if (!loaded || currentFolder.id !== folder.id || accountView || settingsView || showTrash) return false;
+    document.getElementById('folder-title')?.focus();
+    return true;
   }
 </script>
 
@@ -1705,7 +1783,7 @@
       <AppSidebar {instanceName} onhome={home}>
         {#snippet navigation(close)}
           <nav aria-label="Files"><Sidebar.Menu>
-          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" isActive={!showTrash && !accountView && !settingsView} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={async () => { if (folders[0]) await openFolder(folders[0]); await navigate('files'); close(); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" isActive={!showTrash && !accountView && !settingsView} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={async () => { if (folders[0]) await openFolder(folders[0]); await navigate('files', true, false); close(); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Trash" aria-label="Trash" isActive={showTrash} aria-current={showTrash ? 'page' : undefined} onclick={async () => { await openTrash(); close(); }}><TrashIcon /><span>Trash</span></Sidebar.MenuButton></Sidebar.MenuItem>
 
           </Sidebar.Menu></nav>
@@ -1732,6 +1810,28 @@
           </div>
         </header>
         <div id="main-content" class="workspace-main">
+            {#if actionNotice}
+              {#key feedbackRevision}<div class="action-feedback workspace-feedback">
+                <p role="status"><CheckIcon aria-hidden="true" /><span>{actionNotice}</span></p>
+                <Button variant="ghost" size="icon" aria-label="Dismiss notification" title="Dismiss notification" onclick={dismissActionNotice}><XIcon /></Button>
+              </div>{/key}
+            {/if}
+            {#if bulkReport}
+              <section class:action-feedback={bulkComplete} class:bulk-results={!bulkComplete} aria-label={bulkReport.action === 'move' ? 'Move results' : 'Trash results'} aria-busy={bulkBusy}>
+                {#if bulkComplete}
+                  <p role="status"><CheckIcon aria-hidden="true" /><span>{bulkReport.results.length === 1 ? bulkReport.action === 'move' ? `Moved to ${bulkReport.destination?.name}` : 'Moved to trash' : `${bulkReport.results.length} items ${bulkReport.action === 'move' ? 'moved' : 'moved to trash'}`}</span></p>
+                {:else}
+                  <div class="action-feedback-heading"><h2>{bulkReport.action === 'move' ? 'Move results' : 'Trash results'}</h2>{#if !bulkBusy && !bulkNeedsRefresh}<Button variant="ghost" size="icon" aria-label="Dismiss results" title="Dismiss results" onclick={dismissBulkReport}><XIcon /></Button>{/if}</div>
+                  <p role="status">{bulkSucceeded} of {bulkReport.results.length} succeeded{bulkBusy ? '. Working…' : '.'}{#if bulkReport.results.some((result) => result.status === 'uncertain')}{' '}{bulkReport.results.filter((result) => result.status === 'uncertain').length} unconfirmed.{/if}</p>
+                  <ul>{#each bulkReport.results.filter((result) => result.status !== 'succeeded') as result (result.entry.id)}<li><strong>{result.entry.name}</strong><span>{result.location}</span><span>{result.message}</span></li>{/each}</ul>
+                {/if}
+                {#if bulkError}<p role="alert">{bulkError}</p>{/if}
+                {#if bulkComplete}<Button variant="ghost" size="icon" aria-label="Dismiss results" title="Dismiss results" onclick={dismissBulkReport}><XIcon /></Button>{:else}<div class="flex flex-wrap gap-2">
+                  {#if bulkNeedsRefresh}<Button variant="outline" disabled={bulkBusy} onclick={reconcileBulk}>Refresh before retry</Button>{/if}
+                  {#if bulkReport.results.some((result) => result.status === 'failed')}<Button variant="outline" disabled={bulkBusy || bulkNeedsRefresh || fileMutationBusy || loading} onclick={(event) => retryBulk(event.currentTarget)}>Retry failed items</Button>{/if}
+                </div>{/if}
+              </section>
+            {/if}
             {#if unresolvedUploadId}<Alert.Root variant="destructive"><Alert.Title>Upload status needs checking</Alert.Title><Alert.Description><p>{unresolvedUploadName} may have been saved. Check its status before uploading it again.</p><div class="mt-2 flex flex-wrap gap-2"><Button variant="outline" size="sm" onclick={reconcileUpload} disabled={transferBusy}>Check upload status</Button>{#if unresolvedCancel}<Button variant="outline" size="sm" onclick={retryCancel} disabled={transferBusy}>Retry cancellation</Button>{/if}</div></Alert.Description></Alert.Root>{/if}
             {#if (uploadBatchBusy || uploadReportVisible) && (uploadBatchStatus || uploadResults.length)}
               <section class="upload-batch-report" aria-label="Upload results">
@@ -1766,26 +1866,29 @@
                     </div>
                   {/if}
                 {/if}
-                {#if !uploadBatchBusy && uploadReportVisible && uploadResults.length}
-                  <p class="upload-batch-destination">To {uploadBatchDestination}</p>
-                  <details open={uploadResultsExpanded} ontoggle={(event) => uploadResultsExpanded = event.currentTarget.open}>
-                    <summary><span class="upload-results-summary">{#if uploadComplete}<CheckIcon aria-hidden="true" /><span class="sr-only" role="status">Upload complete.{' '}</span>{/if}<span>Results for {uploadResults.length} {uploadResults.length === 1 ? 'item' : 'items'}</span></span></summary>
-                    <ul>{#each uploadResults as result, index (index)}<li data-upload-result={result.path}><span class="upload-result-path">{result.path}</span><span>{uploadResultLabel(result)}</span></li>{/each}</ul>
-                  </details>
+                {#if !uploadBatchBusy && uploadReportVisible}
+                  {#if uploadComplete}
+                    <div class="action-feedback"><p role="status"><CheckIcon aria-hidden="true" /><span>{uploadSuccessMessage()}</span></p><Button variant="ghost" size="icon" aria-label="Dismiss results" title="Dismiss results" onclick={() => dismissUploadReport()}><XIcon /></Button></div>
+                  {:else}
+                    <div class="action-feedback-heading"><p role="status">{batchSaved + batchFoldersCreated} of {uploadResults.length} items added{#if uploadResults.some((result) => result.status === 'unknown')}; {uploadResults.filter((result) => result.status === 'unknown').length} unconfirmed{/if}</p>{#if !unresolvedUploadId && uploadReportDismissible(uploadResults)}<Button variant="ghost" size="icon" aria-label="Dismiss results" title="Dismiss results" onclick={() => dismissUploadReport()}><XIcon /></Button>{/if}</div>
+                    {#if uploadResults.length}<details open={uploadResultsExpanded} ontoggle={(event) => uploadResultsExpanded = event.currentTarget.open}>
+                      <summary>Results for {uploadResults.length} {uploadResults.length === 1 ? 'item' : 'items'}</summary>
+                      <ul>{#each uploadResults.filter((result) => !compactUnresolvedUpload || (result.status !== 'saved' && result.status !== 'created')) as result, index (index)}<li data-upload-result={result.path}><span class="upload-result-path">{result.path}</span><span>{uploadResultLabel(result)}</span>{#if result.status === 'unknown' && result.kind === 'folder'}<Button variant="outline" size="sm" onclick={() => inspectUploadDestination(result)}>Inspect destination</Button>{#if result.inspectionError}<span role="alert">{result.inspectionError}</span>{/if}{/if}</li>{/each}</ul>
+                    </details>{/if}
+                  {/if}
                 {/if}
-                {#if !uploadBatchBusy && !unresolvedUploadId}<Button variant="ghost" size="sm" class="justify-self-start" onclick={() => dismissUploadReport()}>Dismiss results</Button>{/if}
               </section>
             {/if}
         {#each previousUploadReports as report (report.id)}
-          <section class="upload-batch-report" aria-label="Previous upload results">
+          <section class="upload-batch-report" aria-label="Unconfirmed folder upload">
             <p class="upload-batch-destination">To {report.destination}</p>
             {#if report.notice}<p class="upload-feedback">{report.notice}</p>{/if}
             {#if report.status && !(report.results.length && report.results.every((result) => result.status === 'saved' || result.status === 'created'))}<p class="upload-batch-status">{report.status}</p>{/if}
             {#if report.results.length}<details open={report.expanded} ontoggle={(event) => report.expanded = event.currentTarget.open}>
-              <summary>Results for {report.results.length} {report.results.length === 1 ? 'item' : 'items'}</summary>
-              <ul>{#each report.results as result, index (index)}<li data-upload-result={result.path}><span class="upload-result-path">{result.path}</span><span>{uploadResultLabel(result, false)}</span></li>{/each}</ul>
+              <summary>{report.results.filter((result) => result.status === 'unknown').length} folders need checking</summary>
+              <ul>{#each report.results.filter((result) => result.status === 'unknown') as result, index (index)}<li data-upload-result={result.path}><span class="upload-result-path">{result.path}</span><span>{uploadResultLabel(result, false)}</span>{#if result.status === 'unknown' && result.kind === 'folder'}<Button variant="outline" size="sm" onclick={() => inspectUploadDestination(result)}>Inspect destination</Button>{#if result.inspectionError}<span role="alert">{result.inspectionError}</span>{/if}{/if}</li>{/each}</ul>
             </details>{/if}
-            <Button variant="ghost" size="sm" class="justify-self-start" onclick={() => dismissUploadReport(report.id)}>Dismiss results</Button>
+            {#if uploadReportDismissible(report.results)}<Button variant="ghost" size="icon" aria-label="Dismiss checked results" title="Dismiss checked results" onclick={() => dismissUploadReport(report.id)}><XIcon /></Button>{/if}
           </section>
         {/each}
         {#if accountView}
@@ -1799,9 +1902,9 @@
         {:else if settingsView && user.role === 'administrator'}
           <section class="settings-content">
             <h1 id="settings-title" tabindex="-1">Settings</h1>
-            <nav class="settings-tabs" aria-label="Settings"><Button variant="ghost" class={settingsTab === 'accounts' ? 'active' : ''} aria-current={settingsTab === 'accounts' ? 'page' : undefined} onclick={() => settingsTab = 'accounts'}>Accounts</Button><Button variant="ghost" class={settingsTab === 'instance' ? 'active' : ''} aria-current={settingsTab === 'instance' ? 'page' : undefined} onclick={() => settingsTab = 'instance'}>Instance</Button></nav>
+            <nav class="settings-tabs" aria-label="Settings"><Button variant="ghost" class={settingsTab === 'accounts' ? 'active' : ''} aria-current={settingsTab === 'accounts' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'accounts'; }}>Accounts</Button><Button variant="ghost" class={settingsTab === 'instance' ? 'active' : ''} aria-current={settingsTab === 'instance' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'instance'; }}>Instance</Button></nav>
             {#if settingsTab === 'accounts'}
-              <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files.</p></div><div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={accountsLoading || accountBusy} onclick={loadAccounts}>Refresh</Button><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
+              <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files.</p></div><div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={accountsLoading || accountBusy} onclick={() => { clearCompletedFeedback(); void loadAccounts(); }}>Refresh</Button><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
                 {#if accountsLoading}<p role="status">Loading accounts…</p>{:else if accountsError}<p role="alert">{accountsError}</p>{:else if accounts.length === 0}<p>No accounts to show.</p>{/if}
                 <div class="account-list">{#each accounts as account (account.account_id)}
                   <div class="account-row">
@@ -1821,11 +1924,11 @@
               </section>
               {#if accountNotice && !createAccountOpen && !resetId && !disableTarget && !authorityTarget}<p role="status" class="form-notice">{accountNotice}</p>{/if}
             {:else}
-              <section class="settings-section"><h2>Instance</h2><p class="section-description">The instance name appears for everyone, including on sign in.</p><form class="settings-form grid gap-3" onsubmit={saveInstance}><Label for="instance-name">Instance name</Label><Input id="instance-name" bind:value={instanceDraft} maxlength={40} disabled={instanceBusy || instanceLoading} required /><Button type="submit" class="justify-self-start mt-2" disabled={instanceBusy || instanceLoading || !instanceDraft.trim()}>{instanceBusy ? 'Saving…' : 'Save changes'}</Button></form>{#if instanceError}<p class="form-notice" role="alert">{instanceError}</p><Button variant="link" disabled={instanceLoading} onclick={loadInstance}>Reload instance name</Button>{/if}{#if instanceNotice}<p class="form-notice" role="status">{instanceNotice}</p>{/if}</section>
+              <section class="settings-section"><h2>Instance</h2><p class="section-description">The instance name appears for everyone, including on sign in.</p><form class="settings-form grid gap-3" onsubmit={saveInstance}><Label for="instance-name">Instance name</Label><Input id="instance-name" bind:value={instanceDraft} maxlength={40} disabled={instanceBusy || instanceLoading} required /><Button type="submit" class="justify-self-start mt-2" disabled={instanceBusy || instanceLoading || !instanceDraft.trim()}>{instanceBusy ? 'Saving…' : 'Save changes'}</Button></form>{#if instanceError}<p class="form-notice" role="alert">{instanceError}</p><Button variant="link" disabled={instanceLoading} onclick={() => { clearCompletedFeedback(); void loadInstance(); }}>Reload instance name</Button>{/if}{#if instanceNotice}<p class="form-notice" role="status">{instanceNotice}</p>{/if}</section>
             {/if}
           </section>
         {:else if showTrash}
-            <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h1 id="trash-heading" tabindex="-1">Trash</h1><p class="text-sm">Restore a parent folder before its children. Permanent removal is not available yet.</p><Button variant="outline" size="sm" disabled={trashLoading || trashBusy} onclick={loadTrash}>Refresh trash</Button>{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore</Button></li>{/each}</ul>{/if}</section>
+            <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h1 id="trash-heading" tabindex="-1">Trash</h1><p class="text-sm">Restore a parent folder before its children. Permanent removal is not available yet.</p><Button variant="outline" size="sm" disabled={trashLoading || trashBusy} onclick={refreshWorkspace}>Refresh trash</Button>{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore</Button></li>{/each}</ul>{/if}</section>
 
         {:else}
           <section class="files-content" aria-labelledby="folder-title">
@@ -1872,7 +1975,7 @@
                   <Button id="choose-folder" variant="outline" type="button" aria-describedby="folder-upload-help" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onclick={() => document.getElementById('upload-folder')?.click()}>Choose folder</Button>
                 {/if}
               </div>
-              <Button variant="outline" disabled={loading || bulkBusy} onclick={() => bulkNeedsRefresh ? reconcileBulk() : refresh()} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
+              <Button variant="outline" disabled={loading || bulkBusy} onclick={refreshWorkspace} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
               <div class="folder-sort">
                 <label for="folder-sort">Sort files by</label>
                 <select id="folder-sort" value={folderSort} disabled={bulkBusy || bulkNeedsRefresh} onchange={changeFolderSort}>
@@ -1903,19 +2006,6 @@
             {#if dropError}<p role="alert">{dropError}</p>{/if}
             {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading || bulkBusy}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading || bulkBusy}>Next page</Button>{/if}</div>{/if}
             <p class="list-summary">{loading ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
-            {/if}
-            {#if bulkReport}
-              <section class="bulk-results" aria-labelledby="bulk-results-heading" aria-busy={bulkBusy}>
-                <h2 id="bulk-results-heading">{bulkReport.action === 'move' ? 'Move results' : 'Trash results'}</h2>
-                <p role="status">{bulkReport.results.filter((result) => result.status === 'succeeded').length} of {bulkReport.results.length} succeeded{bulkBusy ? '. Working…' : '.'}</p>
-                <ul>{#each bulkReport.results as result (result.entry.id)}<li><strong>{result.entry.name}</strong><span>{result.location}</span><span>{result.message}</span></li>{/each}</ul>
-                {#if bulkError}<p role="alert">{bulkError}</p>{/if}
-                <div class="flex flex-wrap gap-2">
-                  {#if bulkNeedsRefresh}<Button variant="outline" disabled={bulkBusy} onclick={reconcileBulk}>Refresh before retry</Button>{/if}
-                  {#if bulkReport.results.some((result) => result.status === 'failed')}<Button variant="outline" disabled={bulkBusy || bulkNeedsRefresh || fileMutationBusy || loading} onclick={(event) => retryBulk(event.currentTarget)}>Retry failed items</Button>{/if}
-                  <Button variant="ghost" disabled={bulkBusy} onclick={() => { const uncertain = bulkNeedsRefresh; bulkReport = null; bulkError = ''; bulkNeedsRefresh = false; if (uncertain) { entries = []; moveNeedsRefresh = true; void refresh(); } }}>Dismiss results</Button>
-                </div>
-              </section>
             {/if}
             {#if notice}<Alert.Root role="status" class="workspace-notice"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
@@ -2020,11 +2110,15 @@
   .upload-byte-progress > span { display: block; height: 100%; background: var(--primary); transition: width 150ms linear; }
   @media (prefers-reduced-motion: reduce) { .upload-byte-progress > span { transition: none; } }
   .upload-batch-report summary { cursor: pointer; font-size: var(--type-ui); }
-  .upload-batch-report li { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-block: 8px; font-size: var(--type-ui); }
+  .upload-batch-report li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-block: 8px; font-size: var(--type-ui); }
   .upload-batch-report li > span:last-child { flex-shrink: 0; }
   .upload-feedback, .upload-batch-status, .upload-result-path { overflow-wrap: anywhere; min-width: 0; }
-  .upload-results-summary { display: inline-flex; align-items: center; gap: 7px; vertical-align: middle; }
-  .upload-results-summary :global(svg) { width: var(--icon-small); height: var(--icon-small); color: var(--primary); }
+  .action-feedback { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; font-size: var(--type-ui); }
+  .action-feedback p { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+  .action-feedback p :global(svg) { width: var(--icon-small); height: var(--icon-small); flex-shrink: 0; color: var(--primary); }
+  .action-feedback-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .action-feedback-heading h2 { margin: 0; }
+  .workspace-feedback { margin-block: 12px; }
   .file-drop-region { border-radius: var(--radius-lg); }
   .file-drop-region[data-drop-active="true"] { outline: 2px solid var(--primary); outline-offset: -2px; }
   :global(.drop-active) { border-radius: var(--radius-lg); background: var(--accent); outline: 2px solid var(--primary); outline-offset: -2px; }

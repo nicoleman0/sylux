@@ -53,7 +53,7 @@ test('file moves use a nested destination and explain collisions on narrow scree
   backend.setFailure(null);
   await dialog.getByRole('button', { name: 'Move here', exact: true }).click();
   await expect(dialog).toBeHidden();
-  await expect(page.getByRole('status')).toContainText('notes.bin moved to Nested');
+  await expect(page.getByRole('status')).toContainText('Moved to Nested');
   await expect(page.getByRole('article').filter({ hasText: 'notes.bin' })).toHaveCount(0);
   expect(backend.moves).toEqual([
     { id: 'file', parent: 'nested', etag: '"file:1"' },
@@ -124,7 +124,7 @@ test('internal dragging moves a file into a folder with its current ETag', async
   const backend = await installMoveBackend(page);
   await dragEntry(page, 'notes.bin', 'Destination');
   await expect.poll(() => backend.moves).toEqual([{ id: 'file', parent: 'destination', etag: '"file:1"' }]);
-  await expect(page.getByRole('status').filter({ hasText: 'notes.bin moved to Destination' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Moved to Destination' })).toBeVisible();
   await expect(page.getByRole('article', { name: 'notes.bin', exact: true })).toHaveCount(0);
 });
 
@@ -170,6 +170,29 @@ test('an uncertain drag move blocks retry until files are refreshed', async ({ p
   await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
   await expect(source).toHaveAttribute('draggable', 'true');
   await dragEntry(page, 'notes.bin', 'Destination');
-  await expect(page.getByRole('status').filter({ hasText: 'notes.bin moved to Destination' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Moved to Destination' })).toBeVisible();
   expect(backend.moves).toHaveLength(2);
 });
+
+for (const boundary of ['dismiss', 'navigation']) {
+  test(`a delayed move revalidation failure does not resurrect feedback after ${boundary}`, async ({ page }) => {
+    await installMoveBackend(page);
+    await page.getByRole('button', { name: 'Options for notes.bin', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Move', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: 'Destination', exact: true }).click();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let done!: () => void;
+    const finished = new Promise<void>(resolve => { done = resolve; });
+    await page.route('**/folders/children?*', async route => { await held; await route.abort('failed'); done(); });
+    await dialog.getByRole('button', { name: 'Move here', exact: true }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Moved to Destination' })).toBeVisible();
+    if (boundary === 'dismiss') {
+      await page.getByRole('button', { name: 'Dismiss notification', exact: true }).focus();
+      await page.keyboard.press('Enter');
+    } else await page.getByRole('button', { name: 'Account', exact: true }).click();
+    release(); await finished;
+    await expect(page.locator('.workspace-feedback')).toHaveCount(0);
+  });
+}
