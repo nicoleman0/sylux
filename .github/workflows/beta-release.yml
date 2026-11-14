@@ -1,4 +1,4 @@
-name: PDF deadline diagnostic (no publication)
+name: PDF cold dependency diagnostic (no publication)
 
 on:
   workflow_dispatch:
@@ -9,15 +9,15 @@ on:
       publish:
         default: false
         type: boolean
-
 permissions:
   contents: read
-
 jobs:
   diagnose:
     if: ${{ !inputs.publish && github.ref == 'refs/heads/codex/beta5-pdf-diagnostic' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      DEBUG: vite:deps
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -32,16 +32,38 @@ jobs:
           npm install --global npm@11.19.1
           npm --prefix web ci
           npm --prefix web exec -- playwright install --with-deps chromium --only-shell
-      - name: Repeat instrumented deadline case
-        run: npm --prefix web run smoke -- --grep 'PDF zero-width stops' --repeat-each 100 > pdf-deadline.log 2>&1
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('web/playwright.config.ts')
+          p.write_text(p.read_text().replace('webServer: {', "webServer: { stdout: 'pipe', stderr: 'pipe',"))
+          PY
+      - name: Capture cold baseline
+        run: |
+          rm -rf web/node_modules/.vite
+          mkdir -p diagnostic-results
+          if npm --prefix web run smoke -- --grep 'PDF zero-width stops' --output ../diagnostic-results/baseline > diagnostic-results/baseline.log 2>&1; then
+            echo 'Baseline passed; inspect reload evidence' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Baseline failed; retained evidence' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Validate explicit prebundling with five cold starts
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('web/vite.config.ts')
+          text=p.read_text()
+          assert 'optimizeDeps:' not in text
+          p.write_text(text.replace('  plugins:', "  optimizeDeps: { include: ['pdfjs-dist'] },\n  plugins:"))
+          PY
+          for sample in 1 2 3 4 5; do
+            rm -rf web/node_modules/.vite
+            npm --prefix web run smoke -- --grep 'PDF zero-width stops' --output "../diagnostic-results/candidate-$sample" > "diagnostic-results/candidate-$sample.log" 2>&1
+          done
       - name: Retain diagnostic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pdf-deadline-diagnostic
-          path: |
-            pdf-deadline.log
-            web/test-results/
-            evidence/poc/p6/smoke-results.json
+          name: pdf-cold-dependency-diagnostic
+          path: diagnostic-results/
           if-no-files-found: error
           retention-days: 7

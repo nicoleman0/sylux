@@ -3,6 +3,32 @@ import { expect, test, type Page } from '@playwright/test';
 type Mode = 'ready' | 'page-stall' | 'render-stall' | 'render-error' | 'runtime-error';
 type PdfMock = { mode: Mode; pages: number; renders: number; cancelled: number; cleaned: number; destroyed: number; active: number; peak: number; releasePage?: () => void };
 
+const browserEvents = new WeakMap<Page, unknown[]>();
+
+test.beforeEach(async ({ page }) => {
+  const events: unknown[] = [];
+  browserEvents.set(page, events);
+  page.on('framenavigated', frame => {
+    if (frame === page.mainFrame()) events.push({ event: 'navigation', at: Date.now(), url: frame.url() });
+  });
+  page.on('console', message => {
+    if (message.text().startsWith('[vite]') || message.text().startsWith('PDF diagnostic')) {
+      events.push({ event: 'console', at: Date.now(), type: message.type(), text: message.text() });
+    }
+  });
+  page.on('websocket', socket => {
+    socket.on('framereceived', ({ payload }) => {
+      if (typeof payload !== 'string' || !payload.startsWith('{')) return;
+      const message = JSON.parse(payload);
+      if (message.type === 'full-reload') events.push({ event: 'vite-full-reload', at: Date.now(), path: message.path });
+    });
+  });
+  await page.addInitScript(() => {
+    console.info('PDF diagnostic document', JSON.stringify({ timeOrigin: performance.timeOrigin, navigation: performance.getEntriesByType('navigation').map(entry => (entry as PerformanceNavigationTiming).type) }));
+    window.addEventListener('beforeunload', () => console.info('PDF diagnostic beforeunload', JSON.stringify({ state: (window as any).pdfMock, events: (window as any).deadlineEvents })));
+  });
+});
+
 async function mockState(page: Page) {
   return page.evaluate(() => (window as unknown as { pdfMock: PdfMock }).pdfMock);
 }
@@ -111,6 +137,7 @@ for (const scenario of ['zero-width', 'page-stall', 'render-stall'] as const) {
   test(`PDF ${scenario} stops after the page deadline`, async ({ page }) => {
     const dialog = await openPdf(page, scenario === 'zero-width' ? 'ready' : scenario, scenario === 'zero-width');
     if (scenario === 'zero-width') expect(await dialog.locator('.pdf-page').evaluate(element => element.clientWidth)).toBe(0);
+    await new Promise(resolve => setTimeout(resolve, 1500));
     if (scenario === 'render-stall') await expect.poll(async () => (await mockState(page)).renders).toBe(1);
     await page.clock.fastForward(19_999);
     await expect(dialog.getByRole('alert')).toHaveCount(0);
@@ -254,7 +281,9 @@ for (const [mode, cause] of [['render-error', 'render failure sentinel'], ['runt
 }
 
 test.afterEach(async ({page}, testInfo) => {
-  const events = await page.evaluate(() => ({ events: (window as any).deadlineEvents, state: (window as any).pdfMock, at: performance.now(), date: Date.now(), width: document.querySelector('.pdf-page')?.clientWidth }));
+  const events = await page.evaluate(() => ({ events: (window as any).deadlineEvents, state: (window as any).pdfMock, pendingTimers: Array.from((window as any).__pwClock?.controller?._timers?.values() ?? []).filter((timer: any) => timer.delay === 20_000).map((timer: any) => ({ id: timer.id, callAt: timer.callAt, createdAt: timer.createdAt, delay: timer.delay })), at: performance.now(), date: Date.now(), width: document.querySelector('.pdf-page')?.clientWidth }));
+  await testInfo.attach('browser-events', { body: JSON.stringify(browserEvents.get(page), null, 2), contentType: 'application/json' });
+  console.log(JSON.stringify({ browser: browserEvents.get(page) }));
   await testInfo.attach('deadline-events', {body: JSON.stringify(events, null, 2), contentType: 'application/json'});
   console.log(JSON.stringify({ test: testInfo.repeatEachIndex, status: testInfo.status, events }));
 });
