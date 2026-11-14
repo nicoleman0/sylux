@@ -139,8 +139,7 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
 
   await page.locator('#upload-file').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
   await expect(page.getByRole('article').filter({ hasText: 'fixture.txt' })).toBeVisible({ timeout: 8000 });
-  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeAttached();
-  await expect(page.locator('.upload-batch-report summary')).toHaveText('Upload complete. Results for 1 item');
+  await expect(page.getByRole('region', { name: 'Upload results', exact: true }).getByRole('status')).toHaveText('Uploaded to Files');
   await expect(page.locator('.upload-status')).toHaveCount(0);
   await expect(page.locator('.upload-batch-status')).toHaveCount(0);
   await expect(page.locator('.workspace-notice')).toHaveCount(0);
@@ -1092,11 +1091,10 @@ for (const width of [1280, 390]) {
     await login(page);
     const longName = `${'long-name-'.repeat(18)}.txt`;
     await page.getByLabel('Choose files to upload').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-    await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeAttached();
+    await expect(page.getByRole('region', { name: 'Upload results', exact: true }).getByRole('status')).toHaveText('Uploaded to Files');
     await expect(page.locator('.upload-status')).toHaveCount(0);
-    await page.locator('.upload-batch-report summary').click();
-    await expect(page.locator('[data-upload-result]')).toContainText(longName);
-    await expect(page.locator('[data-upload-result]')).toContainText('Saved');
+    await expect(page.locator('[data-upload-result]')).toHaveCount(0);
+    await expect(page.getByRole('article', { name: longName, exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
