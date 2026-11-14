@@ -145,12 +145,20 @@ test('PDF canvas layout and scrollbar width settle after successful rendering', 
   await page.clock.runFor(1000);
   expect((await mockState(page)).renders).toBe(rendered);
   await page.setViewportSize({ width: 900, height: 800 });
+  // Native CSS transitions run independently of Playwright's mocked clock.
+  await dialog.evaluate(async element => {
+    await Promise.all(element.getAnimations().map(animation => animation.finished));
+  });
+  const container = dialog.locator('.pdf-page');
+  const fittedWidth = await container.evaluate(element => `${Math.max(1, element.clientWidth - 16)}px`);
   await expect.poll(async () => {
     await page.clock.runFor(16);
-    return (await mockState(page)).renders;
-  }).toBeGreaterThan(rendered);
+    return dialog.locator('canvas').evaluate(element => element.style.width);
+  }).toBe(fittedWidth);
+  await expect(container).toHaveAttribute('aria-busy', 'false');
   await expect(dialog.locator('canvas')).toBeVisible();
   const resized = (await mockState(page)).renders;
+  expect(resized).toBeGreaterThan(rendered);
   await page.clock.runFor(1000);
   expect((await mockState(page)).renders).toBe(resized);
   expect((await mockState(page)).pages).toBe(1);
