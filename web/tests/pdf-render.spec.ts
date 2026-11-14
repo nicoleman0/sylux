@@ -29,6 +29,7 @@ async function openPdf(page: Page, mode: Mode, zeroWidth = false) {
           cleanup: () => state.cleaned++,
           render: ({ canvas }) => {
             state.renders++;
+            window.deadlineEvents?.push({ event: 'render', at: performance.now(), date: Date.now(), width: canvas.parentElement.clientWidth });
             state.active++;
             state.peak = Math.max(state.peak, state.active);
             let reject;
@@ -44,6 +45,7 @@ async function openPdf(page: Page, mode: Mode, zeroWidth = false) {
         };
         return { promise: Promise.resolve({ numPages: 3, getPage: () => {
           state.pages++;
+          window.deadlineEvents?.push({ event: 'page', at: performance.now(), date: Date.now(), width: document.querySelector('.pdf-page')?.clientWidth });
           return state.mode === 'page-stall' ? new Promise(resolve => { state.releasePage = () => resolve(page); }) : Promise.resolve(page);
         } }), destroy: async () => { state.destroyed++; } };
       }
@@ -63,6 +65,43 @@ async function openPdf(page: Page, mode: Mode, zeroWidth = false) {
   await expect(preview).toBeVisible();
   await page.clock.install();
   await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await page.evaluate(() => {
+    const events: unknown[] = [];
+    (window as any).deadlineEvents = events;
+    const timers = new Map<number, number>();
+    const nativeSetTimeout = window.setTimeout;
+    const nativeClearTimeout = window.clearTimeout;
+    window.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (delay !== 20_000 || typeof callback !== 'function') return nativeSetTimeout(callback, delay, ...args);
+      const at = performance.now();
+      let id: number;
+      id = nativeSetTimeout((...callbackArgs: unknown[]) => {
+        if (delay === 20_000) events.push({ event: 'fire', id, at: performance.now(), date: Date.now() });
+        if (typeof callback === 'function') callback(...callbackArgs);
+      }, delay, ...args);
+      if (delay === 20_000) {
+        timers.set(id, at);
+        events.push({ event: 'timer', id, at, date: Date.now(), delay });
+      }
+      return id;
+    }) as typeof window.setTimeout;
+    window.clearTimeout = id => {
+      if (id !== undefined && timers.has(id)) events.push({ event: 'clear', id, at: performance.now(), date: Date.now() });
+      nativeClearTimeout(id);
+    };
+    const NativeResizeObserver = window.ResizeObserver;
+    window.ResizeObserver = class extends NativeResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        super((entries, observer) => {
+          for (const entry of entries) if ((entry.target as HTMLElement).classList.contains('pdf-page')) {
+            events.push({ event: 'resize', at: performance.now(), date: Date.now(), width: (entry.target as HTMLElement).clientWidth });
+          }
+          callback(entries, observer);
+        });
+      }
+    };
+    events.push({ event: 'beforeClick', at: performance.now(), date: Date.now() });
+  });
   await preview.click();
   await expect.poll(async () => (await mockState(page)).pages).toBe(1);
   return page.getByRole('dialog');
@@ -213,3 +252,9 @@ for (const [mode, cause] of [['render-error', 'render failure sentinel'], ['runt
     expect(JSON.stringify(diagnostics)).not.toContain('mock document');
   });
 }
+
+test.afterEach(async ({page}, testInfo) => {
+  const events = await page.evaluate(() => ({ events: (window as any).deadlineEvents, state: (window as any).pdfMock, at: performance.now(), date: Date.now(), width: document.querySelector('.pdf-page')?.clientWidth }));
+  await testInfo.attach('deadline-events', {body: JSON.stringify(events, null, 2), contentType: 'application/json'});
+  console.log(JSON.stringify({ test: testInfo.repeatEachIndex, status: testInfo.status, events }));
+});
