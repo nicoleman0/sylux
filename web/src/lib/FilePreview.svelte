@@ -5,6 +5,8 @@
   import type { Entry } from './listing';
   import { loadPreview, type Preview } from './preview';
   import { getPdfPreviewCompatibilityError } from './pdf-compatibility';
+  import XIcon from '@lucide/svelte/icons/x';
+  import DownloadIcon from '@lucide/svelte/icons/download';
 
   let { entry, url, client, onclose, ondownload }: {
     entry: Entry | null;
@@ -17,6 +19,7 @@
   let imageUrl = $state('');
   let error = $state('');
   let attempt = $state(0);
+  const isPdf = $derived(entry?.name.split('.').at(-1)?.toLowerCase() === 'pdf');
 
   $effect(() => {
     const target = entry;
@@ -44,12 +47,21 @@
 </script>
 
 <Dialog.Root open={!!entry} onOpenChange={(open) => { if (!open) onclose(); }}>
-  <Dialog.Content class="!max-w-[calc(100vw-1rem)] w-[calc(100vw-1rem)] h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] overflow-hidden flex flex-col gap-4 p-4 sm:!max-w-[min(92vw,1400px)] sm:w-[92vw] sm:h-[88dvh] sm:max-h-[88dvh] sm:gap-6 sm:p-6" showCloseButton={false} onCloseAutoFocus={(event) => event.preventDefault()}>
+  <Dialog.Content class={isPdf ? 'pdf-reader-shell !max-w-none !w-full !h-[100dvh] !max-h-none !rounded-none !gap-0 !p-0 !ring-0 overflow-hidden flex flex-col' : '!max-w-[calc(100vw-1rem)] w-[calc(100vw-1rem)] h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] overflow-hidden flex flex-col gap-4 p-4 sm:!max-w-[min(92vw,1400px)] sm:w-[92vw] sm:h-[88dvh] sm:max-h-[88dvh] sm:gap-6 sm:p-6'} showCloseButton={false} onCloseAutoFocus={(event) => event.preventDefault()}>
+    {#if isPdf}
+      <header class="reader-header">
+        <Button variant="ghost" size="icon" aria-label="Close preview" title="Close preview" onclick={onclose}><XIcon /></Button>
+        <Dialog.Title class="min-w-0 flex-1 truncate text-sm" title={entry?.name}><span class="sr-only">Preview </span>{entry?.name}</Dialog.Title>
+        <Dialog.Description class="sr-only">PDF reader</Dialog.Description>
+        <Button variant="ghost" size="icon" aria-label="Download file" title="Download file" onclick={ondownload}><DownloadIcon /></Button>
+      </header>
+    {:else}
     <Dialog.Header class="shrink-0">
       <Dialog.Title class="break-all">Preview {entry?.name}</Dialog.Title>
       <Dialog.Description>Read-only preview.</Dialog.Description>
     </Dialog.Header>
-    <div class="min-h-0 min-w-0 flex-1 overflow-auto" aria-busy={!preview && !error}>
+    {/if}
+    <div class={isPdf ? 'reader-body min-h-0 min-w-0 flex-1 overflow-hidden' : 'min-h-0 min-w-0 flex-1 overflow-auto'} aria-busy={!preview && !error}>
       {#if error}
         <div class="grid gap-3"><p role="alert">{error}</p><Button variant="outline" class="justify-self-start" onclick={() => attempt++}>Retry preview</Button></div>
       {:else if preview?.kind === 'text'}
@@ -75,6 +87,12 @@
         <p role="status">Loading preview…</p>
       {/if}
     </div>
-    <Dialog.Footer class="shrink-0"><Button variant="outline" onclick={onclose}>Close preview</Button><Button onclick={ondownload}>Download file</Button></Dialog.Footer>
+    {#if !isPdf}<Dialog.Footer class="shrink-0"><Button variant="outline" onclick={onclose}>Close preview</Button><Button onclick={ondownload}>Download file</Button></Dialog.Footer>{/if}
   </Dialog.Content>
 </Dialog.Root>
+
+<style>
+  .reader-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.75rem; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .reader-body > :global(p), .reader-body > :global(.grid) { margin: 1rem; }
+  :global(.pdf-reader-shell[data-state]), :global(.pdf-reader-shell) { animation: none; }
+</style>

@@ -7,7 +7,7 @@ import { webNoticesPlugin } from '../tools/collect-web-notices.mjs';
 
 export default defineConfig({
   // Prebundle the lazy PDF import before it can reload an active preview.
-  optimizeDeps: { include: ['pdfjs-dist'] },
+  optimizeDeps: { include: ['pdfjs-dist', 'pdfjs-dist/web/pdf_viewer.mjs'] },
   plugins: [tailwindcss(), svelte(), webNoticesPlugin()],
   resolve: {
     alias: { $lib: path.resolve('./src/lib') },
