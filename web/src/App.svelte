@@ -241,6 +241,8 @@
           folderPath = path.items.map((folder, index) => index === 0 ? { ...folder, name: 'Files' } : folder);
           currentFolder = folderPath.at(-1)!;
         }
+        document.getElementById('folder-title')?.focus({ preventScroll: true });
+        restorationPending = false;
         if (context) { pageCursors = [...context.cursors]; pageIndex = context.page; }
         else { pageCursors = [null]; pageIndex = 0; }
         searchInput = location.query; searchQuery = location.query;
@@ -264,9 +266,14 @@
         if (isCurrent()) {
           await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
           if (isCurrent()) {
-            document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title')?.focus({ preventScroll: true });
-            const samePage = context && (searchQuery ? context.searchPage === searchPageIndex : context.page === pageIndex);
-            window.scrollTo(0, samePage ? context.scroll : 0);
+            const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title');
+            const active = document.activeElement;
+            const interacting = active instanceof HTMLElement && ((!!active.closest('.files-content') && active.matches('input, textarea, select, [contenteditable]')) || !!active.closest('[role=dialog][data-open]'));
+            if (!interacting) {
+              heading?.focus({ preventScroll: true });
+              const samePage = context && (searchQuery ? context.searchPage === searchPageIndex : context.page === pageIndex);
+              window.scrollTo(0, samePage ? context.scroll : 0);
+            }
             if (!restorationFailed) { restorationPending = false; historyReady = true; saveNavigation(); }
           }
         }
@@ -680,6 +687,7 @@
 
   function searchChanged(): void {
     if (bulkBusy || restorationPending) return;
+    if (loading || entriesFolderId !== currentFolder.id) browseDirty = true;
     navigationRequest++; historyReady = true; loading = false; listingRequest++;
 
     clearCompletedFeedback();

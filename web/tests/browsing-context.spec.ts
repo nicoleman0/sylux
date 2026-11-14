@@ -366,3 +366,56 @@ test('Files remains populated after restoring Account through browser history', 
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Preview Match 0.txt', exact: true })).toBeVisible();
 });
+
+test('search entered while the initial listing loads keeps its query and focus', async ({ page }) => {
+  await backend(page);
+  let release!: () => void;
+  let requested!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const pending = new Promise<void>(resolve => { requested = resolve; });
+  await page.route('**/folders/root/children*', async route => {
+    requested(); await gate;
+    await route.fulfill({ json: { items: [file(0)], next_cursor: null, has_more: false } });
+  });
+  await page.goto('/');
+  await page.getByLabel('Account name', { exact: true }).fill('owner');
+  await page.getByLabel('Password', { exact: true }).fill('password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await pending;
+  const search = page.getByLabel('Search files and folders');
+  await expect(search).toBeEnabled();
+  await search.focus(); await page.keyboard.type('Match');
+  await expect(page.getByRole('button', { name: 'Preview Match 0.txt', exact: true })).toBeVisible();
+  const response = page.waitForResponse('**/folders/root/children*');
+  release(); await response;
+  await expect(search).toHaveValue('Match');
+  await expect(search).toBeFocused();
+  await expect(page.getByRole('region', { name: 'Search results', exact: true })).toBeVisible();
+});
+
+test('clearing search after interrupting a folder load fetches that folder instead of showing prior rows', async ({ page }) => {
+  await backend(page); await page.goto('/'); await signIn(page);
+  let release!: () => void;
+  let requested!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const pending = new Promise<void>(resolve => { requested = resolve; });
+  let reads = 0;
+  await page.route('**/folders/projects/children*', async route => {
+    reads++;
+    const first = reads === 1;
+    if (first) { requested(); await gate; }
+    await route.fulfill({ json: { items: [{ ...file(0), id: first ? 'obsolete' : 'nested', name: first ? 'Obsolete.txt' : 'Nested.txt' }], next_cursor: null, has_more: false } });
+  });
+  await page.getByRole('button', { name: 'Open Projects', exact: true }).click();
+  await pending;
+  const search = page.getByLabel('Search files and folders');
+  await search.fill('Match');
+  await expect(page.getByRole('region', { name: 'Search results', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Clear search', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Preview Nested.txt', exact: true })).toBeVisible();
+  const response = page.waitForResponse('**/folders/projects/children*');
+  release(); await response;
+  await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview Nested.txt', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview Obsolete.txt', exact: true })).toHaveCount(0);
+});
