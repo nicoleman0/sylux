@@ -98,10 +98,18 @@ test('reload restores signed-in owner page after authentication; copied URL star
   await expect(page.getByRole('button', { name: 'Preview Match 100.txt', exact: true })).toBeVisible();
   await expect(page.getByLabel('Sort files by', { exact: true })).toHaveValue('modified_desc');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(1400);
-  await page.evaluate(() => history.replaceState(null, '', location.href));
-  await page.reload(); await signIn(page);
-  await expect(page.getByRole('button', { name: 'Preview Match 0.txt', exact: true })).toBeVisible();
-  expect(fixture.requests.at(-1)?.searchParams.get('cursor')).toBeNull();
+  const copiedPage = await page.context().newPage();
+  const copiedFixture = await backend(copiedPage);
+  await copiedPage.goto(page.url());
+  expect(await copiedPage.evaluate(() => history.state)).toBeNull();
+  await signIn(copiedPage);
+  await expect(copiedPage.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
+  await expect(copiedPage.getByRole('button', { name: 'Preview Match 0.txt', exact: true })).toBeVisible();
+  await expect(copiedPage.getByLabel('Search files and folders')).toHaveValue('');
+  await expect(copiedPage.getByLabel('Sort files by', { exact: true })).toHaveValue('modified_desc');
+  expect(copiedFixture.requests.at(-1)?.searchParams.get('cursor')).toBeNull();
+  expect(copiedFixture.requests.at(-1)?.searchParams.get('sort')).toBe('modified_desc');
+  await copiedPage.close();
 });
 
 for (const status of [400, 409] as const) {
