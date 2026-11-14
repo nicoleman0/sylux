@@ -17,7 +17,7 @@
   import FolderIcon from '@lucide/svelte/icons/folder';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import CheckIcon from '@lucide/svelte/icons/check';
-  import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+  import RefreshButton from './lib/RefreshButton.svelte';
   import * as Alert from '$lib/components/ui/alert/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -201,6 +201,7 @@
   let currentFolder = $state<Folder>(emptyRoot);
   let folders = $state<Folder[]>([]);
   let entries = $state<Entry[]>([]);
+  let entriesFolderId = $state('');
   let selectedIds = $state<string[]>([]);
   let selectionAnchor: string | null = null;
 
@@ -250,7 +251,7 @@
   let folderPath = $state<Folder[]>([emptyRoot]);
   let loading = $state(false);
   let listingError = $state('');
-  let listingRequest = 0;
+  let listingRequest = $state(0);
   let folderSort = $state<FolderSort>('name_asc');
   let searchInput = $state('');
   let searchQuery = $state('');
@@ -286,6 +287,7 @@
   let dropPending = $state<{ entry: Entry; destination: Folder } | null>(null);
   let dropError = $state('');
   let moveNeedsRefresh = $state(false);
+  let moveCloseRefreshBusy = $state(false);
   const dragType = 'application/x-sylux-entry';
   const knownParents = new Map<string, string | null>();
   let trashTarget = $state<Entry | null>(null);
@@ -384,11 +386,37 @@
     document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title')?.focus();
   }
 
+  let workspaceRefreshing = $state(false);
+  let refreshSourceFolder = $state('');
+  let folderRetryBusy = $state(false);
+  let folderRetryRequest = $state(0);
+  const currentFolderRetryBusy = $derived(folderRetryBusy && folderRetryRequest === listingRequest);
+  let workspaceRefreshRequest = 0;
   async function refreshWorkspace(): Promise<void> {
+    if (showTrash) {
+      if (trashLoading || trashBusy) return;
+      clearCompletedFeedback();
+      await loadTrash();
+      return;
+    }
+    if (loading || searchLoading || bulkBusy) return;
+    const request = ++workspaceRefreshRequest;
+    const generation = sessionGeneration;
     clearCompletedFeedback();
-    if (bulkNeedsRefresh) await reconcileBulk();
-    else if (showTrash) await loadTrash();
-    else await refresh();
+    workspaceRefreshing = true; refreshSourceFolder = currentFolder.id;
+    try {
+      if (bulkNeedsRefresh) await reconcileBulk();
+      else await refresh();
+    } finally { if (generation === sessionGeneration && request === workspaceRefreshRequest) workspaceRefreshing = false; }
+  }
+
+  async function retryFolder(): Promise<void> {
+    if ((folderRetryBusy && folderRetryRequest === listingRequest) || loading) return;
+    const generation = sessionGeneration;
+    const request = listingRequest + 1;
+    folderRetryBusy = true; folderRetryRequest = request;
+    try { await refresh(); }
+    finally { if (generation === sessionGeneration && request === folderRetryRequest) folderRetryBusy = false; }
   }
 
   function uploadSuccessMessage(): string {
@@ -426,7 +454,7 @@
   }
   let unresolvedUploadResult: number | null = null;
   let replacementDecision: ((prompt: ReplacementPrompt | null) => void) | null = null;
-  const fileMutationBusy = $derived(bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || folderBusy || transferBusy || uploadBatchBusy);
+  const fileMutationBusy = $derived((workspaceRefreshing && loading) || bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || folderBusy || transferBusy || uploadBatchBusy);
 
   function restoreFocus(trigger: HTMLElement | null, fallback = 'folder-title'): void {
     if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus();
@@ -471,7 +499,7 @@
       }
       const page = await listing.children(folderId, null, folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return false;
-      entries = page.items;
+      entriesFolderId = currentFolder.id; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       moveNeedsRefresh = false;
       pageCursors = [null]; pageIndex = 0; nextCursor = page.next_cursor; hasMore = page.has_more;
@@ -525,7 +553,7 @@
     try {
       const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || request !== listingRequest || searchQuery || currentFolder.id !== folderId) return;
-      entries = page.items; nextCursor = page.next_cursor; hasMore = page.has_more; browseDirty = false;
+      entriesFolderId = currentFolder.id; entries = page.items; nextCursor = page.next_cursor; hasMore = page.has_more; browseDirty = false;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
     } catch (error) {
       if (generation !== sessionGeneration || request !== listingRequest || searchQuery || currentFolder.id !== folderId) return;
@@ -673,7 +701,7 @@
       const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || nextCursor !== cursor || requestId !== listingRequest) return;
       pageCursors = [...pageCursors.slice(0, pageIndex + 1), nextCursor];
-      pageIndex += 1; entries = page.items;
+      pageIndex += 1; entriesFolderId = currentFolder.id; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       nextCursor = page.next_cursor; hasMore = page.has_more;
       loading = false;
@@ -711,7 +739,7 @@
     try {
       const page = await listing.children(folderId, pageCursors[target], folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
-      pageIndex = target; entries = page.items;
+      pageIndex = target; entriesFolderId = currentFolder.id; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       nextCursor = page.next_cursor; hasMore = page.has_more;
       loading = false;
@@ -832,6 +860,7 @@
   function clearWorkspace(): void {
     clearSearch();
     actionNotice = ''; compactUnresolvedUpload = false;
+    workspaceRefreshing = false; workspaceRefreshRequest++; folderRetryBusy = false; moveCloseRefreshBusy = false; entriesFolderId = '';
     bulkAction = null; bulkTargets = []; bulkReport = null; bulkBusy = false; bulkNeedsRefresh = false; bulkError = '';
     navigationPaths.clear();
     controller?.abort(); controller = null;
@@ -953,7 +982,19 @@
 
   function closeMove(): void {
     if (bulkAction === 'move') { bulkAction = null; bulkTargets = []; }
-    moveRequest++; moveTarget = null; movePath = []; moveFolders = []; moveCursor = null; moveLoading = false; moveDestinationReady = false; moveError = '';
+    moveRequest++; moveCloseRefreshBusy = false; moveTarget = null; movePath = []; moveFolders = []; moveCursor = null; moveLoading = false; moveDestinationReady = false; moveError = '';
+  }
+  async function closeMoveAndRefresh(): Promise<void> {
+    if (moveCloseRefreshBusy) return;
+    const generation = sessionGeneration;
+    const request = moveRequest;
+    moveCloseRefreshBusy = true;
+    try {
+      const refreshed = await refresh();
+      if (generation !== sessionGeneration || request !== moveRequest) return;
+      if (refreshed) closeMove();
+      else moveError = 'Could not refresh files. Try again before moving this item.';
+    } finally { if (generation === sessionGeneration && request === moveRequest) moveCloseRefreshBusy = false; }
   }
   async function loadMoveFolder(path: Folder[], cursor: string | null = null): Promise<void> {
     const destination = path.at(-1);
@@ -1827,7 +1868,7 @@
                 {/if}
                 {#if bulkError}<p role="alert">{bulkError}</p>{/if}
                 {#if bulkComplete}<Button variant="ghost" size="icon" aria-label="Dismiss results" title="Dismiss results" onclick={dismissBulkReport}><XIcon /></Button>{:else}<div class="flex flex-wrap gap-2">
-                  {#if bulkNeedsRefresh}<Button variant="outline" disabled={bulkBusy} onclick={reconcileBulk}>Refresh before retry</Button>{/if}
+                  {#if bulkNeedsRefresh}<RefreshButton label="Refresh before retry" busyLabel="Checking results…" busy={bulkBusy} onclick={reconcileBulk} />{/if}
                   {#if bulkReport.results.some((result) => result.status === 'failed')}<Button variant="outline" disabled={bulkBusy || bulkNeedsRefresh || fileMutationBusy || loading} onclick={(event) => retryBulk(event.currentTarget)}>Retry failed items</Button>{/if}
                 </div>{/if}
               </section>
@@ -1904,7 +1945,7 @@
             <h1 id="settings-title" tabindex="-1">Settings</h1>
             <nav class="settings-tabs" aria-label="Settings"><Button variant="ghost" class={settingsTab === 'accounts' ? 'active' : ''} aria-current={settingsTab === 'accounts' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'accounts'; }}>Accounts</Button><Button variant="ghost" class={settingsTab === 'instance' ? 'active' : ''} aria-current={settingsTab === 'instance' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'instance'; }}>Instance</Button></nav>
             {#if settingsTab === 'accounts'}
-              <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files.</p></div><div class="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={accountsLoading || accountBusy} onclick={() => { clearCompletedFeedback(); void loadAccounts(); }}>Refresh</Button><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
+              <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files.</p></div><div class="flex flex-wrap gap-2"><RefreshButton label="Refresh" busyLabel="Refreshing…" busy={accountsLoading} disabled={accountBusy} onclick={() => { if (accountsLoading || accountBusy) return; clearCompletedFeedback(); void loadAccounts(); }} /><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
                 {#if accountsLoading}<p role="status">Loading accounts…</p>{:else if accountsError}<p role="alert">{accountsError}</p>{:else if accounts.length === 0}<p>No accounts to show.</p>{/if}
                 <div class="account-list">{#each accounts as account (account.account_id)}
                   <div class="account-row">
@@ -1924,11 +1965,11 @@
               </section>
               {#if accountNotice && !createAccountOpen && !resetId && !disableTarget && !authorityTarget}<p role="status" class="form-notice">{accountNotice}</p>{/if}
             {:else}
-              <section class="settings-section"><h2>Instance</h2><p class="section-description">The instance name appears for everyone, including on sign in.</p><form class="settings-form grid gap-3" onsubmit={saveInstance}><Label for="instance-name">Instance name</Label><Input id="instance-name" bind:value={instanceDraft} maxlength={40} disabled={instanceBusy || instanceLoading} required /><Button type="submit" class="justify-self-start mt-2" disabled={instanceBusy || instanceLoading || !instanceDraft.trim()}>{instanceBusy ? 'Saving…' : 'Save changes'}</Button></form>{#if instanceError}<p class="form-notice" role="alert">{instanceError}</p><Button variant="link" disabled={instanceLoading} onclick={() => { clearCompletedFeedback(); void loadInstance(); }}>Reload instance name</Button>{/if}{#if instanceNotice}<p class="form-notice" role="status">{instanceNotice}</p>{/if}</section>
+              <section class="settings-section"><h2>Instance</h2><p class="section-description">The instance name appears for everyone, including on sign in.</p><form class="settings-form grid gap-3" onsubmit={saveInstance}><Label for="instance-name">Instance name</Label><Input id="instance-name" bind:value={instanceDraft} maxlength={40} disabled={instanceBusy || instanceLoading} required /><Button type="submit" class="justify-self-start mt-2" disabled={instanceBusy || instanceLoading || !instanceDraft.trim()}>{instanceBusy ? 'Saving…' : 'Save changes'}</Button></form>{#if instanceError}<p class="form-notice" role="alert">{instanceError}</p>{/if}{#if instanceError || instanceLoading}<RefreshButton variant="link" label="Reload instance name" busyLabel="Reloading…" busy={instanceLoading} class="mt-2" aria-label="Reload instance name" onclick={() => { if (instanceLoading) return; clearCompletedFeedback(); void loadInstance(); }} />{/if}{#if instanceLoading}<p role="status">Reloading instance name…</p>{/if}{#if instanceNotice}<p class="form-notice" role="status">{instanceNotice}</p>{/if}</section>
             {/if}
           </section>
         {:else if showTrash}
-            <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h1 id="trash-heading" tabindex="-1">Trash</h1><p class="text-sm">Restore a parent folder before its children. Permanent removal is not available yet.</p><Button variant="outline" size="sm" disabled={trashLoading || trashBusy} onclick={refreshWorkspace}>Refresh trash</Button>{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore</Button></li>{/each}</ul>{/if}</section>
+            <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}><h1 id="trash-heading" tabindex="-1">Trash</h1><p class="text-sm">Restore a parent folder before its children. Permanent removal is not available yet.</p><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={trashBusy} aria-label="Refresh trash" onclick={() => { if (trashLoading || trashBusy) return; void refreshWorkspace(); }} />{#if trashError}<p role="alert">{trashError}</p>{/if}{#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}{#if deletedItems.length > 0}<ul>{#each deletedItems as item (item.id)}<li class="flex flex-wrap items-center justify-between gap-2 border-t py-2"><span class="break-all">{item.name} ({item.kind})<br /><span class="text-muted-foreground text-sm">Original folder: Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<br />Item reference: {item.id}{/if}</span></span><Button variant="outline" size="sm" disabled={trashBusy} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files / ${item.original_path.join(' / ')}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={() => restoreEntry(item)}>Restore</Button></li>{/each}</ul>{/if}</section>
 
         {:else}
           <section class="files-content" aria-labelledby="folder-title">
@@ -1975,7 +2016,7 @@
                   <Button id="choose-folder" variant="outline" type="button" aria-describedby="folder-upload-help" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onclick={() => document.getElementById('upload-folder')?.click()}>Choose folder</Button>
                 {/if}
               </div>
-              <Button variant="outline" disabled={loading || bulkBusy} onclick={refreshWorkspace} aria-label="Refresh folder" aria-busy={loading}><RefreshCwIcon class={loading ? 'refreshing' : ''} data-refreshing={loading} /><span>Refresh</span></Button>
+              <RefreshButton size="default" label="Refresh" busyLabel="Refreshing…" busy={loading || searchLoading} disabled={bulkBusy || bulkNeedsRefresh} onclick={() => { if (loading || searchLoading || bulkBusy || bulkNeedsRefresh) return; void refreshWorkspace(); }} aria-label="Refresh folder" />
               <div class="folder-sort">
                 <label for="folder-sort">Sort files by</label>
                 <select id="folder-sort" value={folderSort} disabled={bulkBusy || bulkNeedsRefresh} onchange={changeFolderSort}>
@@ -1991,21 +2032,21 @@
             {@render selectionToolbar()}
             <section class="file-drop-region" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
             {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span><span>Name</span><span class="file-size">Size</span><span class="sr-only">Options</span></div></div>{/if}
-            {#if loading}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
-            {:else if listingError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Could not open this folder</Alert.Title><Alert.Description><p>{listingError}</p><Button id="folder-page-retry" variant="outline" size="sm" class="mt-2" onclick={refresh}>Try again</Button></Alert.Description></Alert.Root>
+            {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy} class="mt-2" onclick={retryFolder} />{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
+            {:else if loading && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
             {:else}<div class="file-list">{#each entries as entry (entry.id)}
               <article aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
                 <label class="entry-selection"><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, entry.id)} /></label>
-                <button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{entry.kind === 'file' ? formatSize(entry.size) : ''}</span></span></button><span class="file-size">{entry.kind === 'folder' ? '—' : formatSize(entry.size)}</span>
-                <EntryOptions {entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
+                <button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{entry.kind === 'file' ? formatSize(entry.size) : ''}</span></span></button><span class="file-size">{entry.kind === 'folder' ? '—' : formatSize(entry.size)}</span>
+                <EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
               </article>
             {/each}</div>{/if}
             </section>
             {#if dropPending}<p role="status">Moving {dropPending.entry.name} to {dropPending.destination.name}…</p>{/if}
             {#if dropError}<p role="alert">{dropError}</p>{/if}
             {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading || bulkBusy}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading || bulkBusy}>Next page</Button>{/if}</div>{/if}
-            <p class="list-summary">{loading ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
+            <p class="list-summary" role={loading && workspaceRefreshing && entries.length ? 'status' : undefined}>{loading ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
             {/if}
             {#if notice}<Alert.Root role="status" class="workspace-notice"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
@@ -2024,15 +2065,15 @@
     <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !moveBusy && !bulkBusy) closeMove(); }}>
       <Dialog.Content showCloseButton={!bulkBusy} class="max-h-[85dvh] overflow-y-auto" onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger ?? moveTrigger); moveTrigger = null; bulkTrigger = null; }}>
         <Dialog.Header><Dialog.Title>Move {bulkAction === 'move' ? `${bulkTargets.length} selected items` : moveTarget?.name}</Dialog.Title><Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.{bulkAction === 'move' ? ' Each item is handled separately; some items may stay in place.' : ''}</Dialog.Description></Dialog.Header>
-        <nav aria-label="Move destination path" class="flex flex-wrap gap-2">{#each movePath as folder, index (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" disabled={moveLoading || moveBusy || bulkBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => loadMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>{/each}</nav>
+        <nav aria-label="Move destination path" class="flex flex-wrap gap-2">{#each movePath as folder, index (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => loadMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>{/each}</nav>
         <div class="grid gap-2 rounded-lg border p-3" aria-label="Destination folders" aria-busy={moveLoading}>
           {#if moveLoading}<p role="status">Loading destinations...</p>{:else if moveFolders.length === 0}<p class="text-muted-foreground text-sm">No folders here.</p>{/if}
-          {#each moveFolders as folder (folder.id)}<Button variant="ghost" class="h-auto min-h-9 justify-start text-left break-all whitespace-normal" disabled={moveLoading || moveBusy || bulkBusy || folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder))} onclick={() => loadMoveFolder([...movePath, folder])}><FolderIcon class="size-4 shrink-0" />{folder.name}{folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder)) ? ' (cannot move into itself)' : ''}</Button>{/each}
-          {#if moveCursor}<Button variant="outline" disabled={moveLoading || moveBusy || bulkBusy} onclick={() => loadMoveFolder(movePath, moveCursor)}>More destination folders</Button>{/if}
+          {#each moveFolders as folder (folder.id)}<Button variant="ghost" class="h-auto min-h-9 justify-start text-left break-all whitespace-normal" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy || folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder))} onclick={() => loadMoveFolder([...movePath, folder])}><FolderIcon class="size-4 shrink-0" />{folder.name}{folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder)) ? ' (cannot move into itself)' : ''}</Button>{/each}
+          {#if moveCursor}<Button variant="outline" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy} onclick={() => loadMoveFolder(movePath, moveCursor)}>More destination folders</Button>{/if}
         </div>
         <p class="text-sm break-all">Destination: {movePath.map((folder) => folder.name).join(' / ') || 'Choose a folder'}</p>
         {#if movePath.at(-1)?.id === moveTarget?.parent_id || (bulkAction === 'move' && bulkTargets.every((entry) => entry.parent_id === movePath.at(-1)?.id))}<p class="text-muted-foreground text-sm">{bulkAction === 'move' ? 'The selected items are already here.' : 'This item is already here.'} Open another folder or choose an ancestor above.</p>{/if}
-        {#if moveError}<p role="alert">{moveError}</p>{#if moveNeedsRefresh}<Button variant="outline" onclick={async () => { closeMove(); await refresh(); }}>Close and refresh files</Button>{:else}<Button variant="outline" disabled={moveBusy || moveLoading} onclick={() => loadMoveFolder(movePath.length ? movePath : folders.slice(0, 1))}>Refresh destinations</Button>{/if}{/if}
+        {#if moveError}<p role="alert">{moveError}</p>{/if}{#if moveNeedsRefresh || moveCloseRefreshBusy}<RefreshButton label="Close and refresh files" busyLabel="Refreshing files…" busy={moveCloseRefreshBusy} disabled={moveBusy || moveLoading} onclick={closeMoveAndRefresh} />{:else if moveError || moveLoading}<RefreshButton label="Refresh destinations" busyLabel="Refreshing destinations…" busy={moveLoading} disabled={moveBusy} onclick={() => loadMoveFolder(movePath.length ? movePath : folders.slice(0, 1))} />{/if}
         <Dialog.Footer><Button variant="outline" disabled={moveBusy || bulkBusy} onclick={closeMove}>Cancel</Button><Button disabled={moveBusy || bulkBusy || moveNeedsRefresh || moveLoading || !moveDestinationReady || !movePath.length || movePath.at(-1)?.id === moveTarget?.parent_id || (bulkAction === 'move' && bulkTargets.every((entry) => entry.parent_id === movePath.at(-1)?.id))} onclick={() => bulkAction === 'move' ? runBulk() : moveEntry()}>{moveBusy || bulkBusy ? 'Moving...' : 'Move here'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>

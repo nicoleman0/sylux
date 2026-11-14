@@ -540,6 +540,7 @@ for (const boundary of ['refresh', 'folder', 'back', 'forward', 'account', 'tras
     else if (boundary === 'reload') await page.reload();
     await expect(report).toHaveCount(0);
     if (boundary === 'page') {
+      await expect(page.getByRole('button', { name: 'Refresh folder', exact: true })).toBeEnabled();
       await desktopDrop(page, current(page), [{ name: 'second.txt' }]);
       await expect(completed(page)).toHaveCount(1);
       await page.getByRole('button', { name: 'Next page', exact: true }).click();
@@ -559,6 +560,7 @@ test('failed and canceled upload display clears on refresh without retrying file
   await expect(page.locator('[data-upload-result="broken.txt"]')).toContainText('Failed');
   await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Refresh folder', exact: true })).toBeEnabled();
   await desktopDrop(page, current(page), [{ name: 'same.txt' }, { name: 'after.txt' }]);
   await page.getByRole('button', { name: 'Keep existing file', exact: true }).click();
   await expect(page.locator('[data-upload-result="same.txt"]')).toContainText('Canceled');
