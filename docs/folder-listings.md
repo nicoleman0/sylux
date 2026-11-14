@@ -11,3 +11,7 @@ Folders always come first, ordered by normalized name ascending. Files use the c
 The server orders the complete listing before taking a page. Cursors are signed and bound to the account, folder, sort and folder generation. Reuse the same sort when requesting another page. Invalid sorts or mismatched cursors return HTTP 400. If the folder changes, the server returns `409 listing_changed`; restart from the first page. Listing cursors use protocol version 3. Older signed cursors are rejected after this update; use **Refresh** to restart if a cursor is no longer accepted.
 
 Search results retain their separate [search ordering](search.md). Search has no modified-date metadata or sorting.
+
+Browsing URLs identify Files, Trash, Account or Settings. Files URLs include the folder ID and optional `q` and `sort` hash parameters. `GET /folders/{id}/path` resolves fresh root-to-folder descriptors for the signed-in owner's active ancestry. Missing, deleted or foreign ancestry returns 404 without folder names.
+
+Folder and destination navigation add browser history entries. Search, sort and paging update the current entry. History keeps owner-bound cursor stacks and document scroll, including reload after signing in as the same owner. Entries and etags are fetched again; selection and completed notices are cleared. A copied URL starts on page one. Invalid or changed cursors restart on page one with a notice. An unavailable folder offers Files as a safe recovery destination.

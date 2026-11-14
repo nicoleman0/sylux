@@ -1664,3 +1664,126 @@ fn modified_dates_survive_namespace_mutations() {
     assert_time(&destination.id);
     tx.commit().unwrap();
 }
+
+#[tokio::test]
+async fn folder_paths_require_owned_active_ancestry_and_return_root_first() {
+    let fixture = HttpFixture::new("folder-path", 0).await;
+    let (parent, nested) = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            let parent = namespace::create_folder(tx, OWNER, ROOT, "Parent").unwrap();
+            let nested = namespace::create_folder(tx, OWNER, &parent.id, "Nested").unwrap();
+            Ok((parent, nested))
+        })
+        .await
+        .unwrap();
+    let path = format!("/folders/{}/path", nested.id);
+    let (status, body) = fixture.get_as(&path, SESSION, SECRET).await;
+    assert_eq!(status, 200);
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = value["items"].as_array().unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [ROOT, &parent.id, &nested.id]
+    );
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["", "Parent", "Nested"]
+    );
+    assert_eq!(items[1]["etag"], format!("\"{}:2\"", parent.id));
+    assert_eq!(
+        fixture.get_as(&path, OTHER_SESSION, OTHER_SECRET).await.0,
+        404
+    );
+    assert_eq!(
+        fixture
+            .get_as("/folders/missing/path", SESSION, SECRET)
+            .await
+            .0,
+        404
+    );
+    let renamed_id = parent.id.clone();
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(move |tx| {
+            namespace::rename(
+                tx,
+                OWNER,
+                &renamed_id,
+                "Renamed parent",
+                &format!("\"{renamed_id}:2\""),
+            )
+            .unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (status, body) = fixture.get_as(&path, SESSION, SECRET).await;
+    assert_eq!(status, 200);
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["items"][1]["name"], "Renamed parent");
+    assert_eq!(value["items"][2]["name"], "Nested");
+    assert_eq!(value["items"][1]["etag"], format!("\"{}:3\"", parent.id));
+    let id = parent.id.clone();
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(move |tx| {
+            tx.execute("UPDATE entry SET state='deleted' WHERE entry_id=?1", [id])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (status, body) = fixture.get_as(&path, SESSION, SECRET).await;
+    assert_eq!(status, 404);
+    assert!(!String::from_utf8_lossy(&body).contains("Parent"));
+    fixture.close().await;
+}
+
+#[test]
+fn folder_paths_reject_corrupt_cycles_missing_and_foreign_ancestors() {
+    let mut db = namespace_db();
+    db.pragma_update(None, "foreign_keys", false).unwrap();
+    let tx = db.transaction().unwrap();
+    let parent = namespace::create_folder(&tx, OWNER, ROOT, "Parent").unwrap();
+    let nested = namespace::create_folder(&tx, OWNER, &parent.id, "Nested").unwrap();
+    tx.execute_batch("DROP TRIGGER entry_update_no_parent_cycle; DROP TRIGGER entry_update_parent_active_folder;").unwrap();
+    tx.execute(
+        "UPDATE entry SET parent_id=?1 WHERE entry_id=?2",
+        params![nested.id, parent.id],
+    )
+    .unwrap();
+    assert!(matches!(
+        namespace::folder_path(&tx, OWNER, &nested.id),
+        Err(NamespaceError::NotFound)
+    ));
+    tx.execute(
+        "UPDATE entry SET parent_id=?1 WHERE entry_id=?2",
+        params![OTHER_ROOT, parent.id],
+    )
+    .unwrap();
+    assert!(matches!(
+        namespace::folder_path(&tx, OWNER, &nested.id),
+        Err(NamespaceError::NotFound)
+    ));
+    tx.execute(
+        "UPDATE entry SET parent_id='missing' WHERE entry_id=?1",
+        [&parent.id],
+    )
+    .unwrap();
+    assert!(matches!(
+        namespace::folder_path(&tx, OWNER, &nested.id),
+        Err(NamespaceError::NotFound)
+    ));
+}

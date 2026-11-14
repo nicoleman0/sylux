@@ -21,6 +21,9 @@ export class ListingApi {
   children(folderId: string, cursor?: string | null, sort: FolderSort = 'name_asc'): Promise<Listing> {
     return this.client.request(`/folders/${encodeURIComponent(folderId)}/children?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
   }
+  path(folderId: string): Promise<{ items: Folder[] }> {
+    return this.client.request(`/folders/${encodeURIComponent(folderId)}/path`);
+  }
   search(query: string, cursor?: string | null, signal?: AbortSignal): Promise<SearchListing> {
     return this.client.request(`/entries/search?q=${encodeURIComponent(query)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
   }
