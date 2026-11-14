@@ -1,11 +1,15 @@
 import { expect, test } from '@playwright/test';
 
-for (const missingMap of ['Map', 'WeakMap'] as const) {
-  test(`missing ${missingMap}.getOrInsertComputed leaves PDF download available without loading the renderer`, async ({ page }) => {
+for (const capability of ['Map.getOrInsertComputed', 'WeakMap.getOrInsertComputed', 'CSSScopeRule'] as const) {
+  test(`missing ${capability} leaves PDF download available without loading the renderer`, async ({ page }) => {
     await page.addInitScript((missing) => {
-      const prototype = missing === 'Map' ? Map.prototype : WeakMap.prototype;
-      Object.defineProperty(prototype, 'getOrInsertComputed', { value: undefined, configurable: true });
-    }, missingMap);
+      if (missing === 'CSSScopeRule') {
+        Object.defineProperty(window, 'CSSScopeRule', { value: undefined, configurable: true });
+      } else {
+        const prototype = missing === 'Map.getOrInsertComputed' ? Map.prototype : WeakMap.prototype;
+        Object.defineProperty(prototype, 'getOrInsertComputed', { value: undefined, configurable: true });
+      }
+    }, capability);
 
     const rendererRequests: string[] = [];
     page.on('request', request => {
