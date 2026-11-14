@@ -5,6 +5,7 @@
   import * as Button from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
+  import RefreshButton from '$lib/RefreshButton.svelte';
   import { Badge } from '$lib/components/ui/badge/index.js';
 
   type ColorSample = { label: string; token: string; value: string };
@@ -73,6 +74,10 @@
   </header>
 
   <main class="catalogue-main">
+    <section class="catalogue-section" aria-labelledby="refresh-title">
+      <h2 id="refresh-title">Refresh</h2>
+      <div class="flex flex-wrap gap-2"><RefreshButton label="Refresh" busy={false} onclick={() => {}} /><RefreshButton label="Refresh" busy={true} onclick={() => {}} /></div>
+    </section>
     <section class="catalogue-section" aria-labelledby="type-title">
       <div class="section-heading"><h2 id="type-title">Typography</h2><p>One font, sized by role. Samples show the actual sizes.</p></div>
       <div class="type-grid">
