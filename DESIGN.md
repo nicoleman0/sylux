@@ -54,7 +54,27 @@ Use paired foreground/background roles together. Keep normal text at least 4.5:1
 - Use `--shadow-overlay` only for floating surfaces. Resting file and Settings content stays flat.
 - Keep file previews large, with scrollable content and reachable header/footer controls.
 
-## Flexible defaults
+## Required UI review rules
+
+These rules apply to UI changes, including scoped exceptions below.
+
+- Before implementation, compare the affected workflow in Nextcloud and at least one similar file manager. Inspect behavior and appearance using primary sources and screenshots or a visual walkthrough where available. Record the source, version or revision, inspection date, evidence and a short adopt/reject decision in the issue or PR. State when live access or visual evidence is unavailable; source reading alone is not a live comparison. A short note is enough.
+- Use short action labels and familiar icons. Icon-only actions need accessible names and tooltips where their meaning needs clarification. Preserve visible keyboard focus and usable touch targets.
+- Give routine success one compact status acknowledgement. For an all-success batch, show one count. Do not repeat a success heading, total and per-item prose for the same result. Put optional details behind a disclosure; expand details when needed to resolve mixed, failed or uncertain outcomes.
+- Clear completed feedback on explicit refresh and navigation, including folder, search, pagination, destination and browser history changes. Automatic post-operation list revalidation must allow the completion to appear once. Returning to a view must not resurrect old results.
+- Keep active work reachable across navigation. Separate feedback lifetime from operation state: clearing a notice must not cancel a transfer, discard an unresolved outcome or make retry unsafe. Never describe an uncertain result as success.
+- Show pending work at the triggering control, with busy semantics and duplicate-request prevention. Reflect the actual request lifecycle, including failure; support reduced motion without hiding the busy state.
+- Keep destructive consequences and recovery steps clear at the point where they matter. Compactness must not remove information needed to act safely.
+
+| Workflow | Prefer | Avoid |
+| --- | --- | --- |
+| Move results | “Moved to Job” or “Moved 12 items”, with a named dismiss control | A success heading, 1-of-1 total, filename, source and destination prose for one move |
+| Trash | Compact icon/name/location rows and a clear Restore action; parent/conflict guidance when relevant | Permanent instruction paragraphs, repeated “Original folder” labels and unnecessary raw references |
+| Preview | Document space with a compact, named toolbar and reachable close/download controls | Repeated filename headings, explanatory chrome and unused padding that crowd the document |
+
+Review feedback lifetime and visible pending states as part of the affected journey. Verify desktop and narrow layouts, both themes, keyboard access, and success/error/uncertain states that the change touches. Record the checks and their limits in the PR.
+
+## Scoped exceptions
 
 These are defaults, not a ban on variation. A scoped exception is appropriate when a surface has a different job: document content, a dense viewer toolbar or standalone sign-in branding can need a different treatment.
 

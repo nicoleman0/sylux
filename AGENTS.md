@@ -70,6 +70,8 @@
 
 - Read `DESIGN.md` before UI changes. `web/src/tokens.css` owns shared
   type and semantic color values; use existing roles and components first.
+- Follow [required UI review rules](DESIGN.md#required-ui-review-rules),
+  including comparison research before implementation and feedback lifetime.
 - Use `/design-system.html` on the web dev server to review the real styles
   in both themes. Keep shared component examples current when changing them.
 - Scoped exceptions are allowed when they serve a different user need.
