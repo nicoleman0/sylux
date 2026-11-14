@@ -60,7 +60,7 @@ async function installBulkBackend(page: Page, paginated = false) {
   });
   await page.goto('/');
   await signIn(page, 'owner');
-  return { mutations, failures, appliedFailures, entries, rootReads: () => rootReads };
+  return { mutations, failures, appliedFailures, entries, deleted, rootReads: () => rootReads };
 }
 
 async function signIn(page: Page, handle: string) {
@@ -77,7 +77,6 @@ async function select(page: Page, ...names: string[]) {
 async function moveSelected(page: Page) {
   await page.getByRole('button', { name: 'Move selected', exact: true }).click();
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('button', { name: 'Move here', exact: true })).toBeDisabled();
   await dialog.getByRole('button', { name: 'Destination', exact: true }).click();
   await dialog.getByRole('button', { name: 'Move here', exact: true }).click();
 }
@@ -223,4 +222,159 @@ test('bulk destination picker excludes a selected folder', async ({ page }) => {
   await expect(dialog.getByRole('button', { name: 'Move here', exact: true })).toBeDisabled();
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   expect(backend.mutations).toEqual([]);
+});
+
+async function installSearchBulkBackend(page: Page, count = 4, pageSize = 50) {
+  const backend = await installBulkBackend(page);
+  const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
+  const sources = ['Work', 'Home'].map((name, index) => ({ id: `source-${index}`, parent_id: 'root', name, kind: 'folder', etag: `"source-${index}:1"` }));
+  backend.entries.push(...sources);
+  for (let index = 0; index < count; index++) backend.entries.push({
+    id: `match-${index}`, parent_id: sources[index % 2]!.id, name: count === 4 ? 'match.bin' : `match-${String(index).padStart(2, '0')}.bin`, kind: 'file', size: index, etag: `"match-${index}:1"`,
+  });
+  let staleNext = false;
+  let searches = 0;
+  await page.route('**/entries/search**', async route => {
+    searches++;
+    const url = new URL(route.request().url());
+    if (staleNext && url.searchParams.has('cursor')) {
+      staleNext = false;
+      return route.fulfill({ status: 409, json: { code: 'listing_changed' } });
+    }
+    const query = url.searchParams.get('q')!;
+    const matches = backend.entries.filter(entry => entry.name.includes(query) && !backend.deleted.has(entry.id));
+    const offset = Number(url.searchParams.get('cursor') ?? 0);
+    const items = matches.slice(offset, offset + pageSize).map(entry => ({ entry, location: entry.parent_id === 'root' ? [root] : [root, backend.entries.find(folder => folder.id === entry.parent_id)!] }));
+    const more = offset + pageSize < matches.length;
+    return route.fulfill({ json: { items, next_cursor: more ? String(offset + pageSize) : null, has_more: more } });
+  });
+  await page.getByRole('searchbox').fill('match');
+  await expect(page.getByRole('region', { name: 'Search results', exact: true })).toHaveAttribute('aria-busy', 'false');
+  return { ...backend, staleNext: () => { staleNext = true; }, searches: () => searches };
+}
+
+test('search selection supports pointer and keyboard ranges and clears on query or page changes', async ({ page }) => {
+  await installSearchBulkBackend(page, 6, 4);
+  const checkboxes = page.getByRole('region', { name: 'Search results', exact: true }).getByRole('checkbox');
+  await checkboxes.nth(0).click();
+  await checkboxes.nth(2).click({ modifiers: ['Shift'] });
+  await expect(page.getByText('3 selected', { exact: true })).toBeVisible();
+  await checkboxes.nth(2).click({ modifiers: ['Shift'] });
+  await expect(page.getByRole('region', { name: 'Search results', exact: true }).locator('input:checked')).toHaveCount(0);
+  await checkboxes.nth(1).focus();
+  await page.keyboard.press('Space');
+  await checkboxes.nth(3).focus();
+  await page.keyboard.press('Shift+Space');
+  await expect(page.getByText('3 selected', { exact: true })).toBeVisible();
+  await page.keyboard.press('Shift+Space');
+  await expect(page.getByRole('region', { name: 'Search results', exact: true }).locator('input:checked')).toHaveCount(0);
+  await checkboxes.nth(0).check();
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Search results', exact: true }).locator('input:checked')).toHaveCount(0);
+  await checkboxes.nth(0).check();
+  await page.getByRole('button', { name: 'Previous page', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Search results', exact: true }).locator('input:checked')).toHaveCount(0);
+  await checkboxes.nth(0).check();
+  await page.getByRole('searchbox').fill('match-0');
+  await expect(page.getByRole('button', { name: 'Move selected', exact: true })).toHaveCount(0);
+  await page.getByRole('searchbox').fill('match');
+  await expect(checkboxes).toHaveCount(4);
+});
+
+test('search range checkboxes name duplicate files by containing folder and clear selection after stale cursor restart', async ({ page }) => {
+  const backend = await installSearchBulkBackend(page, 4, 2);
+  const work = page.getByRole('checkbox', { name: 'Select match.bin in Files / Work', exact: true });
+  const home = page.getByRole('checkbox', { name: 'Select match.bin in Files / Home', exact: true });
+  await work.check();
+  await home.click({ modifiers: ['Shift'] });
+  await expect(page.getByText('Current loaded page only', { exact: true })).toBeVisible();
+  backend.staleNext();
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await expect(page.getByText('Files changed. Search results have been restarted.', { exact: true })).toBeVisible();
+  await expect(work).not.toBeChecked();
+  await expect(home).not.toBeChecked();
+});
+
+test('search moves 50 loaded matches with their ETags and shows changed locations', async ({ page }) => {
+  const backend = await installSearchBulkBackend(page, 51);
+  await page.getByRole('checkbox', { name: 'Select match-00.bin in Files / Work', exact: true }).check();
+  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await expect(page.getByText('50 selected', { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  for (const width of [390, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const theme of ['light', 'dark']) {
+      if (theme === 'dark') await page.getByRole('button', { name: 'Switch to dark mode', exact: true }).click();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.screenshot({ path: test.info().outputPath(`search-selected-${width}-${theme}.png`), animations: 'disabled' });
+    }
+    await page.getByRole('button', { name: 'Switch to light mode', exact: true }).click();
+  }
+  await moveSelected(page);
+  await expect(page.getByRole('region', { name: 'Move results' }).getByText('50 of 50 succeeded.', { exact: true })).toBeVisible();
+  expect(backend.mutations).toEqual(Array.from({ length: 50 }, (_, index) => ({ id: `match-${index}`, action: 'move', parent: 'destination', etag: `"match-${index}:1"` })));
+  await expect(page.getByRole('checkbox', { name: 'Select match-00.bin in Files / Destination', exact: true })).toBeVisible();
+  expect(backend.entries.find(entry => entry.id === 'match-50')!.parent_id).toBe('source-0');
+});
+
+test('search bulk retries conflicts across original folders and reconciles applied uncertain trash without replay', async ({ page }) => {
+  const backend = await installSearchBulkBackend(page, 2);
+  backend.failures.set('match-1', { status: 409, code: 'name_conflict' });
+  await page.getByRole('checkbox').first().check();
+  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await moveSelected(page);
+  await expect(page.getByRole('region', { name: 'Move results' }).getByText('1 of 2 succeeded.', { exact: true })).toBeVisible();
+  backend.failures.clear();
+  await page.getByRole('button', { name: 'Retry failed items', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Destination', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Move here', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Move results' }).getByText('2 of 2 succeeded.', { exact: true })).toBeVisible();
+  expect(backend.mutations.map(item => item.id)).toEqual(['match-0', 'match-1', 'match-1']);
+  await page.getByRole('button', { name: 'Dismiss results', exact: true }).click();
+  backend.failures.set('match-0', { status: 503, code: 'unavailable' });
+  backend.appliedFailures.add('match-0');
+  await page.getByRole('checkbox').first().check();
+  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await trashSelected(page);
+  await expect(page.getByRole('button', { name: 'Refresh before retry', exact: true })).toBeVisible();
+  backend.failures.clear();
+  await page.getByRole('button', { name: 'Refresh before retry', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Trash results' }).getByText('2 of 2 succeeded.', { exact: true })).toBeVisible();
+  expect(backend.mutations.map(item => item.id)).toEqual(['match-0', 'match-1', 'match-1', 'match-0', 'match-1']);
+});
+
+
+test('search trash reports a populated folder failure and keeps it available', async ({ page }) => {
+  const backend = await installSearchBulkBackend(page, 2);
+  backend.entries.push({ id: 'match-folder', parent_id: 'source-0', name: 'match-folder', kind: 'folder', etag: '"match-folder:1"' });
+  backend.failures.set('match-folder', { status: 409, code: 'folder_not_empty' });
+  await page.getByRole('searchbox').fill('match-');
+  await expect(page.getByRole('checkbox')).toHaveCount(3);
+  await page.getByRole('checkbox').first().check();
+  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await trashSelected(page);
+  await expect(page.getByRole('region', { name: 'Trash results' })).toContainText('Folder is not empty. Empty it before retrying.');
+  await expect(page.getByRole('checkbox', { name: 'Select match-folder in Files / Work', exact: true })).not.toBeChecked();
+  expect(backend.mutations.map(item => item.id)).toEqual(['match-0', 'match-1', 'match-folder']);
+});
+
+test('search retry does not replay a failed item outside the refreshed loaded page or with a changed ETag', async ({ page }) => {
+  const backend = await installSearchBulkBackend(page, 2);
+  backend.failures.set('match-0', { status: 409, code: 'name_conflict' });
+  backend.failures.set('match-1', { status: 409, code: 'name_conflict' });
+  await page.getByRole('checkbox').first().check();
+  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await moveSelected(page);
+  await expect(page.getByRole('region', { name: 'Move results' }).getByText('0 of 2 succeeded.', { exact: true })).toBeVisible();
+  backend.failures.clear();
+  backend.entries.find(entry => entry.id === 'match-1')!.etag = '"match-1:2"';
+  await page.getByRole('searchbox').fill('alpha');
+  await expect(page.getByRole('checkbox', { name: 'Select alpha.bin in Files', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Retry failed items', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Move results' })).toContainText('This version is no longer on the loaded page. Find and select the item again');
+  await expect(page.getByRole('region', { name: 'Move results' })).toContainText('This item changed. Select it again');
+  expect(backend.mutations.map(item => item.id)).toEqual(['match-0', 'match-1']);
 });

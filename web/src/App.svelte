@@ -200,21 +200,36 @@
   let folders = $state<Folder[]>([]);
   let entries = $state<Entry[]>([]);
   let selectedIds = $state<string[]>([]);
-  const selectedEntries = $derived(entries.filter((entry) => selectedIds.includes(entry.id)));
+  let selectionAnchor: string | null = null;
 
-  function clearSelection(): void { selectedIds = []; }
+  function clearSelection(): void { selectedIds = []; selectionAnchor = null; }
   async function clearSelectionFromToolbar(): Promise<void> {
     const target = document.querySelector<HTMLInputElement>('.selectable-row input:checked');
     clearSelection();
     await tick();
     (target ?? document.getElementById('folder-title'))?.focus();
   }
-  function selectEntry(id: string, checked: boolean): void {
-    selectedIds = checked ? [...selectedIds.filter((item) => item !== id), id] : selectedIds.filter((item) => item !== id);
+  function selectEntry(id: string, checked: boolean, range = false): void {
+    const anchorIndex = activeEntries.findIndex((entry) => entry.id === selectionAnchor);
+    const targetIndex = activeEntries.findIndex((entry) => entry.id === id);
+    if (targetIndex < 0) return;
+    const ids = range && anchorIndex >= 0
+      ? activeEntries.slice(Math.min(anchorIndex, targetIndex), Math.max(anchorIndex, targetIndex) + 1).map((entry) => entry.id)
+      : [id];
+    selectedIds = checked ? [...new Set([...selectedIds, ...ids])] : selectedIds.filter((item) => !ids.includes(item));
+    if (!range || anchorIndex < 0) selectionAnchor = id;
+  }
+  function selectionKeydown(event: KeyboardEvent, id: string): void {
+    if (event.code !== 'Space') return;
+    event.preventDefault();
+    selectEntry(id, !(event.currentTarget as HTMLInputElement).checked, event.shiftKey);
+  }
+  function searchLocation(hit: SearchHit): string {
+    return ['Files', ...hit.location.slice(1).map((folder) => folder.name)].join(' / ');
   }
   type BulkAction = 'move' | 'trash';
-  type BulkResult = { entry: Entry; status: 'pending' | 'succeeded' | 'failed' | 'uncertain' | 'changed'; message: string };
-  type BulkReport = { action: BulkAction; sourceId: string; destination: Folder | null; results: BulkResult[] };
+  type BulkResult = { entry: Entry; location: string; status: 'pending' | 'succeeded' | 'failed' | 'uncertain' | 'changed'; message: string };
+  type BulkReport = { action: BulkAction; destination: Folder | null; results: BulkResult[] };
   let bulkAction = $state<BulkAction | null>(null);
   let bulkTargets = $state<Entry[]>([]);
   let bulkReport = $state<BulkReport | null>(null);
@@ -236,6 +251,8 @@
   let searchInput = $state('');
   let searchQuery = $state('');
   let searchItems = $state<SearchHit[]>([]);
+  const activeEntries = $derived(searchQuery ? searchItems.map((hit) => hit.entry) : entries);
+  const selectedEntries = $derived(activeEntries.filter((entry) => selectedIds.includes(entry.id)));
   let searchLoading = $state(false);
   let searchError = $state('');
   let searchInputError = $state('');
@@ -491,6 +508,7 @@
     const request = ++searchRequest;
     const generation = sessionGeneration;
     const query = searchQuery;
+    clearSelection();
     searchLoading = true; searchError = '';
     try {
       const page = await listing.search(query, cursor, controller.signal);
@@ -865,7 +883,7 @@
   }
 
   async function beginBulk(action: BulkAction, trigger: HTMLElement, targets = selectedEntries, retry = false): Promise<void> {
-    if (!targets.length || fileMutationBusy || loading || searchQuery) return;
+    if (!targets.length || fileMutationBusy || loading || searchLoading || searchError || searchInputError) return;
     closeMove();
     bulkTargets = targets.map((entry) => ({ ...entry }));
     bulkAction = action; bulkRetry = retry; bulkTrigger = trigger; bulkError = '';
@@ -889,13 +907,13 @@
   async function runBulk(): Promise<void> {
     const action = bulkAction;
     const destination = action === 'move' ? movePath.at(-1) ?? null : null;
-    if (!action || !bulkTargets.length || fileMutationBusy || loading ||
+    if (!action || !bulkTargets.length || fileMutationBusy || loading || searchLoading ||
       (action === 'move' && (!destination || moveLoading || !moveDestinationReady ||
         bulkDestinationBlocked(destination) || bulkTargets.every((entry) => entry.parent_id === destination.id)))) return;
     const generation = sessionGeneration;
     const targets = bulkTargets.map((entry) => ({ ...entry }));
     const report: BulkReport = bulkRetry && bulkReport ? bulkReport : {
-      action, sourceId: currentFolder.id, destination, results: targets.map((entry) => ({ entry, status: 'pending', message: 'Waiting.' })),
+      action, destination, results: targets.map((entry) => ({ entry, location: searchItems.find((hit) => hit.entry.id === entry.id) ? searchLocation(searchItems.find((hit) => hit.entry.id === entry.id)!) : folderPath.map((folder) => folder.name).join(' / '), status: 'pending', message: 'Waiting.' })),
     };
     report.destination = destination;
     bulkReport = report;
@@ -953,7 +971,10 @@
     const generation = sessionGeneration;
     bulkBusy = true; bulkError = ''; clearSelection();
     try {
-      const source = await folderEntries(report.sourceId, generation);
+      const source: Entry[] = [];
+      for (const parentId of new Set(report.results.map((result) => result.entry.parent_id))) {
+        if (parentId) source.push(...await folderEntries(parentId, generation));
+      }
       if (generation !== sessionGeneration) return false;
       const destination = report.action === 'move' && report.destination ? await folderEntries(report.destination.id, generation) : [];
       if (generation !== sessionGeneration) return false;
@@ -982,7 +1003,16 @@
 
   async function retryBulk(trigger: HTMLElement): Promise<void> {
     if (!bulkReport || !await reconcileBulk()) return;
-    const targets = bulkReport.results.filter((result) => result.status === 'failed').map((result) => result.entry);
+    const targets: Entry[] = [];
+    for (const result of bulkReport.results) {
+      if (result.status !== 'failed') continue;
+      const entry = activeEntries.find((entry) => entry.id === result.entry.id && entry.etag === result.entry.etag);
+      if (entry) targets.push(entry);
+      else {
+        result.status = 'changed';
+        result.message = 'This version is no longer on the loaded page. Find and select the item again to act on it.';
+      }
+    }
     if (!targets.length) return;
     if (bulkNeedsRefresh) return;
     await beginBulk(bulkReport.action, trigger, targets, true);
@@ -1571,6 +1601,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 </svelte:head>
 
+{#snippet selectionToolbar()}
+            {#if selectedEntries.length}
+              <div class="selection-toolbar" role="group" aria-label="Selected items">
+                <span aria-live="polite">{selectedEntries.length} selected</span>
+                {#if searchQuery}<span class="text-xs text-muted-foreground">Current loaded page only</span>{/if}
+                <Button variant="ghost" size="sm" disabled={fileMutationBusy} onclick={() => selectedIds = activeEntries.map((entry) => entry.id)}>Select all loaded items</Button>
+                <Button variant="ghost" size="sm" disabled={!selectedIds.length || bulkBusy} onclick={clearSelectionFromToolbar}>Clear selection</Button>
+                {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
+              </div>
+            {/if}
+{/snippet}
+
 {#snippet betaNotice()}
   <footer class="beta-notice">Beta · Durability not qualified. Keep independent copies.</footer>
 {/snippet}
@@ -1741,7 +1783,7 @@
             <div class="search-toolbar">
               <Label for="file-search">Search files and folders</Label>
               <div class="search-controls"><Input id="file-search" disabled={bulkBusy} type="search" placeholder="Search by name" maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} />
-                {#if searchQuery}<Button variant="outline" type="button" onclick={clearSearchFromButton}>Clear search</Button>{/if}
+                {#if searchQuery}<Button variant="outline" type="button" disabled={bulkBusy} onclick={clearSearchFromButton}>Clear search</Button>{/if}
               </div>
             </div>
             {#if searchQuery}
@@ -1750,17 +1792,18 @@
                 {:else if searchInputError}<p role="alert">{searchInputError}</p>
                 {:else if searchError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Search failed</Alert.Title><Alert.Description><p>{searchError}</p><Button variant="outline" size="sm" class="mt-2" onclick={() => runSearch(searchRetryCursor, searchRetryPage)}>Try again</Button></Alert.Description></Alert.Root>
                 {:else if searchItems.length === 0}<p>No matching files or folders.</p>
-                {:else}<div class="file-list"><div class="list-head"><span>Name and location</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>
+                {:else}{@render selectionToolbar()}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span><span>Name and location</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>
                   {#each searchItems as hit (hit.entry.id)}
-                    <article aria-label={hit.entry.name} class="file-row search-row">
-                      <div class="search-item-main"><button type="button" class="item-name" title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="filename">{hit.entry.name}</span></button>
-                        <div class="search-location"><span>Files{#each hit.location.slice(1) as folder (folder.id)}{' / '}{folder.name}{/each}</span><Button variant="link" size="sm" onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
+                    <article aria-label={hit.entry.name} class={`file-row search-row selectable-row ${selectedIds.includes(hit.entry.id) ? 'selected-row' : ''}`}>
+                      <label class="entry-selection"><input type="checkbox" aria-label={`Select ${hit.entry.name} in ${searchLocation(hit)}`} checked={selectedIds.includes(hit.entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(hit.entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, hit.entry.id)} /></label>
+                      <div class="search-item-main"><button type="button" class="item-name" disabled={bulkBusy} title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="filename">{hit.entry.name}</span></button>
+                        <div class="search-location"><span>Files{#each hit.location.slice(1) as folder (folder.id)}{' / '}{folder.name}{/each}</span><Button variant="link" size="sm" disabled={bulkBusy} onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
                       </div><span class="file-size">{hit.entry.kind === 'folder' ? '—' : typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : '—'}</span>
-                      <EntryOptions entry={hit.entry} disabled={!!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} />
+                      <EntryOptions entry={hit.entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} />
                     </article>
                   {/each}
                 </div>{/if}
-                {#if searchPageIndex > 0 || searchHasMore}<div class="flex flex-wrap gap-2 mt-3">{#if searchPageIndex > 0}<Button variant="outline" size="sm" onclick={searchPrevious} disabled={searchLoading}>Previous page</Button>{/if}{#if searchHasMore}<Button variant="outline" size="sm" onclick={searchNext} disabled={searchLoading}>Next page</Button>{/if}</div>{/if}
+                {#if searchPageIndex > 0 || searchHasMore}<div class="flex flex-wrap gap-2 mt-3">{#if searchPageIndex > 0}<Button variant="outline" size="sm" onclick={searchPrevious} disabled={searchLoading || bulkBusy}>Previous page</Button>{/if}{#if searchHasMore}<Button variant="outline" size="sm" onclick={searchNext} disabled={searchLoading || bulkBusy}>Next page</Button>{/if}</div>{/if}
                 {#if !searchLoading && !searchError && !searchInputError}<p class="list-summary">{searchItems.length} {searchItems.length === 1 ? 'result' : 'results'}{searchHasMore || searchPageIndex > 0 ? ' on this page' : ''}</p>{/if}
               </section>
             {:else}
@@ -1787,14 +1830,7 @@
 
             </section>
             <p id="folder-upload-help" class="text-xs text-muted-foreground mb-3">{folderChooserSupported ? 'Choose folder skips empty folders. Drop a folder to include them.' : 'Folder selection is unavailable in this browser. Choose files or drop a folder instead.'}</p>
-            {#if selectedEntries.length && !loading && !listingError}
-              <div class="selection-toolbar" role="group" aria-label="Selected items">
-                <span aria-live="polite">{selectedEntries.length} selected</span>
-                <Button variant="ghost" size="sm" disabled={fileMutationBusy} onclick={() => selectedIds = entries.map((entry) => entry.id)}>Select all loaded items</Button>
-                <Button variant="ghost" size="sm" disabled={!selectedIds.length || bulkBusy} onclick={clearSelectionFromToolbar}>Clear selection</Button>
-                {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
-              </div>
-            {/if}
+            {@render selectionToolbar()}
             <section class="file-drop-region" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
             {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span><span>Name</span><span class="file-size">Size</span><span class="sr-only">Options</span></div></div>{/if}
             {#if loading}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
@@ -1802,7 +1838,7 @@
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
             {:else}<div class="file-list">{#each entries as entry (entry.id)}
               <article aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
-                <label class="entry-selection"><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onchange={(event) => selectEntry(entry.id, event.currentTarget.checked)} /></label>
+                <label class="entry-selection"><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, entry.id)} /></label>
                 <button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{entry.kind === 'file' ? formatSize(entry.size) : ''}</span></span></button><span class="file-size">{entry.kind === 'folder' ? '—' : formatSize(entry.size)}</span>
                 <EntryOptions {entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
               </article>
@@ -1817,7 +1853,7 @@
               <section class="bulk-results" aria-labelledby="bulk-results-heading" aria-busy={bulkBusy}>
                 <h2 id="bulk-results-heading">{bulkReport.action === 'move' ? 'Move results' : 'Trash results'}</h2>
                 <p role="status">{bulkReport.results.filter((result) => result.status === 'succeeded').length} of {bulkReport.results.length} succeeded{bulkBusy ? '. Working…' : '.'}</p>
-                <ul>{#each bulkReport.results as result (result.entry.id)}<li><strong>{result.entry.name}</strong><span>{result.message}</span></li>{/each}</ul>
+                <ul>{#each bulkReport.results as result (result.entry.id)}<li><strong>{result.entry.name}</strong><span>{result.location}</span><span>{result.message}</span></li>{/each}</ul>
                 {#if bulkError}<p role="alert">{bulkError}</p>{/if}
                 <div class="flex flex-wrap gap-2">
                   {#if bulkNeedsRefresh}<Button variant="outline" disabled={bulkBusy} onclick={reconcileBulk}>Refresh before retry</Button>{/if}
