@@ -66,6 +66,47 @@ pub fn root_entry(db: &Connection, owner: &str) -> Result<Entry, NamespaceError>
     .ok_or(NamespaceError::NotFound)
 }
 
+/// Resolve active ancestry in one SQL snapshot without exposing foreign names.
+pub fn folder_path(
+    db: &Connection,
+    owner: &str,
+    folder: &str,
+) -> Result<Vec<Entry>, NamespaceError> {
+    let mut statement = db
+        .prepare(
+            "WITH RECURSIVE ancestry(entry_id,parent_id,original_name,generation,depth) AS (
+            SELECT entry_id,parent_id,original_name,generation,0 FROM entry
+            WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder' AND state='active'
+            UNION ALL
+            SELECT e.entry_id,e.parent_id,e.original_name,e.generation,a.depth+1
+            FROM entry e JOIN ancestry a ON e.entry_id=a.parent_id
+            WHERE e.owner_account_id=?2 AND e.kind='folder' AND e.state='active' AND a.depth<?3
+        ) SELECT entry_id,parent_id,original_name,generation FROM ancestry ORDER BY depth DESC",
+        )
+        .map_err(|_| NamespaceError::Sql)?;
+    let rows = statement
+        .query_map(params![folder, owner, MAX_ENTRY_DEPTH], |row| {
+            let id: String = row.get(0)?;
+            let generation: i64 = row.get(3)?;
+            Ok(Entry {
+                etag: folder_etag(&id, generation as u64),
+                id,
+                parent_id: row.get(1)?,
+                name: row.get(2)?,
+                kind: "folder".into(),
+                generation,
+            })
+        })
+        .map_err(|_| NamespaceError::Sql)?;
+    let path = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| NamespaceError::Sql)?;
+    if path.first().is_none_or(|entry| entry.parent_id.is_some()) {
+        return Err(NamespaceError::NotFound);
+    }
+    Ok(path)
+}
+
 pub fn create_folder(
     db: &Transaction<'_>,
     owner: &str,

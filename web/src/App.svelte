@@ -2,7 +2,7 @@
   import './app.css';
   import * as Sidebar from '$lib/components/ui/sidebar/index.js';
   import AppSidebar from '$lib/components/app-sidebar.svelte';
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import MoonIcon from '@lucide/svelte/icons/moon';
   import SunIcon from '@lucide/svelte/icons/sun';
   import SettingsIcon from '@lucide/svelte/icons/settings';
@@ -31,6 +31,8 @@
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
   import { directoryFilesToUpload, filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
+
+  import { parseLocation, locationHash, savedContext, type BrowsingContext, type Destination } from './lib/browsing-context';
 
   import { MockTransport } from './lib/mock-transport';
 
@@ -73,8 +75,12 @@
     };
     preference.addEventListener('change', onChange);
     void loadInstance();
+    const previousScrollRestoration = window.history.scrollRestoration;
+    window.history.scrollRestoration = 'manual';
+    window.addEventListener('scroll', scheduleScrollSave, { passive: true });
+    window.addEventListener('pagehide', saveNavigation);
     window.addEventListener('popstate', restoreNavigation);
-    return () => { preference.removeEventListener('change', onChange); window.removeEventListener('popstate', restoreNavigation); };
+    return () => { preference.removeEventListener('change', onChange); window.removeEventListener('popstate', restoreNavigation); window.removeEventListener('scroll', scheduleScrollSave); if (scrollSaveTimer) clearTimeout(scrollSaveTimer); window.removeEventListener('pagehide', saveNavigation); window.history.scrollRestoration = previousScrollRestoration; };
   });
   let user = $state<User | null>(null);
   let accountView = $state(false);
@@ -93,7 +99,43 @@
   let disableTarget = $state<Account | null>(null);
   let authorityTarget = $state<{ account: Account; action: 'enable' | 'role' } | null>(null);
   let accountDialogTrigger: HTMLElement | null = null;
-  const navigationPaths = new Map<string, Folder[]>();
+  let historyReady = $state(false);
+  let navigationRequest = 0;
+  let restorationPending = $state(false);
+  let restorationFailed = $state(false);
+  let restorationUnavailable = $state(false);
+  let deferredNavigation = $state(false);
+  let deferredAccountOperation = $state(false);
+  let deferredInstanceOperation = $state(false);
+
+  $effect(() => {
+    if (deferredNavigation && !bulkBusy && !accountBusy && !instanceBusy &&
+      (!deferredAccountOperation || (!changePasswordOpen && !createAccountOpen && !disableTarget && !authorityTarget && !resetId)) && (!deferredInstanceOperation || !instanceError)) {
+      deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false;
+      void untrack(restoreNavigation);
+    }
+  });
+  let scrollSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleScrollSave(): void {
+    if (scrollSaveTimer) return;
+    scrollSaveTimer = setTimeout(() => { scrollSaveTimer = null; saveNavigation(); }, 150);
+  }
+
+  function browsingSnapshot(): BrowsingContext {
+    return { version: 1, owner: user?.id ?? '',
+      destination: settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : 'files',
+      folder: currentFolder.id, query: searchQuery, sort: folderSort,
+      cursors: [...pageCursors], page: pageIndex, searchCursors: [...searchPageCursors], searchPage: searchPageIndex, scroll: window.scrollY };
+  }
+
+  function saveNavigation(): void {
+    if (!historyReady || !user) return;
+    const context = browsingSnapshot();
+    window.history.replaceState({ sylux: context }, '', locationHash(context));
+  }
+
+  $effect(() => { saveNavigation(); });
 
   async function loadInstance(): Promise<void> {
     const request = ++instanceRequest;
@@ -122,18 +164,26 @@
   }
 
   function recordNavigation(): void {
-    const destination = settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : 'files';
-    const hash = `#${destination}${destination === 'files' && currentFolder.id ? '/' + encodeURIComponent(currentFolder.id) : ''}`;
-    if (window.location.hash !== hash) {
-      const key = crypto.randomUUID();
-      navigationPaths.set(key, JSON.parse(JSON.stringify(folderPath)));
-      window.history.pushState({ sylux: key, destination }, '', hash);
-    }
+    restorationPending = false; restorationFailed = false; restorationUnavailable = false;
+    deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false;
+    navigationRequest++;
+    historyReady = true;
+    const context = browsingSnapshot();
+    const previous = parseLocation(window.location.hash);
+    context.scroll = 0;
+    if (previous.destination !== context.destination || (context.destination === 'files' && (previous.folder !== context.folder || previous.query !== context.query))) {
+      window.history.pushState({ sylux: context }, '', locationHash(context));
+      window.scrollTo(0, 0);
+    } else saveNavigation();
   }
 
-  async function navigate(destination: 'files' | 'trash' | 'account' | 'settings', record = true, clearFeedback = true): Promise<void> {
+  async function navigate(destination: Destination, record = true, clearFeedback = true): Promise<void> {
     if (!user) { view = 'login'; return; }
-    if (bulkBusy) return;
+    if (bulkBusy || accountBusy || instanceBusy) return;
+    if (record) saveNavigation();
+    const generation = sessionGeneration;
+    const request = ++navigationRequest;
+    listingRequest++; loading = false;
     if (clearFeedback) clearCompletedFeedback();
     clearSelection(); closeBulk();
     if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
@@ -141,38 +191,101 @@
     accountView = destination === 'account'; settingsView = destination === 'settings'; showTrash = destination === 'trash';
     accountNotice = '';
     if (record) recordNavigation();
+    const current = navigationRequest;
+    if (destination === 'files' && (!currentFolder.id || entriesFolderId !== currentFolder.id)) await refresh();
     if (showTrash) await loadTrash();
-    if (settingsView) { await loadAccounts(); await loadInstance(); }
+    if (settingsView) { await loadAccounts(); if (generation === sessionGeneration && current === navigationRequest) await loadInstance(); }
     await tick();
-    document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title')?.focus();
+    if (generation !== sessionGeneration || (record ? current : request) !== navigationRequest) return;
+    document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title')?.focus({ preventScroll: true });
   }
 
-  async function restoreNavigation(event: PopStateEvent): Promise<void> {
+  async function restoreNavigation(): Promise<void> {
     if (!user) return;
-    if (bulkBusy) { recordNavigation(); return; }
-    clearCompletedFeedback();
-    closeBulk();
-
-    clearSearch();
-    const generation = sessionGeneration;
-    const state = event.state;
-    const destination = window.location.hash.slice(1).split('/')[0];
-    const target = ['trash', 'account', 'settings'].includes(destination) ? destination as 'trash' | 'account' | 'settings' : 'files';
-    const savedPath = typeof state?.sylux === 'string' ? navigationPaths.get(state.sylux) : undefined;
-    if (target === 'files' && savedPath?.length) {
-      folderPath = savedPath; currentFolder = folderPath[folderPath.length - 1]; await refresh();
-    } else if (target === 'files' && folders[0]) {
-      folderPath = [folders[0]]; currentFolder = folders[0]; await refresh();
+    if (bulkBusy || accountBusy || instanceBusy) {
+      historyReady = false; deferredNavigation = true;
+      deferredAccountOperation = accountBusy; deferredInstanceOperation = instanceBusy;
+      return;
     }
-    if (generation !== sessionGeneration) return;
-    await navigate(target, false, false);
+    historyReady = false;
+    restorationPending = true; restorationFailed = false; restorationUnavailable = false;
+    const request = ++navigationRequest;
+    const generation = sessionGeneration;
+    const isCurrent = () => generation === sessionGeneration && request === navigationRequest && !!user;
+    const state = window.history.state?.sylux;
+    const location = state?.owner && state.owner !== user.id ? parseLocation('#files') : parseLocation(window.location.hash);
+    const context = savedContext(window.history.state?.sylux, user.id, location);
+    listingRequest++; clearSearch(); clearSelection(); clearCompletedFeedback(); closeBulk();
+    previewEntry = null; previewTrigger = null;
+    if (!folderBusy) createOpen = false;
+    if (!renameBusy) renameId = '';
+    if (!trashBusy) trashTarget = null;
+    if (!moveBusy && !moveNeedsRefresh) closeMove();
+    changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null;
+    resetId = ''; resetPassword = ''; accountHandle = ''; accountPassword = ''; currentPassword = ''; newPassword = ''; accountNotice = '';
+    accountView = location.destination === 'account'; settingsView = location.destination === 'settings' && user.role === 'administrator'; showTrash = location.destination === 'trash';
+    entries = []; entriesFolderId = ''; listingError = ''; loading = true;
+    folderSort = location.sort;
+    try {
+      if (!accountView && !settingsView && !showTrash) {
+        if (!folders[0] && !await refreshRoot()) {
+          if (!isCurrent()) return;
+          throw new Error('Root listing unavailable');
+        }
+        if (!isCurrent()) return;
+        folderPath = [folders[0]]; currentFolder = folders[0];
+        if (location.folder && location.folder !== folders[0].id) {
+          const path = await listing.path(location.folder);
+          if (!isCurrent()) return;
+          if (!path.items.length || path.items[0].id !== folders[0].id || path.items.at(-1)?.id !== location.folder) throw new Error('Invalid folder path');
+          folderPath = path.items.map((folder, index) => index === 0 ? { ...folder, name: 'Files' } : folder);
+          currentFolder = folderPath.at(-1)!;
+        }
+        document.getElementById('folder-title')?.focus({ preventScroll: true });
+        restorationPending = false;
+        if (context) { pageCursors = [...context.cursors]; pageIndex = context.page; }
+        else { pageCursors = [null]; pageIndex = 0; }
+        searchInput = location.query; searchQuery = location.query;
+        if (searchQuery) {
+          browseDirty = true;
+          searchPageCursors = context ? [...context.searchCursors] : [null];
+          await runSearch(context?.searchCursors[context.searchPage] ?? null, context?.searchPage ?? 0);
+        } else await restoreBrowsingPage();
+      } else if (showTrash) await loadTrash();
+      else if (settingsView) { await loadAccounts(); if (isCurrent()) await loadInstance(); }
+    } catch (error) {
+      if (isCurrent()) {
+        restorationFailed = true;
+        restorationUnavailable = error instanceof HttpError && error.status === 404;
+        listingError = restorationUnavailable ? 'This folder is unavailable. Open Files to continue.' : 'Could not load this folder. Check your connection and try again.';
+      }
+    } finally {
+      if (isCurrent()) {
+        loading = false;
+        await tick();
+        if (isCurrent()) {
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          if (isCurrent()) {
+            const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title');
+            const active = document.activeElement;
+            const interacting = active instanceof HTMLElement && ((!!active.closest('.files-content') && active.matches('input, textarea, select, [contenteditable]')) || !!active.closest('[role=dialog][data-open]'));
+            if (!interacting) {
+              heading?.focus({ preventScroll: true });
+              const samePage = context && (searchQuery ? context.searchPage === searchPageIndex : context.page === pageIndex);
+              window.scrollTo(0, samePage ? context.scroll : 0);
+            }
+            if (!restorationFailed) { restorationPending = false; historyReady = true; saveNavigation(); }
+          }
+        }
+      }
+    }
   }
 
   async function home(event: MouseEvent): Promise<void> {
     event.preventDefault();
     if (!user) { view = 'login'; return; }
     if (folders[0]) await openFolder(folders[0]);
-    await navigate('files', true, false);
+    else await navigate('files', true, false);
   }
 
   function formatSize(bytes: number): string {
@@ -412,6 +525,7 @@
   }
 
   async function retryFolder(): Promise<void> {
+    if (restorationFailed) { await restoreNavigation(); return; }
     if ((folderRetryBusy && folderRetryRequest === listingRequest) || loading) return;
     const generation = sessionGeneration;
     const request = listingRequest + 1;
@@ -455,11 +569,11 @@
   }
   let unresolvedUploadResult: number | null = null;
   let replacementDecision: ((prompt: ReplacementPrompt | null) => void) | null = null;
-  const fileMutationBusy = $derived((workspaceRefreshing && loading) || bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || folderBusy || transferBusy || uploadBatchBusy);
+  const fileMutationBusy = $derived(restorationPending || (workspaceRefreshing && loading) || bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || folderBusy || transferBusy || uploadBatchBusy);
 
   function restoreFocus(trigger: HTMLElement | null, fallback = 'folder-title'): void {
-    if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus();
-    else document.getElementById(fallback)?.focus();
+    if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus({ preventScroll: true });
+    else document.getElementById(fallback)?.focus({ preventScroll: true });
   }
 
   function expireSession(generation: number): void {
@@ -515,8 +629,10 @@
   }
 
   async function setFolderSort(sort: FolderSort): Promise<void> {
+    if (restorationPending) return;
 
     clearCompletedFeedback();
+    navigationRequest++; historyReady = true;
     folderSort = sort;
     clearSelection();
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false;
@@ -538,6 +654,8 @@
   }
 
   async function clearSearchFromButton(): Promise<void> {
+    if (restorationPending) return;
+    navigationRequest++; historyReady = true;
     clearCompletedFeedback();
     clearSearch(true);
     await tick();
@@ -558,15 +676,19 @@
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
     } catch (error) {
       if (generation !== sessionGeneration || request !== listingRequest || searchQuery || currentFolder.id !== folderId) return;
-      if (error instanceof HttpError && error.status === 409) {
-        await refresh();
-        notice = 'This folder changed. The listing has been restarted.';
+      if (error instanceof HttpError && (error.status === 409 || (error.status === 400 && error.code === 'invalid_cursor'))) {
+        const restarted = refresh();
+        const restartRequest = listingRequest;
+        await restarted;
+        if (generation === sessionGeneration && restartRequest === listingRequest && !searchQuery && currentFolder.id === folderId) notice = 'This folder changed. The listing has been restarted.';
       } else listingError = 'Could not load this folder. Try again.';
     } finally { if (generation === sessionGeneration && request === listingRequest) loading = false; }
   }
 
   function searchChanged(): void {
-    if (bulkBusy) return;
+    if (bulkBusy || restorationPending) return;
+    if (loading || entriesFolderId !== currentFolder.id) browseDirty = true;
+    navigationRequest++; historyReady = true; loading = false; listingRequest++;
 
     clearCompletedFeedback();
     clearSelection();
@@ -620,7 +742,7 @@
       return true;
     } catch (error) {
       if (request !== searchRequest || generation !== sessionGeneration || query !== searchQuery) return false;
-      if (error instanceof HttpError && error.status === 409) {
+      if (error instanceof HttpError && (error.status === 409 || (error.status === 400 && error.code === 'invalid_cursor'))) {
         if (cursor) {
           let restartRequest = request;
           const restarted = await runSearch(null, 0, value => { restartRequest = value; onRequest?.(value); });
@@ -673,18 +795,22 @@
   }
 
   async function openSearchFolder(hit: SearchHit, containing = false): Promise<void> {
+    saveNavigation();
     clearCompletedFeedback();
     const path = containing ? hit.location : [...hit.location, hit.entry as Folder];
     const folder = path.at(-1);
     if (!folder) return;
 
     clearSearch();
+    pageCursors = [null]; pageIndex = 0;
     folderPath = path.map((item, index) => index === 0 ? { ...item, name: 'Files' } : item);
     currentFolder = folderPath.at(-1)!;
     accountView = false; settingsView = false; showTrash = false;
     recordNavigation();
+    const request = navigationRequest;
+    const generation = sessionGeneration;
     await refresh();
-    await tick(); document.getElementById('folder-title')?.focus();
+    await tick(); if (request === navigationRequest && generation === sessionGeneration) document.getElementById('folder-title')?.focus({ preventScroll: true });
   }
 
   async function loadMore(): Promise<void> {
@@ -709,7 +835,7 @@
       await focusPagedResults(isCurrent);
     } catch (error) {
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
-      if (error instanceof HttpError && error.status === 409) {
+      if (error instanceof HttpError && (error.status === 409 || (error.status === 400 && error.code === 'invalid_cursor'))) {
         const refreshed = refresh();
         const restartRequest = listingRequest;
         const restarted = await refreshed;
@@ -747,7 +873,7 @@
       await focusPagedResults(isCurrent);
     } catch (error) {
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return;
-      if (error instanceof HttpError && error.status === 409) {
+      if (error instanceof HttpError && (error.status === 409 || (error.status === 400 && error.code === 'invalid_cursor'))) {
         const refreshed = refresh();
         const restartRequest = listingRequest;
         const restarted = await refreshed;
@@ -787,8 +913,7 @@
         return;
       }
       client.setSessionExpiredHandler(() => expireSession(generation));
-      await refresh();
-      await navigate('files');
+      await restoreNavigation();
     } catch {
       if (generation !== sessionGeneration) return;
       notice = authView === 'setup' ? 'Setup could not be completed. Check the authorization and account details, then try again.' : 'Sign-in could not be completed. Check the details and try again.';
@@ -863,7 +988,8 @@
     actionNotice = ''; compactUnresolvedUpload = false;
     workspaceRefreshing = false; workspaceRefreshRequest++; folderRetryBusy = false; moveCloseRefreshBusy = false; entriesFolderId = '';
     bulkAction = null; bulkTargets = []; bulkReport = null; bulkBusy = false; bulkNeedsRefresh = false; bulkError = '';
-    navigationPaths.clear();
+    historyReady = false; navigationRequest++; restorationPending = false; restorationFailed = false; restorationUnavailable = false; deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false;
+    window.history.replaceState(null, '', '#files');
     controller?.abort(); controller = null;
     dismissReplacement(); uploadReplacement = false;
     uploadBatchCanceled = true; uploadBatchBusy = false; uploadBatchStatus = '';
@@ -919,12 +1045,13 @@
   }
 
   function beginCreate(trigger: HTMLElement): void {
+    if (restorationPending) return;
     createTrigger = trigger; folderName = ''; folderError = ''; createOpen = true;
   }
 
   async function createFolder(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    if (folderBusy || !currentFolder.id) return;
+    if (restorationPending || folderBusy || !currentFolder.id) return;
     const name = folderName.trim();
     if (!name || name === '.' || name === '..' || /[\/\\\x00-\x1f\x7f]/.test(name)) {
       folderError = 'Enter a folder name without slashes or control characters.';
@@ -1317,7 +1444,7 @@
   }
 
   async function runUploadBatch(read: (canceled: () => boolean) => Promise<UploadItem[]>, destination: Folder): Promise<void> {
-    if (uploadBatchBusy || transferBusy || unresolvedUploadId) return;
+    if (restorationPending || uploadBatchBusy || transferBusy || unresolvedUploadId) return;
     const generation = sessionGeneration;
     clearCompletedFeedback();
     retainUploadReport();
@@ -1409,8 +1536,11 @@
 
   function openPreview(entry: Entry, trigger: HTMLElement): void { previewTrigger = trigger; previewEntry = entry; }
   function closePreview(): void {
-    previewEntry = null;
-    void tick().then(() => { restoreFocus(previewTrigger); previewTrigger = null; });
+    const trigger = previewTrigger;
+    const generation = sessionGeneration;
+    const request = navigationRequest;
+    previewEntry = null; previewTrigger = null;
+    void tick().then(() => { if (generation === sessionGeneration && request === navigationRequest) restoreFocus(trigger); });
   }
   function entryAction(action: 'download' | 'rename' | 'move' | 'delete', entry: Entry, trigger: HTMLElement): void {
     if (bulkBusy || (bulkNeedsRefresh && action !== 'download')) return;
@@ -1758,11 +1888,13 @@
   }
 
   async function openFolder(folder: Folder): Promise<boolean> {
-    if (bulkBusy) return false;
+    if (bulkBusy || accountBusy || instanceBusy) return false;
+    saveNavigation();
     clearCompletedFeedback();
     closeBulk();
 
     clearSearch();
+    pageCursors = [null]; pageIndex = 0;
     const index = folderPath.findIndex((item) => item.id === folder.id);
     folderPath = index >= 0 ? folderPath.slice(0, index + 1) : [...folderPath, folder];
     const generation = sessionGeneration;
@@ -1838,7 +1970,7 @@
       <AppSidebar {instanceName} onhome={home}>
         {#snippet navigation(close)}
           <nav aria-label="Files"><Sidebar.Menu>
-          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" isActive={!showTrash && !accountView && !settingsView} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={async () => { if (folders[0]) await openFolder(folders[0]); await navigate('files', true, false); close(); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" isActive={!showTrash && !accountView && !settingsView} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files', true, false); close(); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Trash" aria-label="Trash" isActive={showTrash} aria-current={showTrash ? 'page' : undefined} onclick={async () => { await openTrash(); close(); }}><TrashIcon /><span>Trash</span></Sidebar.MenuButton></Sidebar.MenuItem>
 
           </Sidebar.Menu></nav>
@@ -2010,8 +2142,8 @@
             </div>
             <div class="search-toolbar">
               <Label for="file-search">Search files and folders</Label>
-              <div class="search-controls"><Input id="file-search" disabled={bulkBusy} type="search" placeholder="Search by name" maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} />
-                {#if searchQuery}<Button variant="outline" type="button" disabled={bulkBusy} onclick={clearSearchFromButton}>Clear search</Button>{/if}
+              <div class="search-controls"><Input id="file-search" disabled={bulkBusy || restorationPending} type="search" placeholder="Search by name" maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} />
+                {#if searchQuery}<Button variant="outline" type="button" disabled={bulkBusy || restorationPending} onclick={clearSearchFromButton}>Clear search</Button>{/if}
               </div>
             </div>
             {#if searchQuery}
@@ -2048,7 +2180,7 @@
               <RefreshButton size="default" label="Refresh" busyLabel="Refreshing…" busy={loading || searchLoading} disabled={bulkBusy || bulkNeedsRefresh} onclick={() => { if (loading || searchLoading || bulkBusy || bulkNeedsRefresh) return; void refreshWorkspace(); }} aria-label="Refresh folder" />
               <div class="folder-sort">
                 <label for="folder-sort">Sort files by</label>
-                <select id="folder-sort" value={folderSort} disabled={bulkBusy || bulkNeedsRefresh} onchange={changeFolderSort}>
+                <select id="folder-sort" value={folderSort} disabled={bulkBusy || bulkNeedsRefresh || restorationPending} onchange={changeFolderSort}>
                   <option value="name_asc">Name: A to Z</option>
                   <option value="name_desc">Name: Z to A</option>
                   <option value="size_asc">Size: smallest first</option>
@@ -2063,7 +2195,7 @@
             {@render selectionToolbar()}
             <section class="file-drop-region" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
             {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head modified-head"><span aria-hidden="true"></span><span>Name</span><span class="file-modified">Modified</span><span class="file-size">Size</span><span class="sr-only">Options</span></div></div>{/if}
-            {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy} class="mt-2" onclick={retryFolder} />{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
+            {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}{#if restorationUnavailable}<Button variant="outline" class="mt-2" onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files'); }}>Open Files</Button>{:else}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy || (restorationPending && !restorationFailed)} class="mt-2" onclick={retryFolder} />{/if}{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
             {:else if loading && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
             {:else}<div class="file-list">{#each entries as entry (entry.id)}

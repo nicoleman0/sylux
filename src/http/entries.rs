@@ -415,6 +415,47 @@ pub async fn create(
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
 }
+pub async fn folder_path(
+    State(s): State<AuthState>,
+    headers: HeaderMap,
+    Path(folder): Path<String>,
+) -> Response {
+    let (account, _) = match principal(&s, &headers).await {
+        Ok(value) => value,
+        Err(value) => return error(value.0, value.1),
+    };
+    let Some(cookie) = session_cookie(&headers) else {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let result = s
+        .workers
+        .read(move |db| {
+            let Some((current, _, _)) = authz::validate_session(
+                db,
+                &cookie.session_id,
+                &cookie.secret,
+                crate::http::auth::now(),
+            ) else {
+                return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
+            };
+            if current != account {
+                return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
+            }
+            Ok(
+                namespace::folder_path(db, &account, &folder).map_err(|failure| match failure {
+                    NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
+                    _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+                }),
+            )
+        })
+        .await;
+    match result {
+        Ok(Ok(items)) => Json(serde_json::json!({ "items": items })).into_response(),
+        Ok(Err(response)) => response,
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    }
+}
+
 pub async fn listing(
     State(s): State<AuthState>,
     headers: HeaderMap,

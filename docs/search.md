@@ -5,3 +5,5 @@
 Matching is a literal substring after NFC normalization and Unicode lowercase conversion. `%` and `_` are ordinary characters. This rule does not apply full Unicode case folding or locale-specific casing. Results sort by the converted name, then the converted containing path, then entry ID.
 
 The query must contain 1 to 255 UTF-8 bytes and no control characters. The page limit is 1 to 100, with 100 as the default. Cursors are signed, bounded, and tied to the account, exact query, and active tree state. A changed tree returns `409 listing_changed`; restart at the first page. Search reads the live tree for each request, so a new search reflects renames, moves, and deletions.
+
+The `q` hash parameter records the search query. Search paging and scroll stay in the current browser history entry. Opening a containing folder adds an entry; Back restores the previous search with fresh results and no selection. A copied search URL starts on its first page. Invalid or changed cursors restart the search with a notice.

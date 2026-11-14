@@ -1279,6 +1279,12 @@ test('browser history cannot reveal a previous account folder after reload', asy
   await page.route('**/folders/root-bob/children*', (route) => route.fulfill({ json: { items: [
     { id: 'bob-file', parent_id: 'root-bob', name: 'Bob notes.txt', kind: 'file', size: 1, etag: 'bob:1' },
   ], next_cursor: null, has_more: false } }));
+  await page.route('**/folders/secret-alice/path', route => actor === 'alice'
+    ? route.fulfill({ json: { items: [
+      { id: 'root-alice', name: 'Files', kind: 'folder', parent_id: null, etag: 'root:1' },
+      { id: 'secret-alice', parent_id: 'root-alice', name: privateName, kind: 'folder', etag: 'secret:1' },
+    ] } })
+    : route.fulfill({ status: 404, json: { code: 'not_found' } }));
   await page.route('**/folders/secret-alice/children*', (route) => actor === 'alice'
     ? route.fulfill({ json: { items: [], next_cursor: null, has_more: false } })
     : route.fulfill({ status: 404, json: { code: 'not_found' } }));

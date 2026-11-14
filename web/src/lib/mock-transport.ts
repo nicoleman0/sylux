@@ -73,6 +73,20 @@ export class MockTransport implements ApiTransport {
       return { account_id: this.user.id, handle: this.user.handle, role: this.user.role } as T;
     }
     if (route === '/auth/logout' && method === 'POST') { this.user = null; return undefined as T; }
+    if (/^\/folders\/[^/]+\/path$/.test(route) && method === 'GET') {
+      if (!this.user) throw new HttpError(401);
+      let id: string | null = decodeURIComponent(route.split('/')[2]!);
+      const items: Folder[] = [];
+      const seen = new Set<string>();
+      while (id && items.length <= 128 && !seen.has(id)) {
+        seen.add(id);
+        const folder: Folder | undefined = id === root.id ? root : this.entries.find((entry): entry is Folder => entry.kind === 'folder' && entry.id === id);
+        if (!folder) throw new HttpError(404);
+        items.unshift(folder); id = folder.parent_id;
+      }
+      if (id || items[0]?.id !== root.id) throw new HttpError(404);
+      return { items } as T;
+    }
     if (route === '/entries/search' && method === 'GET') {
       if (!this.user) throw new HttpError(401);
       const params = new URLSearchParams(path.split('?')[1]);
