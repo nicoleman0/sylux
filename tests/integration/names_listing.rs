@@ -1072,7 +1072,7 @@ async fn folder_sorting_orders_complete_listing_before_paging_and_returns_file_s
                         };
                         assert_eq!(item["size"].as_i64(), Some(expected_size));
                     } else {
-                        assert!(item.get("size").is_none());
+                        assert_eq!(item["size"].as_i64(), Some(0));
                     }
                 }
                 cursor = page["next_cursor"].as_str().map(str::to_owned);
@@ -1296,4 +1296,241 @@ async fn folder_sorting_traverses_over_500_mixed_entries_in_every_mode() {
         assert_eq!(pages, (FOLDERS + FILES).div_ceil(100));
     }
     fixture.close().await;
+}
+
+fn sized_file_in(db: &Connection, id: &str, parent: &str, size: i64) {
+    insert_sized_file(db, id, id, size);
+    db.execute(
+        "UPDATE entry SET parent_id=?1 WHERE entry_id=?2",
+        params![parent, id],
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn recursive_folder_sizes_scope_active_trees_and_keep_folder_cursors_stable() {
+    let fixture = HttpFixture::new("recursive-folder-sizes", 0).await;
+    let (a, b, empty, unknown, nested, inactive) = fixture.workers.as_ref().unwrap().transact(|tx| {
+        let a = namespace::create_folder(tx, OWNER, ROOT, "A").unwrap();
+        let b = namespace::create_folder(tx, OWNER, ROOT, "B").unwrap();
+        let empty = namespace::create_folder(tx, OWNER, ROOT, "Empty").unwrap();
+        let unknown = namespace::create_folder(tx, OWNER, ROOT, "Unknown").unwrap();
+        let nested = namespace::create_folder(tx, OWNER, &a.id, "Nested").unwrap();
+        let inactive = namespace::create_folder(tx, OWNER, &a.id, "Inactive").unwrap();
+        sized_file_in(tx, "00000000000000000000000000009001", &a.id, 11);
+        sized_file_in(tx, "00000000000000000000000000009002", &nested.id, 23);
+        sized_file_in(tx, "00000000000000000000000000009003", &nested.id, 999);
+        tx.execute("UPDATE entry SET state='deleted' WHERE entry_id='00000000000000000000000000009003'", []).unwrap();
+        sized_file_in(tx, "00000000000000000000000000009004", &inactive.id, 888);
+        tx.execute("UPDATE entry SET state='deleted' WHERE entry_id=?1", [&inactive.id]).unwrap();
+        let unknown_nested = namespace::create_folder(tx, OWNER, &unknown.id, "Nested unknown").unwrap();
+        sized_file_in(tx, "00000000000000000000000000009006", &unknown.id, 17);
+        sized_file_in(tx, "00000000000000000000000000009007", &unknown_nested.id, 19);
+        tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES('00000000000000000000000000009005',?1,?2,'file','missing',x'6d697373696e67',1)", params![OWNER, unknown_nested.id]).unwrap();
+        let unknown_children = namespace::list_sorted(tx, OWNER, &unknown.id, namespace::ListingSort::NameAsc, None, 100).unwrap();
+        assert_eq!(unknown_children.iter().find(|row| row.entry.id == unknown_nested.id).unwrap().size, None);
+        namespace::create_folder(tx, OTHER, OTHER_ROOT, "Private").unwrap();
+        Ok((a, b, empty, unknown, nested, inactive))
+    }).await.unwrap();
+    for sort in ["name_asc", "name_desc", "size_asc", "size_desc"] {
+        let (status, body) = fixture.list(&format!("?sort={sort}")).await;
+        assert_eq!(status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = page["items"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|v| v["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["A", "B", "Empty", "Unknown"]
+        );
+        assert_eq!(rows[0]["size"], 34);
+        assert_eq!(rows[1]["size"], 0);
+        assert_eq!(rows[2]["size"], 0);
+        assert!(rows[3].get("size").is_none_or(serde_json::Value::is_null));
+        let (status, body) = fixture.list(&format!("?sort={sort}&limit=1")).await;
+        assert_eq!(status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let cursor = page["next_cursor"].as_str().unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(cursor.split('.').next().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded["last_size"], 0);
+        let a_id = a.id.clone();
+        fixture
+            .workers
+            .as_ref()
+            .unwrap()
+            .transact(move |tx| {
+                let folder = namespace::root_entry(tx, OWNER).unwrap();
+                let id = format!(
+                    "{:032x}",
+                    match sort {
+                        "name_asc" => 0xa001,
+                        "name_desc" => 0xa002,
+                        "size_asc" => 0xa003,
+                        _ => 0xa004,
+                    }
+                );
+                sized_file_in(tx, &id, &a_id, 1);
+                assert_eq!(
+                    namespace::root_entry(tx, OWNER).unwrap().generation,
+                    folder.generation
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (status, body) = fixture
+            .list(&format!("?sort={sort}&limit=1&cursor={cursor}"))
+            .await;
+        assert_eq!(
+            status, 200,
+            "nested totals do not invalidate the sibling cursor"
+        );
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(page["items"][0]["name"], "B");
+        // Reset only the synthetic additions for the next sort.
+        fixture.workers.as_ref().unwrap().transact(|tx| {
+            tx.execute("UPDATE entry SET state='deleted' WHERE entry_id IN ('0000000000000000000000000000a001','0000000000000000000000000000a002','0000000000000000000000000000a003','0000000000000000000000000000a004')", [])?;
+            Ok(())
+        }).await.unwrap();
+    }
+    let (status, _) = fixture
+        .get_as(
+            &format!("/folders/{}/children", a.id),
+            OTHER_SESSION,
+            OTHER_SECRET,
+        )
+        .await;
+    assert_eq!(status, 404);
+    let (status, body) = fixture
+        .get_as(
+            &format!("/folders/{}/children", inactive.id),
+            SESSION,
+            SECRET,
+        )
+        .await;
+    assert_eq!(status, 404, "{}", String::from_utf8_lossy(&body));
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(move |tx| {
+            let current = namespace::list(tx, OWNER, &a.id, None, 100)
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.id == nested.id)
+                .unwrap();
+            let assert_totals = |a_bytes, b_bytes| {
+                let rows = namespace::list_sorted(
+                    tx,
+                    OWNER,
+                    ROOT,
+                    namespace::ListingSort::NameAsc,
+                    None,
+                    100,
+                )
+                .unwrap();
+                assert_eq!(
+                    rows.iter().find(|row| row.entry.id == a.id).unwrap().size,
+                    Some(a_bytes)
+                );
+                assert_eq!(
+                    rows.iter().find(|row| row.entry.id == b.id).unwrap().size,
+                    Some(b_bytes)
+                );
+            };
+            namespace::move_entry(tx, OWNER, &nested.id, &b.id, &current.etag).unwrap();
+            assert_totals(11, 23);
+            let file = namespace::list(tx, OWNER, &a.id, None, 100)
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.kind == "file")
+                .unwrap();
+            namespace::trash(tx, OWNER, &file.id, &file.etag).unwrap();
+            assert_totals(0, 23);
+            let deleted = namespace::trashed(tx, OWNER)
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.entry.id == file.id)
+                .unwrap();
+            namespace::restore(tx, OWNER, &file.id, &deleted.entry.etag).unwrap();
+            assert_totals(11, 23);
+            let file = namespace::list(tx, OWNER, &a.id, None, 100)
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.kind == "file")
+                .unwrap();
+            namespace::move_entry(tx, OWNER, &file.id, &b.id, &file.etag).unwrap();
+            let rows = namespace::list_sorted(
+                tx,
+                OWNER,
+                ROOT,
+                namespace::ListingSort::SizeDesc,
+                None,
+                100,
+            )
+            .unwrap();
+            assert_eq!(
+                rows.iter().find(|row| row.entry.id == a.id).unwrap().size,
+                Some(0)
+            );
+            assert_eq!(
+                rows.iter().find(|row| row.entry.id == b.id).unwrap().size,
+                Some(34)
+            );
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.entry.id == empty.id)
+                    .unwrap()
+                    .size,
+                Some(0)
+            );
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.entry.id == unknown.id)
+                    .unwrap()
+                    .size,
+                None
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fixture.close().await;
+}
+
+#[test]
+fn recursive_folder_sizes_exclude_populated_lookahead_until_next_page() {
+    let db = namespace_db();
+    let tx = db.unchecked_transaction().unwrap();
+    let a = namespace::create_folder(&tx, OWNER, ROOT, "A").unwrap();
+    let b = namespace::create_folder(&tx, OWNER, ROOT, "B").unwrap();
+    sized_file_in(&tx, "0000000000000000000000000000b001", &a.id, 11);
+    sized_file_in(&tx, "0000000000000000000000000000b002", &b.id, 29);
+    tx.commit().unwrap();
+    for sort in [
+        namespace::ListingSort::NameAsc,
+        namespace::ListingSort::NameDesc,
+        namespace::ListingSort::SizeAsc,
+        namespace::ListingSort::SizeDesc,
+    ] {
+        let first = namespace::list_sorted(&db, OWNER, ROOT, sort, None, 1).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].entry.id, a.id);
+        assert_eq!(first[0].size, Some(11));
+        assert_eq!(first[1].entry.id, b.id);
+        assert_eq!(
+            first[1].size, None,
+            "lookahead descendants must not be aggregated"
+        );
+        let next =
+            namespace::list_sorted(&db, OWNER, ROOT, sort, Some(&first[0].position), 1).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].entry.id, b.id);
+        assert_eq!(next[0].size, Some(29));
+    }
 }

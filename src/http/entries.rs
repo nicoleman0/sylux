@@ -558,7 +558,7 @@ fn build_listing(
         items: rows
             .into_iter()
             .map(|row| ListingItem {
-                size: (row.entry.kind == "file").then_some(row.position.size),
+                size: row.size,
                 entry: row.entry,
             })
             .collect(),
