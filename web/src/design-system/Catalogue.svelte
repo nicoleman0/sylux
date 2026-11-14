@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { modifiedTime } from '$lib/modified-time';
+  import FileIcon from '@lucide/svelte/icons/file';
   import FolderIcon from '@lucide/svelte/icons/folder';
   import MoreHorizontalIcon from '@lucide/svelte/icons/ellipsis';
   import * as Button from '$lib/components/ui/button/index.js';
@@ -33,6 +35,7 @@
     { label: 'Metadata', token: '--type-meta', sample: 'Edited just now' },
     { label: 'Note', token: '--type-note', sample: 'Private to your account' },
   ];
+  const sampleModified = modifiedTime({ kind: 'file', modified_at: 1767227400 })!;
   let darkMode = $state(false);
   let samples = $state<ColorSample[]>(colorTokens.map((color) => ({ ...color, value: '' })));
   let sampleNotice = $state('');
@@ -141,11 +144,18 @@
       <div class="section-heading"><h2 id="rows-title">Rows</h2><p>Everyday file and account details.</p></div>
       <div class="sample-rows">
         {#if sampleSelected}<div class="selection-toolbar" role="group" aria-label="Selected sample items"><span>1 selected</span><Button.Root variant="ghost" size="sm" onclick={() => sampleSelected = false}>Clear selection</Button.Root><Button.Root variant="outline" size="sm" onclick={() => sampleNotice = 'Move selected.'}>Move selected</Button.Root></div>{/if}
-        <article class="file-row selectable-row">
+        <div class="list-head selectable-head modified-head"><span aria-hidden="true"></span><span>Name</span><span class="file-modified">Modified</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>
+        <article class="file-row selectable-row modified-row">
           <label class="entry-selection"><input type="checkbox" aria-label="Select Projects sample" bind:checked={sampleSelected} /></label>
-          <button type="button" class="item-name" onclick={() => sampleNotice = 'Folder action selected.'}><span class="folder-icon" aria-hidden="true"><FolderIcon /></span><span class="item-label"><span class="filename">Projects</span></span></button>
-          <span class="file-size">—</span>
+          <button type="button" class="item-name" onclick={() => sampleNotice = 'Folder action selected.'}><span class="folder-icon" aria-hidden="true"><FolderIcon /></span><span class="item-label"><span class="filename">Projects</span><span class="mobile-file-size" aria-hidden="true">0 B · —</span></span></button>
+          <span class="file-modified" title="Modified date not applicable"><span class="sr-only">Modified date not applicable</span><span aria-hidden="true">—</span></span><span class="file-size">0 B</span>
           <Button.Root variant="ghost" size="icon" class="size-11" aria-label="Project actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root>
+        </article>
+        <article class="file-row selectable-row modified-row">
+          <label class="entry-selection"><input type="checkbox" aria-label="Select Report.pdf sample" /></label>
+          <button type="button" class="item-name" onclick={() => sampleNotice = 'File action selected.'}><span aria-hidden="true"><FileIcon /></span><span class="item-label"><span class="filename">Report.pdf</span><span class="mobile-file-size" aria-hidden="true">42 KB · <time datetime={sampleModified.datetime} title={sampleModified.full}>{sampleModified.compact}</time></span></span></button>
+          <span class="file-modified"><time datetime={sampleModified.datetime} title={sampleModified.full}><span aria-hidden="true">{sampleModified.compact}</span><span class="sr-only">Modified {sampleModified.full}</span></time></span><span class="file-size">42 KB</span>
+          <Button.Root variant="ghost" size="icon" class="size-11" aria-label="Report actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root>
         </article>
         <div class="account-row">
           <div class="account-identity"><strong>alex</strong><span class="account-role">User</span></div>

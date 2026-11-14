@@ -84,7 +84,7 @@ test('one sorting control exposes all orders and supports keyboard focus', async
   await expect(page.getByRole('button', { name: /^Sort by/ })).toHaveCount(0);
   await sort.focus();
   await expect(sort).toBeFocused();
-  for (const order of ['name_desc', 'size_asc', 'size_desc', 'name_asc']) {
+  for (const order of ['name_desc', 'size_asc', 'size_desc', 'modified_asc', 'modified_desc', 'name_asc']) {
     await sort.selectOption(order);
     await expect.poll(() => requests.at(-1)?.searchParams.get('sort')).toBe(order);
     await expect(sort).toBeFocused();

@@ -47,11 +47,11 @@ for (const theme of ['light', 'dark'] as const) {
       for (const name of [longName, 'Empty', 'Unavailable', 'Older response', 'Notes.txt']) {
         await expect(size(name)).toBeVisible();
       }
-      await expect(size(longName)).toHaveText('2 KB');
-      await expect(size('Empty')).toHaveText('0 B');
-      await expect(size('Unavailable')).toHaveText('Size unknown');
-      await expect(size('Older response')).toHaveText('Size unknown');
-      await expect(size('Notes.txt')).toHaveText('1 KB');
+      await expect(size(longName)).toContainText('2 KB');
+      await expect(size('Empty')).toContainText('0 B');
+      await expect(size('Unavailable')).toContainText('Size unknown');
+      await expect(size('Older response')).toContainText('Size unknown');
+      await expect(size('Notes.txt')).toContainText('1 KB');
       const open = page.getByRole('button', { name: `Open ${longName}`, exact: true });
       await open.focus();
       await expect(open).toBeFocused();
@@ -66,7 +66,7 @@ for (const theme of ['light', 'dark'] as const) {
       await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
       await expect(page.getByRole('button', { name: 'Refresh folder', exact: true })).toHaveAttribute('aria-busy', 'true');
       backend.finish();
-      await expect(size(longName)).toHaveText('4 KB');
+      await expect(size(longName)).toContainText('4 KB');
       await expect(page.getByRole('button', { name: 'Refresh folder', exact: true })).not.toHaveAttribute('aria-busy', 'true');
       await page.getByLabel('Search files and folders', { exact: true }).fill('archive');
       await page.getByLabel('Search files and folders', { exact: true }).press('Enter');

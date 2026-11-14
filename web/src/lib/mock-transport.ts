@@ -6,7 +6,7 @@ import type { UploadStatus } from './transfers';
 const root: Folder = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root-1"' };
 const seed: Entry[] = [
   { id: 'folder-projects', parent_id: root.id, name: 'Projects', kind: 'folder', etag: '"folder-1"' },
-  { id: 'file-welcome', parent_id: root.id, name: 'Welcome.txt', kind: 'file', size: 238, etag: '"file-1"' },
+  { id: 'file-welcome', parent_id: root.id, name: 'Welcome.txt', kind: 'file', size: 238, modified_at: 1735689600, etag: '"file-1"' },
 ];
 
 /** Deterministic in-memory contract fixture. It never persists credentials. */
@@ -97,7 +97,8 @@ export class MockTransport implements ApiTransport {
       };
       const hits: SearchHit[] = this.entries.flatMap((entry) => {
         const location = locationFor(entry);
-        return location && fold(entry.name).includes(fold(query)) ? [{ entry, location }] : [];
+        const { modified_at: _modifiedAt, ...searchEntry } = entry;
+        return location && fold(entry.name).includes(fold(query)) ? [{ entry: searchEntry, location }] : [];
       }).sort((a, b) => compare(fold(a.entry.name), fold(b.entry.name)) ||
         compare(fold(a.location.slice(1).map((part) => part.name).join('\0')), fold(b.location.slice(1).map((part) => part.name).join('\0'))) ||
         compare(a.entry.id, b.entry.id));
@@ -122,7 +123,7 @@ export class MockTransport implements ApiTransport {
     if ((route === '/folders/children' || /^\/folders\/[^/]+\/children$/.test(route)) && method === 'GET') {
       const params = new URLSearchParams(path.split('?')[1]);
       const sort = params.get('sort') ?? 'name_asc';
-      if (!['name_asc', 'name_desc', 'size_asc', 'size_desc'].includes(sort)) throw new HttpError(400);
+      if (!['name_asc', 'name_desc', 'size_asc', 'size_desc', 'modified_asc', 'modified_desc'].includes(sort)) throw new HttpError(400);
       const folderId = route === '/folders/children' ? root.id : decodeURIComponent(route.split('/')[2]!);
       const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
       const nameKey = (entry: Entry) => [...new TextEncoder().encode(entry.name.normalize('NFC'))];
@@ -132,6 +133,13 @@ export class MockTransport implements ApiTransport {
         const difference = left.findIndex((byte, index) => byte !== right[index]);
         const name = difference < 0 ? left.length - right.length : left[difference] - (right[difference] ?? -1);
         if (a.kind === 'folder' || b.kind === 'folder') return name || compare(a.id, b.id);
+        if (sort.startsWith('modified_')) {
+          const leftTime = a.modified_at, rightTime = b.modified_at;
+          const leftKnown = typeof leftTime === 'number' && Number.isFinite(leftTime);
+          const rightKnown = typeof rightTime === 'number' && Number.isFinite(rightTime);
+          if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
+          return (leftKnown && rightKnown ? (leftTime - rightTime) * (sort === 'modified_desc' ? -1 : 1) : 0) || name || compare(a.id, b.id);
+        }
         if (sort.startsWith('size_')) return (a.size - b.size) * (sort === 'size_desc' ? -1 : 1) || name || compare(a.id, b.id);
         return name * (sort === 'name_desc' ? -1 : 1) || compare(a.id, b.id);
       });
@@ -235,7 +243,7 @@ export class MockTransport implements ApiTransport {
         this.deletedEntries = [...this.deletedEntries, existing];
       }
       this.uploads.set(id, committed);
-      this.entries = [...this.entries, { id: `file-${++this.sequence}`, parent_id: details.parentId, name: details.name, kind: 'file', size: previous.length, etag: '"file-new"' }];
+      this.entries = [...this.entries, { id: `file-${++this.sequence}`, parent_id: details.parentId, name: details.name, kind: 'file', size: previous.length, modified_at: Math.floor(Date.now() / 1000), etag: '"file-new"' }];
       return { id, name: details.name, status: committed } as T;
     }
     if (route.startsWith('/uploads/') && method === 'DELETE') {

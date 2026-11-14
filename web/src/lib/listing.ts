@@ -1,9 +1,9 @@
 import type { ApiClient } from './api';
 
-export type Folder = { id: string; parent_id: string | null; name: string; kind: 'folder'; size?: number | null; etag: string };
-export type FileEntry = { id: string; parent_id: string; name: string; kind: 'file'; size: number; etag: string };
+export type Folder = { id: string; parent_id: string | null; name: string; kind: 'folder'; size?: number | null; modified_at?: number | null; etag: string };
+export type FileEntry = { id: string; parent_id: string; name: string; kind: 'file'; size: number; modified_at?: number | null; etag: string };
 export type Entry = Folder | FileEntry;
-export type FolderSort = 'name_asc' | 'name_desc' | 'size_asc' | 'size_desc';
+export type FolderSort = 'name_asc' | 'name_desc' | 'size_asc' | 'size_desc' | 'modified_asc' | 'modified_desc';
 export type DeletedEntry = Entry & { original_path: string[] };
 export type Listing<T extends Entry = Entry> = { items: T[]; next_cursor: string | null; has_more: boolean };
 export type RootListing = { items: Entry[]; root: Folder; next_cursor: string | null; has_more: boolean };
