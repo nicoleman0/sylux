@@ -411,6 +411,10 @@
   let showTrash = $state(false);
   let trashError = $state('');
   let trashBusy = $state(false);
+  let restoringId = $state('');
+  let restoringName = $state('');
+  let namespaceUnknown = $state<{ action: 'trash' | 'restore'; entry: Entry; inspected: boolean; message: string } | null>(null);
+  let namespaceInspecting = $state(false);
   let trashLoading = $state(false);
   let renameId = $state('');
   let renameName = $state('');
@@ -569,7 +573,7 @@
   }
   let unresolvedUploadResult: number | null = null;
   let replacementDecision: ((prompt: ReplacementPrompt | null) => void) | null = null;
-  const fileMutationBusy = $derived(restorationPending || (workspaceRefreshing && loading) || bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || folderBusy || transferBusy || uploadBatchBusy);
+  const fileMutationBusy = $derived(restorationPending || (workspaceRefreshing && loading) || bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || !!namespaceUnknown || folderBusy || transferBusy || uploadBatchBusy);
 
   function restoreFocus(trigger: HTMLElement | null, fallback = 'folder-title'): void {
     if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus({ preventScroll: true });
@@ -1004,7 +1008,7 @@
     draggedEntry = null; dropTarget = ''; dropPending = null; dropError = ''; moveNeedsRefresh = false; knownParents.clear();
     renameId = ''; renameName = ''; renameError = ''; renameBusy = false;
     closeMove(); moveBusy = false;
-    trashRequest++; deletedItems = []; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false;
+    trashRequest++; deletedItems = []; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false; restoringId = ''; restoringName = ''; namespaceUnknown = null; namespaceInspecting = false;
   }
   function clearAccountForms(): void {
     changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null; instanceBusy = false; instanceNotice = '';
@@ -1045,12 +1049,13 @@
   }
 
   function beginCreate(trigger: HTMLElement): void {
-    if (restorationPending) return;
+    if (restorationPending || namespaceUnknown) return;
     createTrigger = trigger; folderName = ''; folderError = ''; createOpen = true;
   }
 
   async function createFolder(event: SubmitEvent): Promise<void> {
     event.preventDefault();
+    if (namespaceUnknown) { folderError = 'Close this dialog and check Files and Trash before continuing.'; return; }
     if (restorationPending || folderBusy || !currentFolder.id) return;
     const name = folderName.trim();
     if (!name || name === '.' || name === '..' || /[\/\\\x00-\x1f\x7f]/.test(name)) {
@@ -1091,6 +1096,7 @@
   async function renameEntry(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     const target = searchQuery ? searchItems.find((hit) => hit.entry.id === renameId)?.entry : entries.find((entry) => entry.id === renameId);
+    if (namespaceUnknown) { renameError = 'Close this dialog and check Files and Trash before continuing.'; return; }
     if (!target || !renameName.trim() || renameBusy) return;
     const generation = sessionGeneration;
     renameBusy = true; renameError = '';
@@ -1145,7 +1151,7 @@
     } finally { if (request === moveRequest) moveLoading = false; }
   }
   async function beginMove(entry: Entry, trigger: HTMLElement): Promise<void> {
-    if (bulkBusy || bulkNeedsRefresh || dropPending || moveNeedsRefresh) return;
+    if (bulkBusy || bulkNeedsRefresh || dropPending || moveNeedsRefresh || namespaceUnknown) return;
     closeMove(); moveTarget = entry; moveTrigger = trigger;
     const root = folders[0];
     if (root) await loadMoveFolder([root]);
@@ -1154,6 +1160,7 @@
   async function moveEntry(): Promise<void> {
     const target = moveTarget;
     const destination = movePath.at(-1);
+    if (namespaceUnknown) { moveError = 'Close this dialog and check Files and Trash before continuing.'; return; }
     if (!target || !destination || moveBusy || moveLoading || !moveDestinationReady || destination.id === target.parent_id) return;
     const generation = sessionGeneration;
     moveBusy = true; moveError = '';
@@ -1177,10 +1184,23 @@
     } catch { if (generation === sessionGeneration && feedbackRevision === completion) actionNotice = `Moved to ${destination.name}. Refresh your files to update the folder list.`; }
   }
 
+  function trashRoots(targets: Entry[]): Entry[] {
+    const selected = new Set(targets.map((entry) => entry.id));
+    return targets.filter((entry) => {
+      let parent = entry.parent_id;
+      const seen = new Set<string>();
+      while (parent && !seen.has(parent)) {
+        if (selected.has(parent)) return false;
+        seen.add(parent); parent = knownParents.get(parent) ?? null;
+      }
+      return true;
+    });
+  }
+
   async function beginBulk(action: BulkAction, trigger: HTMLElement, targets = selectedEntries, retry = false): Promise<void> {
     if (!targets.length || fileMutationBusy || loading || searchLoading || searchError || searchInputError) return;
     closeMove();
-    bulkTargets = targets.map((entry) => ({ ...entry }));
+    bulkTargets = (action === 'trash' ? trashRoots(targets) : targets).map((entry) => ({ ...entry }));
     bulkAction = action; bulkRetry = retry; bulkTrigger = trigger; bulkError = '';
     if (action === 'move') {
       const root = folders[0];
@@ -1227,7 +1247,7 @@
         if (generation !== sessionGeneration) return;
         result.status = moveOutcomeUncertain(error) ? 'uncertain' : 'failed';
         result.message = result.status === 'uncertain' ? 'Outcome unconfirmed. Refresh before retrying.' :
-          action === 'move' ? moveFailure(error) : error instanceof HttpError && error.status === 403 ? 'You do not have permission to move this item to trash.' : error instanceof HttpError && error.status === 409 ? 'Folder is not empty. Empty it before retrying.' :
+          action === 'move' ? moveFailure(error) : error instanceof HttpError && error.status === 403 ? 'You do not have permission to move this item to trash.' : error instanceof HttpError && error.status === 409 ? 'This item could not be moved to trash. Refresh before retrying.' :
           error instanceof HttpError && error.status === 412 ? 'This item changed. Refresh before retrying.' : 'Could not move to trash. Refresh before retrying.';
         if (result.status === 'uncertain') bulkNeedsRefresh = true;
         if (error instanceof HttpError && error.status === 401) break;
@@ -1444,7 +1464,7 @@
   }
 
   async function runUploadBatch(read: (canceled: () => boolean) => Promise<UploadItem[]>, destination: Folder): Promise<void> {
-    if (restorationPending || uploadBatchBusy || transferBusy || unresolvedUploadId) return;
+    if (restorationPending || namespaceUnknown || uploadBatchBusy || transferBusy || unresolvedUploadId) return;
     const generation = sessionGeneration;
     clearCompletedFeedback();
     retainUploadReport();
@@ -1464,6 +1484,7 @@
       uploadResults = items.map((item) => ({ path: item.path.join('/'), kind: item.kind, size: item.kind === 'file' ? item.file.size : 0, sent: 0, sentComplete: false, status: 'waiting' }));
       const destinations = new Map<string, Folder>([['[]', destination]]);
       for (const [index, item] of items.entries()) {
+        if (namespaceUnknown) { uploadBatchStatus = 'Upload stopped. Check Files and Trash before adding more items.'; break; }
         if (uploadBatchCanceled || generation !== sessionGeneration) break;
         currentIndex = index; uploadBatchCurrentIndex = index;
         uploadResults[index].status = 'active';
@@ -1543,7 +1564,7 @@
     void tick().then(() => { if (generation === sessionGeneration && request === navigationRequest) restoreFocus(trigger); });
   }
   function entryAction(action: 'download' | 'rename' | 'move' | 'delete', entry: Entry, trigger: HTMLElement): void {
-    if (bulkBusy || (bulkNeedsRefresh && action !== 'download')) return;
+    if (bulkBusy || ((bulkNeedsRefresh || namespaceUnknown) && action !== 'download')) return;
     if (action === 'download') void download(entry);
     else if (action === 'rename') beginRename(entry, trigger);
     else if (action === 'move') void beginMove(entry, trigger);
@@ -1565,9 +1586,76 @@
   async function openTrash(): Promise<void> {
     await navigate('trash');
   }
+  function rememberNamespaceUnknown(entry: Entry, action: 'trash' | 'restore'): void {
+    clearCompletedFeedback();
+    namespaceUnknown = { entry: { ...entry }, action, inspected: false, message: 'Outcome unconfirmed. Check Files and Trash before acting again.' };
+    trashTarget = null; trashError = '';
+  }
+
+  async function inspectNamespace(event: MouseEvent): Promise<void> {
+    const pending = namespaceUnknown;
+    if (!pending || namespaceInspecting) return;
+    const generation = sessionGeneration;
+    const navigation = navigationRequest;
+    const trigger = event.currentTarget as HTMLElement;
+    let foundLocation: 'Files' | 'Trash' | null = null;
+    namespaceInspecting = true;
+    try {
+      const deleted = (await listing.deleted()).items;
+      let source: Entry[] = [];
+      let parentUnavailable = false;
+      try { if (pending.entry.parent_id) source = await folderEntries(pending.entry.parent_id, generation); }
+      catch (error) { if (error instanceof HttpError && error.status === 404) parentUnavailable = true; else throw error; }
+      if (generation !== sessionGeneration || namespaceUnknown !== pending) return;
+      const live = source.find((entry) => entry.id === pending.entry.id);
+      const hidden = deleted.find((entry) => entry.id === pending.entry.id);
+      if (live && hidden) {
+        pending.inspected = false;
+        pending.message = 'Files and Trash changed while checking. Check again to confirm the current location.';
+      } else if (live || hidden) {
+        foundLocation = hidden ? 'Trash' : 'Files';
+        pending.inspected = false;
+        pending.message = `Found in ${foundLocation}. Refreshing this view…`;
+        await refreshRoot();
+        if (generation !== sessionGeneration || namespaceUnknown !== pending) return;
+        if (navigation !== navigationRequest) {
+          pending.message = `Found in ${foundLocation}. Check again to refresh the current view before continuing.`;
+          return;
+        }
+        if (showTrash) { await loadTrash(); if (trashError) throw new Error('Trash refresh failed'); }
+        else if (!accountView && !settingsView && !await refresh()) throw new Error('Folder refresh failed');
+        if (generation !== sessionGeneration || namespaceUnknown !== pending) return;
+        if (navigation !== navigationRequest) {
+          pending.message = `Found in ${foundLocation}. Check again to refresh the current view before continuing.`;
+          return;
+        }
+        const shouldFocus = document.activeElement === trigger || document.activeElement === document.body;
+        namespaceUnknown = null;
+        clearCompletedFeedback(); actionNotice = `${pending.entry.name} is in ${foundLocation}`;
+        await tick();
+        if (shouldFocus && generation === sessionGeneration && navigation === navigationRequest &&
+          (document.activeElement === trigger || document.activeElement === document.body)) {
+          document.getElementById(showTrash ? 'trash-heading' : accountView ? 'account-title' : settingsView ? 'settings-title' : 'folder-title')?.focus();
+        }
+      } else {
+        pending.inspected = true;
+        pending.message = parentUnavailable ? 'Its original folder is unavailable. Open Trash to recover its parent, or dismiss this result after reviewing it.' : 'This item is absent from its original folder and Trash. Check its location before selecting it again.';
+      }
+    } catch {
+      if (generation === sessionGeneration && namespaceUnknown === pending) pending.message = foundLocation ? `Found in ${foundLocation}, but this view could not refresh. Check again before continuing.` : 'Could not check Files and Trash. Check your connection and try again.';
+    } finally { if (generation === sessionGeneration) namespaceInspecting = false; }
+  }
+
+  async function dismissNamespaceUnknown(): Promise<void> {
+    if (!namespaceUnknown?.inspected || namespaceInspecting) return;
+    namespaceUnknown = null;
+    await tick();
+    document.getElementById(showTrash ? 'trash-heading' : accountView ? 'account-title' : settingsView ? 'settings-title' : 'folder-title')?.focus();
+  }
+
   async function deleteEntry(): Promise<void> {
     const target = trashTarget;
-    if (!target || trashBusy) return;
+    if (!target || trashBusy || namespaceUnknown) return;
     trashBusy = true;
     const sessionVersion = sessionGeneration;
     try {
@@ -1581,7 +1669,8 @@
       if (sessionVersion === sessionGeneration && showTrash) await loadTrash();
     } catch (error) {
       if (sessionVersion !== sessionGeneration) return;
-      trashError = error instanceof HttpError && error.status === 409 ? 'Empty this folder before deleting it.' : 'Could not delete this item. Refresh the folder and try again.';
+      if (moveOutcomeUncertain(error)) rememberNamespaceUnknown(target, 'trash');
+      else trashError = error instanceof HttpError && error.status === 412 ? 'This item changed. Refresh the folder before trying again.' : 'Could not move this item to trash. Refresh the folder before trying again.';
     } finally { if (sessionVersion === sessionGeneration) trashBusy = false; }
   }
   function needsDeletedReference(item: DeletedEntry): boolean {
@@ -1590,8 +1679,8 @@
       other.original_path.every((part, index) => part === item.original_path[index]));
   }
   async function restoreEntry(item: Entry, trigger: HTMLElement): Promise<void> {
-    if (trashBusy) return;
-    trashBusy = true; trashError = '';
+    if (trashBusy || namespaceUnknown) return;
+    trashBusy = true; restoringId = item.id; restoringName = item.name; trashError = '';
     const sessionVersion = sessionGeneration;
     let failed = false;
     try {
@@ -1603,10 +1692,11 @@
     } catch (error) {
       if (sessionVersion !== sessionGeneration) return;
       failed = true;
-      trashError = error instanceof HttpError && error.status === 409 ? 'Restore its parent folder first, or rename the item occupying its original name.' : 'Could not restore this item. Refresh trash and try again.';
+      if (moveOutcomeUncertain(error)) rememberNamespaceUnknown(item, 'restore');
+      else trashError = error instanceof HttpError && error.status === 409 ? 'Restore its parent folder first, or rename the item occupying its original name.' : 'Could not restore this item. Refresh trash before trying again.';
     } finally {
       if (sessionVersion === sessionGeneration) {
-        trashBusy = false;
+        trashBusy = false; restoringId = ''; restoringName = '';
         if (failed) { await tick(); if (sessionVersion === sessionGeneration && showTrash) restoreFocus(trigger, 'trash-heading'); }
       }
     }
@@ -1673,6 +1763,7 @@
   }
 
   async function startUpload(file: File, input: HTMLInputElement | null, replacement?: Replacement, folder = currentFolder): Promise<boolean> {
+    if (namespaceUnknown) return false;
     const generation = sessionGeneration;
     const activeTransfers = transfers;
     let committed = false;
@@ -2003,6 +2094,22 @@
                 <Button variant="ghost" size="icon" aria-label="Dismiss notification" title="Dismiss notification" onclick={dismissActionNotice}><XIcon /></Button>
               </div>{/key}
             {/if}
+            {#if trashBusy && restoringId && !showTrash}
+              <div class="action-feedback workspace-feedback" aria-busy="true">
+                <p role="status">Restoring {restoringName}…</p><Button variant="ghost" onclick={openTrash}>Open Trash</Button>
+              </div>
+            {/if}
+            {#if namespaceUnknown}
+              <section class="bulk-results" aria-label="Unconfirmed file action" aria-busy={namespaceInspecting}>
+                <h2>{namespaceUnknown.action === 'trash' ? 'Move to trash unconfirmed' : 'Restore unconfirmed'}</h2>
+                <p role="status"><strong class="break-all">{namespaceUnknown.entry.name}</strong>. {namespaceUnknown.message}</p>
+                <div class="flex flex-wrap gap-2">
+                  <Button variant="outline" disabled={namespaceInspecting} aria-busy={namespaceInspecting} onclick={inspectNamespace}>{namespaceInspecting ? 'Checking Files and Trash…' : 'Check Files and Trash'}</Button>
+                  <Button variant="ghost" disabled={namespaceInspecting} onclick={openTrash}>Open Trash</Button>
+                  {#if namespaceUnknown.inspected}<Button variant="ghost" disabled={namespaceInspecting} onclick={dismissNamespaceUnknown}>Dismiss result</Button>{/if}
+                </div>
+              </section>
+            {/if}
             {#if bulkReport}
               <section class:action-feedback={bulkComplete} class:bulk-results={!bulkComplete} aria-label={bulkReport.action === 'move' ? 'Move results' : 'Trash results'} aria-busy={bulkBusy}>
                 {#if bulkComplete}
@@ -2125,7 +2232,7 @@
                     <li class="trash-row">
                       <span class="trash-kind" class:folder-icon={item.kind === 'folder'} aria-hidden="true">{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span>
                       <span class="trash-item"><span class="trash-name">{item.name}</span><span class="sr-only">{item.kind}</span><span class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}</span>{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span>
-                      <Button variant="outline" size="sm" disabled={trashBusy || trashLoading} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>Restore</Button>
+                      <Button variant="outline" size="sm" disabled={trashBusy || trashLoading || !!namespaceUnknown} aria-busy={trashBusy && restoringId === item.id} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button>
                     </li>
                   {/each}
                 </ul>
@@ -2242,7 +2349,7 @@
     </Dialog.Root>
     <Dialog.Root open={bulkAction === 'trash'} onOpenChange={(open) => { if (!open) closeBulk(); }}>
       <Dialog.Content showCloseButton={!bulkBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger); bulkTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Move {bulkTargets.length} selected items to trash?</Dialog.Title><Dialog.Description>You can restore these items later. Folders must be empty. Each item is handled separately; some items may stay in place.</Dialog.Description></Dialog.Header>
+        <Dialog.Header><Dialog.Title>Move {bulkTargets.length} selected items to trash?</Dialog.Title><Dialog.Description>Folders include their contents. You can restore these items later. Each selected item is handled separately; some items may stay in place.</Dialog.Description></Dialog.Header>
         <ul class="bulk-confirm-items">{#each bulkTargets as entry (entry.id)}<li>{entry.name}</li>{/each}</ul>
         <Dialog.Footer><Button variant="outline" disabled={bulkBusy} onclick={closeBulk}>Cancel</Button><Button disabled={bulkBusy} onclick={runBulk}>{bulkBusy ? 'Moving to trash…' : 'Move to trash'}</Button></Dialog.Footer>
       </Dialog.Content>
@@ -2254,10 +2361,10 @@
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!trashTarget} onOpenChange={(open) => { if (!open && !trashBusy) trashTarget = null; }}>
-      <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(trashTrigger); trashTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Delete {trashTarget?.name}?</Dialog.Title><Dialog.Description>Move this item to trash. You can restore it later. Folders must be empty. Permanent removal is not available yet.</Dialog.Description></Dialog.Header>
+      <Dialog.Content showCloseButton={!trashBusy} aria-busy={trashBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(trashTrigger); trashTrigger = null; }}>
+        <Dialog.Header><Dialog.Title>Delete {trashTarget?.name}?</Dialog.Title><Dialog.Description>{trashTarget?.kind === 'folder' ? 'Move this folder and its contents to trash. You can restore the folder later.' : 'Move this file to trash. You can restore it later.'}</Dialog.Description></Dialog.Header>
         {#if trashError}<p role="alert">{trashError}</p>{/if}
-        <Dialog.Footer><Button variant="outline" disabled={trashBusy} onclick={() => trashTarget = null}>Cancel</Button><Button disabled={trashBusy} onclick={deleteEntry}>Move to trash</Button></Dialog.Footer>
+        <Dialog.Footer><Button variant="outline" disabled={trashBusy} onclick={() => trashTarget = null}>Cancel</Button><Button disabled={trashBusy} aria-busy={trashBusy} onclick={deleteEntry}>{trashBusy ? 'Moving to trash…' : 'Move to trash'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!renameId} onOpenChange={(open) => { if (!open && !renameBusy) closeRename(); }}>

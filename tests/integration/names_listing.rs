@@ -98,6 +98,16 @@ impl HttpFixture {
         }
     }
     async fn request_bytes(&self, path: &str, extra: &str, body: &[u8]) -> (u16, Vec<u8>) {
+        self.request_using("POST", path, extra, body).await
+    }
+
+    async fn request_using(
+        &self,
+        method: &str,
+        path: &str,
+        extra: &str,
+        body: &[u8],
+    ) -> (u16, Vec<u8>) {
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
             time::timeout,
@@ -110,7 +120,7 @@ impl HttpFixture {
             SESSION,
             URL_SAFE_NO_PAD.encode(SECRET)
         );
-        let mut request = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {cookie}\r\nAccept: application/json\r\nOrigin: https://127.0.0.1\r\nX-CSRF-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\n{extra}Content-Length: {}\r\n\r\n", URL_SAFE_NO_PAD.encode(CSRF), body.len()).into_bytes();
+        let mut request = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {cookie}\r\nAccept: application/json\r\nOrigin: https://127.0.0.1\r\nX-CSRF-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\n{extra}Content-Length: {}\r\n\r\n", URL_SAFE_NO_PAD.encode(CSRF), body.len()).into_bytes();
         request.extend_from_slice(body);
         stream.write_all(&request).await.unwrap();
         let mut response = Vec::new();
@@ -870,18 +880,11 @@ async fn stale_cursor_and_barrier_ordered_listing_are_deterministic() {
 }
 
 #[test]
-fn trash_requires_empty_folders_and_restores_parent_before_child() {
+fn folder_recovery_preserves_earlier_deleted_child() {
     let db = namespace_db();
     let tx = db.unchecked_transaction().unwrap();
     let parent = namespace::create_folder(&tx, OWNER, ROOT, "parent").unwrap();
     let child = namespace::create_folder(&tx, OWNER, &parent.id, "child").unwrap();
-    let parent = namespace::list(&tx, OWNER, ROOT, None, 10)
-        .unwrap()
-        .remove(0);
-    assert!(matches!(
-        namespace::trash(&tx, OWNER, &parent.id, &parent.etag),
-        Err(NamespaceError::NotEmpty)
-    ));
     assert!(matches!(
         namespace::trash(&tx, OTHER, &child.id, &child.etag),
         Err(NamespaceError::NotFound)
@@ -1786,4 +1789,511 @@ fn folder_paths_reject_corrupt_cycles_missing_and_foreign_ancestors() {
         namespace::folder_path(&tx, OWNER, &nested.id),
         Err(NamespaceError::NotFound)
     ));
+}
+
+#[test]
+fn folder_recovery_marks_only_root_and_invalidates_active_descendants() {
+    let db = namespace_db();
+    let tx = db.unchecked_transaction().unwrap();
+    let top = namespace::create_folder(&tx, OWNER, ROOT, "tree").unwrap();
+    let nested = namespace::create_folder(&tx, OWNER, &top.id, "nested").unwrap();
+    let live = namespace::create_folder(&tx, OWNER, &nested.id, "live").unwrap();
+    let earlier = namespace::create_folder(&tx, OWNER, &nested.id, "earlier").unwrap();
+    let old_child = namespace::create_folder(&tx, OWNER, &earlier.id, "old child").unwrap();
+    let current = |id: &str| -> (String, i64) {
+        tx.query_row(
+            "SELECT state,generation FROM entry WHERE entry_id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    };
+    let tag = |id: &str| sylux::domain::upload::folder_etag(id, current(id).1 as u64);
+    namespace::trash(&tx, OWNER, &earlier.id, &tag(&earlier.id)).unwrap();
+    let before = [&top.id, &nested.id, &live.id, &earlier.id, &old_child.id].map(|id| current(id));
+    namespace::trash(&tx, OWNER, &top.id, &tag(&top.id)).unwrap();
+    assert_eq!(namespace::trashed(&tx, OWNER).unwrap().len(), 2);
+    for (index, id) in [&top.id, &nested.id, &live.id].iter().enumerate() {
+        assert_eq!(current(id).1, before[index].1 + 1);
+        assert_eq!(current(id).0, if index == 0 { "deleted" } else { "active" });
+    }
+    assert_eq!(current(&earlier.id), before[3]);
+    assert_eq!(current(&old_child.id), before[4]);
+    for id in [&nested.id, &live.id] {
+        assert!(matches!(
+            namespace::folder_path(&tx, OWNER, id),
+            Err(NamespaceError::NotFound)
+        ));
+        assert!(matches!(
+            namespace::list(&tx, OWNER, id, None, 10),
+            Err(NamespaceError::NotFound)
+        ));
+        assert!(matches!(
+            namespace::create_folder(&tx, OWNER, id, "hidden"),
+            Err(NamespaceError::NotFound)
+        ));
+        assert!(matches!(
+            namespace::rename(&tx, OWNER, id, "hidden", &tag(id)),
+            Err(NamespaceError::NotFound)
+        ));
+        assert!(matches!(
+            namespace::move_entry(&tx, OWNER, id, ROOT, &tag(id)),
+            Err(NamespaceError::NotFound)
+        ));
+        assert!(matches!(
+            namespace::trash(&tx, OWNER, id, &tag(id)),
+            Err(NamespaceError::NotFound)
+        ));
+    }
+    assert!(matches!(
+        namespace::restore(&tx, OWNER, &earlier.id, &tag(&earlier.id)),
+        Err(NamespaceError::ParentUnavailable)
+    ));
+    assert!(matches!(
+        namespace::trash(&tx, OWNER, ROOT, &tag(ROOT)),
+        Err(NamespaceError::NotFound)
+    ));
+    namespace::restore(&tx, OWNER, &top.id, &tag(&top.id)).unwrap();
+    assert!(namespace::folder_path(&tx, OWNER, &live.id).is_ok());
+    assert!(matches!(
+        namespace::rename(&tx, OWNER, &live.id, "stale", &live.etag),
+        Err(NamespaceError::Stale)
+    ));
+    assert_eq!(current(&earlier.id), before[3]);
+    assert_eq!(current(&old_child.id), before[4]);
+    tx.commit().unwrap();
+}
+
+#[test]
+fn folder_recovery_rolls_back_generation_updates_and_conflicts_without_changes() {
+    let db = namespace_db();
+    let tx = db.unchecked_transaction().unwrap();
+    let top = namespace::create_folder(&tx, OWNER, ROOT, "tree").unwrap();
+    let child = namespace::create_folder(&tx, OWNER, &top.id, "child").unwrap();
+    tx.commit().unwrap();
+    let inventory = || {
+        let mut statement = db
+            .prepare("SELECT entry_id,state,generation FROM entry ORDER BY entry_id")
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let before = inventory();
+    db.execute_batch("CREATE TRIGGER abort_tree_marker BEFORE UPDATE OF state ON entry WHEN NEW.state='deleted' BEGIN SELECT RAISE(ABORT,'synthetic marker failure'); END").unwrap();
+    let tx = db.unchecked_transaction().unwrap();
+    let top_tag = sylux::domain::upload::folder_etag(&top.id, 2);
+    assert!(matches!(
+        namespace::trash(&tx, OWNER, &top.id, &top_tag),
+        Err(NamespaceError::Sql)
+    ));
+    tx.rollback().unwrap();
+    assert_eq!(inventory(), before);
+    db.execute_batch("DROP TRIGGER abort_tree_marker").unwrap();
+    let tx = db.unchecked_transaction().unwrap();
+    namespace::trash(&tx, OWNER, &top.id, &top_tag).unwrap();
+    namespace::create_folder(&tx, OWNER, ROOT, "tree").unwrap();
+    tx.commit().unwrap();
+    let before = inventory();
+    let tx = db.unchecked_transaction().unwrap();
+    let deleted = namespace::trashed(&tx, OWNER).unwrap().remove(0);
+    assert!(matches!(
+        namespace::restore(&tx, OWNER, &top.id, &deleted.entry.etag),
+        Err(NamespaceError::Conflict)
+    ));
+    tx.commit().unwrap();
+    assert_eq!(inventory(), before);
+    assert!(matches!(
+        namespace::folder_path(&db, OWNER, &child.id),
+        Err(NamespaceError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn folder_recovery_serializes_moves_with_tree_membership() {
+    for (trash_first, move_out) in [(false, false), (true, false), (false, true), (true, true)] {
+        let fixture = HttpFixture::new("tree-move-order", 0).await;
+        let workers = fixture.workers.as_ref().unwrap().clone();
+        let (top, nested, source, item) = workers
+            .transact(move |tx| {
+                let top = namespace::create_folder(tx, OWNER, ROOT, "tree").unwrap();
+                let nested = namespace::create_folder(tx, OWNER, &top.id, "nested").unwrap();
+                let source = namespace::create_folder(tx, OWNER, ROOT, "source").unwrap();
+                let item = namespace::create_folder(
+                    tx,
+                    OWNER,
+                    if move_out { &nested.id } else { &source.id },
+                    "item",
+                )
+                .unwrap();
+                let top = namespace::folder_path(tx, OWNER, &top.id)
+                    .unwrap()
+                    .pop()
+                    .unwrap();
+                Ok((top, nested, source, item))
+            })
+            .await
+            .unwrap();
+        let destination = if move_out {
+            source.id.clone()
+        } else {
+            nested.id.clone()
+        };
+        let first_destination = destination.clone();
+        let nested_id = nested.id.clone();
+        let source_id = source.id.clone();
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_workers = workers.clone();
+        let (first_top, first_item) = (top.clone(), item.clone());
+        let first = tokio::spawn(async move {
+            first_workers
+                .transact(move |tx| {
+                    if trash_first {
+                        namespace::trash(tx, OWNER, &first_top.id, &first_top.etag).unwrap();
+                    } else {
+                        namespace::move_entry(
+                            tx,
+                            OWNER,
+                            &first_item.id,
+                            &first_destination,
+                            &first_item.etag,
+                        )
+                        .unwrap();
+                    }
+                    let _ = reached_tx.send(());
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        reached_rx.await.unwrap();
+        let second_top = top.clone();
+        let second_item = item.clone();
+        let mut second = Box::pin(workers.transact(move |tx| {
+            if trash_first {
+                Ok(namespace::move_entry(
+                    tx,
+                    OWNER,
+                    &second_item.id,
+                    &destination,
+                    &second_item.etag,
+                )
+                .map(|_| ()))
+            } else {
+                Ok(namespace::trash(
+                    tx,
+                    OWNER,
+                    &second_top.id,
+                    &second_top.etag,
+                ))
+            }
+        }));
+        tokio::select! { biased; result = &mut second => panic!("queued mutation completed: {result:?}"), () = tokio::task::yield_now() => {} }
+        release_tx.send(()).unwrap();
+        first.await.unwrap();
+        let second = second.await.unwrap();
+        if trash_first {
+            assert!(matches!(second, Err(NamespaceError::NotFound)));
+        } else {
+            second.unwrap();
+        }
+        workers
+            .transact(move |tx| {
+                let outside = namespace::list(tx, OWNER, &source_id, None, 10).unwrap();
+                assert_eq!(
+                    outside.len(),
+                    usize::from(if move_out { !trash_first } else { trash_first })
+                );
+                assert!(matches!(
+                    namespace::folder_path(tx, OWNER, &top.id),
+                    Err(NamespaceError::NotFound)
+                ));
+                let deleted = namespace::trashed(tx, OWNER)
+                    .unwrap()
+                    .into_iter()
+                    .find(|entry| entry.entry.id == top.id)
+                    .unwrap();
+                namespace::restore(tx, OWNER, &top.id, &deleted.entry.etag).unwrap();
+                let nested_items = namespace::list(tx, OWNER, &nested_id, None, 10).unwrap();
+                assert_eq!(
+                    nested_items.len(),
+                    usize::from(if move_out { trash_first } else { !trash_first })
+                );
+                let generation: i64 = tx.query_row(
+                    "SELECT generation FROM entry WHERE entry_id=?1",
+                    [&item.id],
+                    |row| row.get(0),
+                )?;
+                let expected = match (trash_first, move_out) {
+                    (false, false) => 3,
+                    (true, false) => 1,
+                    _ => 2,
+                };
+                assert_eq!(generation, expected);
+                assert_eq!(
+                    namespace::folder_path(tx, OWNER, &top.id)
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .generation,
+                    top.generation + 2
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn folder_recovery_measures_1000_entry_tree_and_invalidates_descendant_cursor() {
+    let fixture = HttpFixture::new("tree-1000", 0).await;
+    let workers = fixture.workers.as_ref().unwrap();
+    let (top, branch) = workers
+        .transact(|tx| {
+            let top = namespace::create_folder(tx, OWNER, ROOT, "Tree").unwrap();
+            let mut branches = Vec::new();
+            for index in 0..9 {
+                branches.push(
+                    namespace::create_folder(tx, OWNER, &top.id, &format!("branch-{index}"))
+                        .unwrap(),
+                );
+            }
+            for index in 0..990 {
+                namespace::create_folder(
+                    tx,
+                    OWNER,
+                    &branches[index % 9].id,
+                    &format!("leaf-{index:04}"),
+                )
+                .unwrap();
+            }
+            Ok((
+                namespace::folder_path(tx, OWNER, &top.id)
+                    .unwrap()
+                    .pop()
+                    .unwrap(),
+                branches.remove(0),
+            ))
+        })
+        .await
+        .unwrap();
+    let top_id = top.id.clone();
+    let (sql_trash, sql_restore) = workers
+        .transact(move |tx| {
+            let start = std::time::Instant::now();
+            namespace::trash(tx, OWNER, &top.id, &top.etag).unwrap();
+            let trash = start.elapsed();
+            let deleted = namespace::trashed(tx, OWNER).unwrap().remove(0);
+            let start = std::time::Instant::now();
+            namespace::restore(tx, OWNER, &top.id, &deleted.entry.etag).unwrap();
+            Ok((trash, start.elapsed()))
+        })
+        .await
+        .unwrap();
+    let (_, page) = fixture
+        .list(&format!("?folder_id={}&limit=1", branch.id))
+        .await;
+    let page: serde_json::Value = serde_json::from_slice(&page).unwrap();
+    let cursor = page["next_cursor"].as_str().unwrap();
+    let (_, root) = fixture.list("").await;
+    let root: serde_json::Value = serde_json::from_slice(&root).unwrap();
+    let top = &root["items"][0];
+    let start = std::time::Instant::now();
+    let (status, _) = fixture
+        .request_using(
+            "DELETE",
+            &format!("/entries/{top_id}"),
+            &format!("If-Match: {}\r\n", top["etag"].as_str().unwrap()),
+            &[],
+        )
+        .await;
+    let api_trash = start.elapsed();
+    assert_eq!(status, 204);
+    assert_eq!(
+        fixture.list(&format!("?folder_id={}", branch.id)).await.0,
+        404
+    );
+    let (status, trash) = fixture.get_as("/trash", SESSION, SECRET).await;
+    assert_eq!(status, 200);
+    let trash: serde_json::Value = serde_json::from_slice(&trash).unwrap();
+    assert_eq!(trash["items"].as_array().unwrap().len(), 1);
+    let start = std::time::Instant::now();
+    let (status, _) = fixture
+        .request_using(
+            "POST",
+            &format!("/trash/{top_id}/restore"),
+            &format!(
+                "If-Match: {}\r\n",
+                trash["items"][0]["etag"].as_str().unwrap()
+            ),
+            &[],
+        )
+        .await;
+    let api_restore = start.elapsed();
+    assert_eq!(status, 204);
+    assert_eq!(
+        fixture
+            .list(&format!("?folder_id={}&limit=1&cursor={cursor}", branch.id))
+            .await
+            .0,
+        409
+    );
+    let count = workers.read(|db| db.query_row("SELECT count(*) FROM entry WHERE owner_account_id=?1 AND parent_id IS NOT NULL AND state='active'", [OWNER], |row| row.get::<_, i64>(0))).await.unwrap();
+    assert_eq!(count, 1000);
+    eprintln!(
+        "FOLDER_RECOVERY_COST entries=1000 layout=1-root,9-branches,990-leaves sql_trash_us={} sql_restore_us={} tls_api_trash_us={} tls_api_restore_us={} sql_excludes_commit=true api_includes_tls_handshake=true",
+        sql_trash.as_micros(),
+        sql_restore.as_micros(),
+        api_trash.as_micros(),
+        api_restore.as_micros()
+    );
+    fixture.close().await;
+}
+
+#[test]
+fn folder_recovery_missing_original_parent_rejects_without_generation_changes() {
+    let db = namespace_db();
+    let tx = db.unchecked_transaction().unwrap();
+    let parent = namespace::create_folder(&tx, OWNER, ROOT, "parent").unwrap();
+    let tree = namespace::create_folder(&tx, OWNER, &parent.id, "tree").unwrap();
+    let child = namespace::create_folder(&tx, OWNER, &tree.id, "child").unwrap();
+    namespace::trash(
+        &tx,
+        OWNER,
+        &tree.id,
+        &sylux::domain::upload::folder_etag(&tree.id, 2),
+    )
+    .unwrap();
+    let deleted = namespace::trashed(&tx, OWNER).unwrap().remove(0);
+    tx.commit().unwrap();
+    // Model missing legacy inventory; no product route permanently removes parents.
+    db.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    db.execute("DELETE FROM entry WHERE entry_id=?1", [&parent.id])
+        .unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let tx = db.unchecked_transaction().unwrap();
+    assert!(matches!(
+        namespace::restore(&tx, OWNER, &tree.id, &deleted.entry.etag),
+        Err(NamespaceError::ParentUnavailable)
+    ));
+    let state: (String, i64) = tx
+        .query_row(
+            "SELECT state,generation FROM entry WHERE entry_id=?1",
+            [&tree.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("deleted".into(), 3));
+    let generation: i64 = tx
+        .query_row(
+            "SELECT generation FROM entry WHERE entry_id=?1",
+            [&child.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(generation, 2);
+    tx.commit().unwrap();
+}
+
+#[tokio::test]
+async fn folder_recovery_http_failure_rolls_back_the_marker_and_all_generations() {
+    let fixture = HttpFixture::new("tree-http-rollback", 0).await;
+    let workers = fixture.workers.as_ref().unwrap();
+    let top = workers.transact(|tx| {
+        let top = namespace::create_folder(tx, OWNER, ROOT, "tree").unwrap();
+        namespace::create_folder(tx, OWNER, &top.id, "child").unwrap();
+        let top = namespace::folder_path(tx, OWNER, &top.id).unwrap().pop().unwrap();
+        tx.execute_batch("CREATE TRIGGER fail_tree_marker BEFORE UPDATE OF state ON entry WHEN NEW.state='deleted' BEGIN SELECT RAISE(ABORT,'synthetic marker failure'); END")?;
+        Ok(top)
+    }).await.unwrap();
+    let inventory = |db: &Connection| {
+        let mut statement =
+            db.prepare("SELECT entry_id,state,generation FROM entry ORDER BY entry_id")?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    };
+    let before = workers.read(inventory).await.unwrap();
+    let (status, _) = fixture
+        .request_using(
+            "DELETE",
+            &format!("/entries/{}", top.id),
+            &format!("If-Match: {}\r\n", top.etag),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 500);
+    assert_eq!(workers.read(inventory).await.unwrap(), before);
+    fixture.close().await;
+}
+
+#[test]
+fn folder_recovery_preserves_the_maximum_depth_boundary() {
+    let db = namespace_db();
+    let tx = db.unchecked_transaction().unwrap();
+    let top = namespace::create_folder(&tx, OWNER, ROOT, "depth-1").unwrap();
+    let mut deepest = top.clone();
+    for depth in 2..=128 {
+        deepest =
+            namespace::create_folder(&tx, OWNER, &deepest.id, &format!("depth-{depth}")).unwrap();
+    }
+    let path = namespace::folder_path(&tx, OWNER, &deepest.id).unwrap();
+    assert_eq!(path.len(), 129);
+    assert!(matches!(
+        namespace::create_folder(&tx, OWNER, &deepest.id, "too-deep"),
+        Err(NamespaceError::InvalidName)
+    ));
+    let top = namespace::folder_path(&tx, OWNER, &top.id)
+        .unwrap()
+        .remove(1);
+    namespace::trash(&tx, OWNER, &top.id, &top.etag).unwrap();
+    assert!(matches!(
+        namespace::folder_path(&tx, OWNER, &deepest.id),
+        Err(NamespaceError::NotFound)
+    ));
+    let deleted = namespace::trashed(&tx, OWNER).unwrap().remove(0);
+    namespace::restore(&tx, OWNER, &top.id, &deleted.entry.etag).unwrap();
+    assert_eq!(
+        namespace::folder_path(&tx, OWNER, &deepest.id)
+            .unwrap()
+            .len(),
+        129
+    );
+    assert!(
+        namespace::list(&tx, OWNER, &deepest.id, None, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        namespace::create_folder(&tx, OWNER, &deepest.id, "too-deep"),
+        Err(NamespaceError::InvalidName)
+    ));
+    assert_eq!(
+        tx.query_row(
+            "SELECT count(*) FROM entry WHERE owner_account_id=?1 AND parent_id IS NOT NULL",
+            [OWNER],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        128
+    );
+    tx.commit().unwrap();
 }

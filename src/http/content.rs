@@ -80,21 +80,32 @@ async fn resolve(
     let session_id = cookie.session_id;
     let secret = cookie.secret;
     let entry_id = entry_id.to_owned();
-    state.workers.read(move |db| {
+    state.workers.read(move |connection| {
+        let snapshot = connection.unchecked_transaction()?;
+        let db = &snapshot;
         let Some((account_id, _, _)) = validate_session(db, &session_id, &secret, now()) else {
             return Ok(Err(error(StatusCode::UNAUTHORIZED, "authentication_required")));
         };
         let content = db.query_row(
-            "SELECT entry.original_name,revision.revision_id,blob.blob_id,blob.length,blob.sha256 FROM entry JOIN revision ON revision.revision_id=entry.current_revision_id JOIN blob ON blob.blob_id=revision.blob_id WHERE entry.entry_id=?1 AND entry.owner_account_id=?2 AND entry.state='active' AND entry.kind='file' AND revision.entry_id=entry.entry_id AND blob.lifecycle='live'",
+            "SELECT entry.original_name,revision.revision_id,blob.blob_id,blob.length,blob.sha256,entry.parent_id FROM entry JOIN revision ON revision.revision_id=entry.current_revision_id JOIN blob ON blob.blob_id=revision.blob_id WHERE entry.entry_id=?1 AND entry.owner_account_id=?2 AND entry.state='active' AND entry.kind='file' AND revision.entry_id=entry.entry_id AND blob.lifecycle='live'",
             params![entry_id, account_id],
             |row| {
                 let length: i64 = row.get(3)?;
                 let digest: Vec<u8> = row.get(4)?;
                 let sha256: [u8; 32] = digest.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
                 if length < 0 { return Err(rusqlite::Error::InvalidQuery); }
-                Ok(ContentRef { name: row.get(0)?, revision_id: row.get(1)?, blob_id: row.get(2)?, length: length as u64, sha256 })
+                Ok((ContentRef { name: row.get(0)?, revision_id: row.get(1)?, blob_id: row.get(2)?, length: length as u64, sha256 }, row.get::<_, String>(5)?))
             },
         ).map_err(|_| error(StatusCode::NOT_FOUND, "entry_not_found"));
+        let content = content.and_then(|(reference, parent)| {
+            crate::domain::namespace::folder_path(db, &account_id, &parent)
+                .map(|_| reference)
+                .map_err(|failure| match failure {
+                    crate::domain::namespace::NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "entry_not_found"),
+                    _ => error(StatusCode::INTERNAL_SERVER_ERROR, "database_unavailable"),
+                })
+        });
+        snapshot.commit()?;
         Ok(content)
     }).await.map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "database_unavailable"))?
 }

@@ -15,13 +15,51 @@ export class MockTransport implements ApiTransport {
   private user: User | null = null;
   private instanceName = 'Sylux';
   private accounts: Account[] = [{ account_id: 'mock-user', handle: 'owner', role: 'administrator', enabled: true }];
-  private entries = [...seed];
+  private root = { ...root };
+  private entries = seed.map((entry) => ({ ...entry }));
   private deletedEntries: Entry[] = [];
   private sequence = 0;
   private uploads = new Map<string, UploadStatus>();
-  private uploadNames = new Map<string, { parentId: string; name: string; replacement?: { entry_id: string; etag: string } }>();
+  private committedUploads = new Map<string, { id: string; name: string; status: UploadStatus }>();
+  private uploadNames = new Map<string, { parentId: string; parentEtag: string; name: string; replacement?: { entry_id: string; etag: string } }>();
+
+  private folderPath(id: string): Folder[] {
+    const items: Folder[] = [];
+    const seen = new Set<string>();
+    let current: string | null = id;
+    while (current && items.length <= 128 && !seen.has(current)) {
+      seen.add(current);
+      const folder: Folder | undefined = current === this.root.id ? this.root : this.entries.find((entry): entry is Folder => entry.kind === 'folder' && entry.id === current);
+      if (!folder) throw new HttpError(404);
+      items.unshift(folder); current = folder.parent_id;
+    }
+    if (current || items[0]?.id !== this.root.id) throw new HttpError(404);
+    return items;
+  }
+
+  private activeEntry(id: string): Entry {
+    const entry = this.entries.find((entry) => entry.id === id);
+    if (!entry?.parent_id) throw new HttpError(404);
+    this.folderPath(entry.parent_id);
+    return entry;
+  }
+
+  private bump(id: string): void {
+    const etag = `"mock-${++this.sequence}"`;
+    if (id === this.root.id) this.root = { ...this.root, etag };
+    else this.entries = this.entries.map((entry) => entry.id === id ? { ...entry, etag } : entry);
+  }
+
+  private checkMatch(options: RequestOptions, entry: Entry): void {
+    if (options.headers?.['If-Match'] !== entry.etag) throw new HttpError(412);
+  }
+
+  private uploadParent(parent: string, etag: string): void {
+    if (this.folderPath(parent).at(-1)?.etag !== etag) throw new HttpError(412);
+  }
 
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    const root = this.root;
     const method = options.method ?? 'GET';
     const route = path.split('?')[0]!;
     if (options.signal?.aborted) throw new DOMException('Canceled', 'AbortError');
@@ -75,17 +113,7 @@ export class MockTransport implements ApiTransport {
     if (route === '/auth/logout' && method === 'POST') { this.user = null; return undefined as T; }
     if (/^\/folders\/[^/]+\/path$/.test(route) && method === 'GET') {
       if (!this.user) throw new HttpError(401);
-      let id: string | null = decodeURIComponent(route.split('/')[2]!);
-      const items: Folder[] = [];
-      const seen = new Set<string>();
-      while (id && items.length <= 128 && !seen.has(id)) {
-        seen.add(id);
-        const folder: Folder | undefined = id === root.id ? root : this.entries.find((entry): entry is Folder => entry.kind === 'folder' && entry.id === id);
-        if (!folder) throw new HttpError(404);
-        items.unshift(folder); id = folder.parent_id;
-      }
-      if (id || items[0]?.id !== root.id) throw new HttpError(404);
-      return { items } as T;
+      return { items: this.folderPath(decodeURIComponent(route.split('/')[2]!)) } as T;
     }
     if (route === '/entries/search' && method === 'GET') {
       if (!this.user) throw new HttpError(401);
@@ -139,6 +167,7 @@ export class MockTransport implements ApiTransport {
       const sort = params.get('sort') ?? 'name_asc';
       if (!['name_asc', 'name_desc', 'size_asc', 'size_desc', 'modified_asc', 'modified_desc'].includes(sort)) throw new HttpError(400);
       const folderId = route === '/folders/children' ? root.id : decodeURIComponent(route.split('/')[2]!);
+      this.folderPath(folderId);
       const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
       const nameKey = (entry: Entry) => [...new TextEncoder().encode(entry.name.normalize('NFC'))];
       const items = this.entries.filter((entry) => entry.parent_id === folderId).sort((a, b) => {
@@ -185,8 +214,10 @@ export class MockTransport implements ApiTransport {
     if (route.endsWith('/children') && method === 'POST') {
       const body = options.body as { name: string; parent_id: string };
       const parentId = body.parent_id;
+      this.folderPath(parentId);
+      if (this.entries.some((entry) => entry.parent_id === parentId && entry.name === body.name)) throw new HttpError(409);
       const folder: Folder = { id: `folder-${++this.sequence}`, parent_id: parentId, name: body.name, kind: 'folder', etag: `"folder-${this.sequence + 1}"` };
-      this.entries = [...this.entries, folder];
+      this.entries = [...this.entries, folder]; this.bump(parentId);
       return folder as T;
     }
     if (route === '/trash' && method === 'GET') return { items: this.deletedEntries.map((entry) => {
@@ -202,42 +233,69 @@ export class MockTransport implements ApiTransport {
     if (route.startsWith('/trash/') && route.endsWith('/restore') && method === 'POST') {
       const id = decodeURIComponent(route.split('/')[2]!);
       const item = this.deletedEntries.find((entry) => entry.id === id);
-      if (!item || !this.entries.some((entry) => entry.id === item.parent_id) && item.parent_id !== root.id || this.entries.some((entry) => entry.parent_id === item.parent_id && entry.name === item.name)) throw new Error('Cannot restore');
-      this.entries = [...this.entries, item]; this.deletedEntries = this.deletedEntries.filter((entry) => entry.id !== id); return undefined as T;
+      if (!item) throw new HttpError(404);
+      this.checkMatch(options, item);
+      try { this.folderPath(item.parent_id!); } catch { throw new HttpError(409); }
+      if (this.entries.some((entry) => entry.parent_id === item.parent_id && entry.name === item.name)) throw new HttpError(409);
+      this.entries = [...this.entries, { ...item, etag: `"mock-${++this.sequence}"` }];
+      this.deletedEntries = this.deletedEntries.filter((entry) => entry.id !== id);
+      this.bump(item.parent_id!); return undefined as T;
     }
     if (route.startsWith('/entries/') && route.endsWith('/move') && method === 'POST') {
       const id = decodeURIComponent(route.split('/')[2]!);
       const body = options.body as { parent_id: string };
-      const target = this.entries.find((entry) => entry.id === id);
-      if (!target) throw new Error('Missing move item');
-      this.entries = this.entries.map((entry) => entry.id === id ? { ...entry, parent_id: body.parent_id, etag: `"move-${++this.sequence}"` } as Entry : entry);
+      const target = this.activeEntry(id);
+      this.checkMatch(options, target);
+      if (this.folderPath(body.parent_id).some((entry) => entry.id === id) || target.parent_id === body.parent_id) throw new HttpError(409);
+      if (this.entries.some((entry) => entry.parent_id === body.parent_id && entry.name === target.name)) throw new HttpError(409);
+      this.entries = this.entries.map((entry) => entry.id === id ? { ...entry, parent_id: body.parent_id, etag: `"mock-${++this.sequence}"` } as Entry : entry);
+      this.bump(target.parent_id!); this.bump(body.parent_id);
       return this.entries.find((entry) => entry.id === id) as T;
     }
     if (route.startsWith('/entries/') && method === 'DELETE') {
       const id = decodeURIComponent(route.split('/')[2]!);
-      const item = this.entries.find((entry) => entry.id === id);
-      if (!item || this.entries.some((entry) => entry.parent_id === id)) throw new Error('Cannot delete');
-      this.entries = this.entries.filter((entry) => entry.id !== id); this.deletedEntries = [...this.deletedEntries, item]; return undefined as T;
+      const item = this.activeEntry(id);
+      this.checkMatch(options, item);
+      const pending = [id];
+      const tree = new Set<string>();
+      while (pending.length) {
+        const current = pending.pop()!;
+        if (tree.has(current)) throw new Error('Folder cycle');
+        tree.add(current);
+        const entry = this.entries.find((entry) => entry.id === current)!;
+        if (entry.kind === 'folder') pending.push(...this.entries.filter((entry) => entry.parent_id === current).map((entry) => entry.id));
+      }
+      for (const current of tree) this.bump(current);
+      const deleted = this.entries.find((entry) => entry.id === id)!;
+      this.entries = this.entries.filter((entry) => entry.id !== id); this.deletedEntries = [...this.deletedEntries, deleted];
+      this.bump(item.parent_id!); return undefined as T;
     }
     if (route.startsWith('/entries/') && method === 'PATCH') {
       const id = decodeURIComponent(route.split('/')[2]!);
       const body = options.body as { name: string };
-      this.entries = this.entries.map((entry) => entry.id === id ? { ...entry, name: body.name } as Entry : entry);
+      const item = this.activeEntry(id); this.checkMatch(options, item);
+      if (this.entries.some((entry) => entry.id !== id && entry.parent_id === item.parent_id && entry.name === body.name)) throw new HttpError(409);
+      this.entries = this.entries.map((entry) => entry.id === id ? { ...entry, name: body.name, etag: `"mock-${++this.sequence}"` } as Entry : entry);
+      this.bump(item.parent_id!);
       return this.entries.find((entry) => entry.id === id) as T;
     }
     if (route === '/uploads' && method === 'POST') {
       const id = options.headers?.['X-Mutation-ID']?.replace('mock-ticket-', 'upload-');
       if (!id) throw new Error('Missing mock mutation ticket');
-      const body = options.body as { length: number; name: string; parent_id: string; replacement?: { entry_id: string; etag: string } };
+      if (this.uploads.has(id)) return { id, status_url: `/uploads/${id}` } as T;
+      const body = options.body as { length: number; name: string; parent_id: string; parent_etag: string; replacement?: { entry_id: string; etag: string } };
+      this.uploadParent(body.parent_id, body.parent_etag);
       const existing = this.entries.find((entry) => entry.parent_id === body.parent_id && entry.name.normalize('NFC') === body.name.normalize('NFC'));
       if (existing && !body.replacement) throw new HttpError(409, { code: 'name_collision', message: 'Name conflict', request_id: 'mock', existing });
       if (body.replacement && (!existing || existing.kind !== 'file' || existing.id !== body.replacement.entry_id || existing.etag !== body.replacement.etag)) throw new HttpError(412);
       this.uploads.set(id, { upload_id: id, mutation_id: id, state: 'admitted', status: 'admitted', bytes_received: 0, length: body.length, writer_active: false });
-      this.uploadNames.set(id, { parentId: body.parent_id, name: body.name, replacement: body.replacement });
+      this.uploadNames.set(id, { parentId: body.parent_id, parentEtag: body.parent_etag, name: body.name, replacement: body.replacement });
       return { id, status_url: `/uploads/${id}` } as T;
     }
     if (route.includes('/content') && method === 'PUT') {
       const id = decodeURIComponent(route.split('/')[2]!);
+      const details = this.uploadNames.get(id)!;
+      this.uploadParent(details.parentId, details.parentEtag);
       const previous = this.uploads.get(id)!;
       const bytes = options.body as Blob;
       const status: UploadStatus = { ...previous, state: 'publishing', status: 'staged', bytes_received: bytes.size };
@@ -247,8 +305,11 @@ export class MockTransport implements ApiTransport {
     }
     if (route.endsWith('/commit') && method === 'POST') {
       const id = decodeURIComponent(route.split('/')[2]!);
+      const stored = this.committedUploads.get(id);
+      if (stored) return stored as T;
       const previous = this.uploads.get(id)!;
       const details = this.uploadNames.get(id)!;
+      this.uploadParent(details.parentId, details.parentEtag);
       const committed: UploadStatus = { ...previous, state: 'committed', status: 'committed' };
       if (details.replacement) {
         const existing = this.entries.find((entry) => entry.id === details.replacement?.entry_id);
@@ -258,14 +319,17 @@ export class MockTransport implements ApiTransport {
       }
       this.uploads.set(id, committed);
       this.entries = [...this.entries, { id: `file-${++this.sequence}`, parent_id: details.parentId, name: details.name, kind: 'file', size: previous.length, modified_at: Math.floor(Date.now() / 1000), etag: '"file-new"' }];
-      return { id, name: details.name, status: committed } as T;
+      this.bump(details.parentId);
+      const result = { id, name: details.name, status: committed };
+      this.committedUploads.set(id, result);
+      return result as T;
     }
     if (route.startsWith('/uploads/') && method === 'DELETE') {
       const id = decodeURIComponent(route.split('/')[2]!);
       this.uploads.set(id, { ...this.uploads.get(id)!, state: 'rejected', status: 'canceled' }); return undefined as T;
     }
     if (route.startsWith('/uploads/') && method === 'GET') return this.uploads.get(decodeURIComponent(route.split('/')[2]!)) as T;
-    if (route.startsWith('/entries/') && route.endsWith('/content') && method === 'GET') return new Blob(['Mock file content\n'], { type: 'application/octet-stream' }) as T;
+    if (route.startsWith('/entries/') && route.endsWith('/content') && method === 'GET') { this.activeEntry(decodeURIComponent(route.split('/')[2]!)); return new Blob(['Mock file content\n'], { type: 'application/octet-stream' }) as T; }
     throw new Error(`Mock has no response for ${method} ${path}`);
   }
 }

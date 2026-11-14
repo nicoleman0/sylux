@@ -137,9 +137,9 @@ test('bulk move confirms a destination, reports per-item failures, and retries o
   expect(backend.mutations.map(item => item.id)).toEqual(['alpha', 'beta', 'gamma', 'beta', 'gamma']);
 });
 
-test('bulk trash requires confirmation and keeps non-empty or forbidden items visible', async ({ page }) => {
+test('bulk trash requires confirmation and keeps conflicting or forbidden items visible', async ({ page }) => {
   const backend = await installBulkBackend(page);
-  backend.failures.set('destination', { status: 409, code: 'folder_not_empty' });
+  backend.failures.set('destination', { status: 409, code: 'namespace_conflict' });
   backend.failures.set('beta', { status: 403, code: 'forbidden' });
   await select(page, 'alpha.bin', 'beta.bin', 'Destination');
   await page.getByRole('button', { name: 'Move selected to trash', exact: true }).click();
@@ -152,7 +152,7 @@ test('bulk trash requires confirmation and keeps non-empty or forbidden items vi
   await expect(page.getByRole('article', { name: 'alpha.bin', exact: true })).toHaveCount(0);
   await expect(page.getByRole('article', { name: 'Destination', exact: true })).toBeVisible();
   await expect(page.getByRole('article', { name: 'beta.bin', exact: true })).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Trash results' }).getByText(/empty.*folder|folder.*empty/i)).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Trash results' }).getByText('This item could not be moved to trash. Refresh before retrying.', { exact: true })).toBeVisible();
   expect(backend.mutations).toEqual(['alpha', 'beta', 'destination'].map(id => ({ id, action: 'trash', etag: `"${id}:1"` })));
 });
 
@@ -346,16 +346,16 @@ test('search bulk retries conflicts across original folders and reconciles appli
 });
 
 
-test('search trash reports a populated folder failure and keeps it available', async ({ page }) => {
+test('search trash reports a folder conflict and keeps it available', async ({ page }) => {
   const backend = await installSearchBulkBackend(page, 2);
   backend.entries.push({ id: 'match-folder', parent_id: 'source-0', name: 'match-folder', kind: 'folder', etag: '"match-folder:1"' });
-  backend.failures.set('match-folder', { status: 409, code: 'folder_not_empty' });
+  backend.failures.set('match-folder', { status: 409, code: 'namespace_conflict' });
   await page.getByRole('searchbox').fill('match-');
   await expect(page.getByRole('checkbox')).toHaveCount(3);
   await page.getByRole('checkbox').first().check();
   await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
   await trashSelected(page);
-  await expect(page.getByRole('region', { name: 'Trash results' })).toContainText('Folder is not empty. Empty it before retrying.');
+  await expect(page.getByRole('region', { name: 'Trash results' })).toContainText('This item could not be moved to trash. Refresh before retrying.');
   await expect(page.getByRole('checkbox', { name: 'Select match-folder in Files / Work', exact: true })).not.toBeChecked();
   expect(backend.mutations.map(item => item.id)).toEqual(['match-0', 'match-1', 'match-folder']);
 });

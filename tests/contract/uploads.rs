@@ -1989,3 +1989,422 @@ async fn assert_listing_modified_at(fixture: &Fixture, entry: &Value) -> i64 {
     assert_eq!(item["modified_at"], expected);
     expected
 }
+
+#[tokio::test]
+async fn folder_recovery_blocks_fresh_admission_and_body_attempts_but_keeps_status_and_cancel() {
+    let fixture = Fixture::new("tree-admission-body").await;
+    let auth = owner_auth();
+    let create = |parent: &str, name: &str| {
+        serde_json::to_vec(&serde_json::json!({"parent_id":parent,"name":name})).unwrap()
+    };
+    let top = fixture
+        .mutate(
+            "POST",
+            "/folders/children",
+            &auth,
+            None,
+            &[("Content-Type", "application/json".into())],
+            create(OWNER_ROOT, "Tree"),
+        )
+        .await
+        .json();
+    let top_id = top["id"].as_str().unwrap();
+    let nested = fixture
+        .mutate(
+            "POST",
+            "/folders/children",
+            &auth,
+            None,
+            &[("Content-Type", "application/json".into())],
+            create(top_id, "Nested"),
+        )
+        .await
+        .json();
+    let nested_id = nested["id"].as_str().unwrap();
+    let bytes = b"never read hidden body";
+    let (upload_id, ticket) = fixture.admit(&auth, nested_id, 1, "new.bin", bytes).await;
+    let top_etag = folder_etag(top_id, 2);
+    let trash = fixture
+        .mutate(
+            "DELETE",
+            &format!("/entries/{top_id}"),
+            &auth,
+            None,
+            &[("If-Match", top_etag)],
+            vec![],
+        )
+        .await;
+    assert_eq!(trash.status, 204, "{}", trash.text());
+    let body = fixture
+        .mutate(
+            "PUT",
+            &format!("/uploads/{upload_id}/content"),
+            &auth,
+            Some(&ticket),
+            &[("Content-Type", "application/octet-stream".into())],
+            bytes.to_vec(),
+        )
+        .await;
+    assert_eq!(body.status, 404, "{}", body.text());
+    let fresh_ticket = fixture
+        .ticket(&auth, nested_id, 1, "fresh.bin", bytes)
+        .await;
+    let admission = fixture.mutate("POST", "/uploads", &auth, Some(&fresh_ticket), &[("Content-Type", "application/json".into()), ("If-None-Match", "*".into())], serde_json::to_vec(&serde_json::json!({"parent_id":nested_id,"parent_etag":folder_etag(nested_id,1),"name":"fresh.bin","length":bytes.len(),"sha256":hex(&Sha256::digest(bytes))})).unwrap()).await;
+    assert_eq!(admission.status, 404, "{}", admission.text());
+    let status = fixture
+        .request(
+            "GET",
+            &format!("/uploads/{upload_id}"),
+            Some(&auth),
+            &[],
+            vec![],
+        )
+        .await;
+    assert_eq!(status.status, 200);
+    assert_eq!(status.json()["writer_active"], false);
+    assert_eq!(status.json()["bytes_received"], 0);
+    let restore = fixture
+        .mutate(
+            "POST",
+            &format!("/trash/{top_id}/restore"),
+            &auth,
+            None,
+            &[("If-Match", folder_etag(top_id, 3))],
+            vec![],
+        )
+        .await;
+    assert_eq!(restore.status, 204, "{}", restore.text());
+    let body = fixture
+        .mutate(
+            "PUT",
+            &format!("/uploads/{upload_id}/content"),
+            &auth,
+            Some(&ticket),
+            &[("Content-Type", "application/octet-stream".into())],
+            bytes.to_vec(),
+        )
+        .await;
+    assert_eq!(body.status, 412, "{}", body.text());
+    let canceled = fixture
+        .mutate(
+            "DELETE",
+            &format!("/uploads/{upload_id}"),
+            &auth,
+            Some(&ticket),
+            &[],
+            vec![],
+        )
+        .await;
+    assert_eq!(canceled.status, 204, "{}", canceled.text());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn folder_recovery_keeps_an_active_body_writer_bookkeeping_recoverable() {
+    let mut fixture = Fixture::new("tree-active-writer").await;
+    let auth = owner_auth();
+    let create = |parent: &str, name: &str| {
+        serde_json::to_vec(&serde_json::json!({"parent_id":parent,"name":name})).unwrap()
+    };
+    let top = fixture
+        .mutate(
+            "POST",
+            "/folders/children",
+            &auth,
+            None,
+            &[("Content-Type", "application/json".into())],
+            create(OWNER_ROOT, "Tree"),
+        )
+        .await
+        .json();
+    let top_id = top["id"].as_str().unwrap();
+    let nested = fixture
+        .mutate(
+            "POST",
+            "/folders/children",
+            &auth,
+            None,
+            &[("Content-Type", "application/json".into())],
+            create(top_id, "Nested"),
+        )
+        .await
+        .json();
+    let nested_id = nested["id"].as_str().unwrap();
+    let bytes = vec![0x83; 128 * 1024];
+    let (upload_id, ticket) = fixture
+        .admit(&auth, nested_id, 1, "stream.bin", &bytes)
+        .await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let address = fixture.address.clone();
+    let origin = fixture.origin.clone();
+    let writer_auth = owner_auth();
+    let writer_id = upload_id.clone();
+    let writer_ticket = ticket.clone();
+    let writer_bytes = bytes.clone();
+    let writer = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(&address).await.unwrap();
+        let request = format!(
+            "PUT /uploads/{writer_id}/content HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nCookie: {}\r\nOrigin: {origin}\r\nX-CSRF-Token: {}\r\nX-Mutation-ID: {writer_ticket}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+            writer_auth.cookie,
+            writer_auth.csrf,
+            writer_bytes.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.write_all(&writer_bytes[..1024]).await.unwrap();
+        release_rx.await.unwrap();
+        stream.write_all(&writer_bytes[1024..]).await.unwrap();
+        let mut response = vec![];
+        stream.read_to_end(&mut response).await.unwrap();
+        Response::parse(&response)
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let id = upload_id.clone();
+            let active = fixture.workers.as_ref().unwrap().read(move |db| db.query_row("SELECT writer_active FROM upload_attempt WHERE mutation_id=?1 ORDER BY attempt_no DESC LIMIT 1", [id], |row| row.get::<_, i64>(0))).await.unwrap();
+            if active == 1 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("stream did not become active");
+    let deleted = fixture
+        .mutate(
+            "DELETE",
+            &format!("/entries/{top_id}"),
+            &auth,
+            None,
+            &[("If-Match", folder_etag(top_id, 2))],
+            vec![],
+        )
+        .await;
+    assert_eq!(deleted.status, 204, "{}", deleted.text());
+    release_tx.send(()).unwrap();
+    let staged = tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(staged.status, 200, "{}", staged.text());
+    let status_path = format!("/uploads/{upload_id}");
+    let status = fixture
+        .request("GET", &status_path, Some(&auth), &[], vec![])
+        .await
+        .json();
+    assert_eq!(status["status"], "staged");
+    assert_eq!(status["writer_active"], false);
+    assert_eq!(status["bytes_received"], bytes.len());
+    let server = fixture.server.take().unwrap();
+    server.abort();
+    let _ = server.await;
+    fixture.workers.take().unwrap().shutdown().await.unwrap();
+    fixture.db.take();
+    let connection = sqlite::open_writer(&fixture.db_path, BUSY).unwrap();
+    let workers = SqliteWorkers::from_writer(
+        connection,
+        &fixture.db_path,
+        WorkerConfig {
+            busy_timeout: BUSY,
+            ..WorkerConfig::default()
+        },
+    )
+    .unwrap();
+    let report = sylux::persistence::reconcile::reconcile(&workers, &fixture.product)
+        .await
+        .unwrap();
+    assert!(report.ready, "{report:?}");
+    workers.shutdown().await.unwrap();
+    fixture
+        .start(sqlite::open_writer(&fixture.db_path, BUSY).unwrap(), None)
+        .await;
+    let status = fixture
+        .request("GET", &status_path, Some(&auth), &[], vec![])
+        .await
+        .json();
+    assert_eq!(status["status"], "staged");
+    assert_eq!(status["writer_active"], false);
+    let body = serde_json::to_vec(&serde_json::json!({"sha256":hex(&Sha256::digest(&bytes)),"parent_etag":folder_etag(nested_id,1)})).unwrap();
+    let commit_path = format!("/uploads/{upload_id}/commit");
+    let headers = [
+        ("Content-Type", "application/json".into()),
+        ("If-None-Match", "*".into()),
+    ];
+    let commit = fixture
+        .mutate(
+            "POST",
+            &commit_path,
+            &auth,
+            Some(&ticket),
+            &headers,
+            body.clone(),
+        )
+        .await;
+    assert_eq!(commit.status, 404, "{}", commit.text());
+    let restore = fixture
+        .mutate(
+            "POST",
+            &format!("/trash/{top_id}/restore"),
+            &auth,
+            None,
+            &[("If-Match", folder_etag(top_id, 3))],
+            vec![],
+        )
+        .await;
+    assert_eq!(restore.status, 204, "{}", restore.text());
+    let commit = fixture
+        .mutate("POST", &commit_path, &auth, Some(&ticket), &headers, body)
+        .await;
+    assert_eq!(commit.status, 412, "{}", commit.text());
+    let canceled = fixture
+        .mutate("DELETE", &status_path, &auth, Some(&ticket), &[], vec![])
+        .await;
+    assert_eq!(canceled.status, 204, "{}", canceled.text());
+    let canceled_status = fixture
+        .request("GET", &status_path, Some(&auth), &[], vec![])
+        .await
+        .json();
+    assert_eq!(canceled_status["status"], "canceled");
+    assert_eq!(canceled_status["writer_active"], false);
+    let count: i64 = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM entry WHERE kind='file'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn folder_recovery_accepts_fresh_create_and_replacement_with_exact_bytes() {
+    let fixture = Fixture::new("tree-fresh-uploads").await;
+    let auth = owner_auth();
+    let create = |parent: &str, name: &str| {
+        serde_json::to_vec(&serde_json::json!({"parent_id":parent,"name":name})).unwrap()
+    };
+    let top = fixture
+        .mutate(
+            "POST",
+            "/folders/children",
+            &auth,
+            None,
+            &[("Content-Type", "application/json".into())],
+            create(OWNER_ROOT, "Tree"),
+        )
+        .await
+        .json();
+    let top_id = top["id"].as_str().unwrap();
+    let nested = fixture
+        .mutate(
+            "POST",
+            "/folders/children",
+            &auth,
+            None,
+            &[("Content-Type", "application/json".into())],
+            create(top_id, "Nested"),
+        )
+        .await
+        .json();
+    let nested_id = nested["id"].as_str().unwrap();
+    assert_eq!(
+        fixture
+            .mutate(
+                "DELETE",
+                &format!("/entries/{top_id}"),
+                &auth,
+                None,
+                &[("If-Match", folder_etag(top_id, 2))],
+                vec![]
+            )
+            .await
+            .status,
+        204
+    );
+    assert_eq!(
+        fixture
+            .mutate(
+                "POST",
+                &format!("/trash/{top_id}/restore"),
+                &auth,
+                None,
+                &[("If-Match", folder_etag(top_id, 3))],
+                vec![]
+            )
+            .await
+            .status,
+        204
+    );
+    let path = fixture
+        .request(
+            "GET",
+            &format!("/folders/{nested_id}/path"),
+            Some(&auth),
+            &[],
+            vec![],
+        )
+        .await
+        .json();
+    let parent_etag = path["items"].as_array().unwrap().last().unwrap()["etag"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(parent_etag, folder_etag(nested_id, 2));
+    let bytes = b"fresh restored create\x00\xff";
+    let (id, ticket) = fixture.admit(&auth, nested_id, 2, "fresh.bin", bytes).await;
+    assert_eq!(
+        fixture
+            .replacement_content(&id, &ticket, bytes)
+            .await
+            .status,
+        200
+    );
+    let commit = fixture.mutate("POST", &format!("/uploads/{id}/commit"), &auth, Some(&ticket), &[("Content-Type", "application/json".into()), ("If-None-Match", "*".into())], serde_json::to_vec(&serde_json::json!({"sha256":hex(&Sha256::digest(bytes)),"parent_etag":parent_etag})).unwrap()).await;
+    assert_eq!(commit.status, 201, "{}", commit.text());
+    let created = commit.json();
+    fixture.assert_content(&created, bytes).await;
+    let listing = fixture
+        .request(
+            "GET",
+            &format!("/folders/{nested_id}/children"),
+            Some(&auth),
+            &[],
+            vec![],
+        )
+        .await
+        .json();
+    let target = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == created["id"])
+        .unwrap();
+    let replacement_bytes = b"fresh restored replacement\x00\xfe";
+    let (id, ticket, admission) = fixture.replacement(target, replacement_bytes).await;
+    assert_eq!(admission["replacement"]["etag"], target["etag"]);
+    assert_eq!(admission["parent_etag"], folder_etag(nested_id, 3));
+    assert_eq!(
+        admission["replacement"]["etag"],
+        folder_etag(created["id"].as_str().unwrap(), 1)
+    );
+    assert_eq!(
+        fixture
+            .replacement_content(&id, &ticket, replacement_bytes)
+            .await
+            .status,
+        200
+    );
+    let replacement = fixture.replacement_commit(&id, &ticket, &admission).await;
+    assert_eq!(replacement.status, 201, "{}", replacement.text());
+    fixture
+        .assert_content(&replacement.json(), replacement_bytes)
+        .await;
+    let old = fixture
+        .request(
+            "GET",
+            &format!("/entries/{}/content", created["id"].as_str().unwrap()),
+            Some(&auth),
+            &[],
+            vec![],
+        )
+        .await;
+    assert_eq!(old.status, 404);
+    fixture.close().await;
+}

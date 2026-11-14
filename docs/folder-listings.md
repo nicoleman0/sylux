@@ -15,3 +15,5 @@ Search results retain their separate [search ordering](search.md). Search has no
 Browsing URLs identify Files, Trash, Account or Settings. Files URLs include the folder ID and optional `q` and `sort` hash parameters. `GET /folders/{id}/path` resolves fresh root-to-folder descriptors for the signed-in owner's active ancestry. Missing, deleted or foreign ancestry returns 404 without folder names.
 
 Folder and destination navigation add browser history entries. Search, sort and paging update the current entry. History keeps owner-bound cursor stacks and document scroll, including reload after signing in as the same owner. Entries and etags are fetched again; selection and completed notices are cleared. A copied URL starts on page one. Invalid or changed cursors restart on page one with a notice. An unavailable folder offers Files as a safe recovery destination.
+
+Populated folders use [atomic tree trash and restore](trash.md). Hidden ancestry returns HTTP 404 for folder listings; restored descendants require fresh etags and cursors.

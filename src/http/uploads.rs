@@ -187,6 +187,24 @@ fn require_upload_precondition(
     }
 }
 
+fn check_parent(db: &Connection, ticket: &VerifiedUploadTicket) -> Result<(), Response> {
+    let path =
+        crate::domain::namespace::folder_path(db, &ticket.account_id, &ticket.admission.parent_id)
+            .map_err(|failure| match failure {
+                crate::domain::namespace::NamespaceError::NotFound => {
+                    error(StatusCode::NOT_FOUND, "parent_not_found")
+                }
+                _ => error(StatusCode::INTERNAL_SERVER_ERROR, "parent_lookup_failed"),
+            })?;
+    let generation = path.last().expect("validated folder path").generation;
+    let expected = generation_from_etag(&ticket.admission.parent_etag, &ticket.admission.parent_id)
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid_parent_etag"))?;
+    if generation < 0 || generation as u64 != expected {
+        return Err(error(StatusCode::PRECONDITION_FAILED, "stale_parent_etag"));
+    }
+    Ok(())
+}
+
 fn check_destination(
     db: &Connection,
     account: &str,
@@ -417,20 +435,8 @@ pub async fn admit(
                 }
                 return Ok(Err(error(StatusCode::SERVICE_UNAVAILABLE, "upload_state_unavailable")));
             }
-            let generation: Option<i64> = transaction
-                .query_row(
-                    "SELECT generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder' AND state='active'",
-                    params![admission.parent_id, ticket_for_insert.account_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let Some(generation) = generation else {
-                return Ok(Err(error(StatusCode::NOT_FOUND, "parent_not_found")));
-            };
-            let expected = generation_from_etag(&admission.parent_etag, &admission.parent_id)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            if generation < 0 || generation as u64 != expected {
-                return Ok(Err(error(StatusCode::PRECONDITION_FAILED, "stale_parent_etag")));
+            if let Err(response) = check_parent(transaction, &ticket_for_insert) {
+                return Ok(Err(response));
             }
             if let Err(response) = check_destination(transaction, &ticket_for_insert.account_id, &ticket_for_insert.admission, &name_key) {
                 return Ok(Err(response));
@@ -585,6 +591,9 @@ fn activate_attempt(
         ?;
     if state.as_deref() != Some("admitted") {
         return Ok(Err(error(StatusCode::CONFLICT, "upload_not_staging")));
+    }
+    if let Err(response) = check_parent(transaction, ticket) {
+        return Ok(Err(response));
     }
     let active: Option<i64> = transaction
         .query_row(
@@ -1063,18 +1072,7 @@ pub async fn commit(
             {
                 return Err(error(StatusCode::CONFLICT, "commit_fingerprint_mismatch"));
             }
-            let generation: i64 = transaction.query_row(
-                "SELECT generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder' AND state='active'",
-                params![ticket_for_tx.admission.parent_id,ticket_for_tx.account_id],
-                |row| row.get(0),
-            ).optional().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "parent_lookup_failed"))?
-                .ok_or_else(|| error(StatusCode::NOT_FOUND, "parent_not_found"))?;
-            let expected =
-                generation_from_etag(&ticket_for_tx.admission.parent_etag, &ticket_for_tx.admission.parent_id)
-                    .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid_parent_etag"))?;
-            if generation < 0 || generation as u64 != expected {
-                return Err(error(StatusCode::PRECONDITION_FAILED, "stale_parent_etag"));
-            }
+            check_parent(transaction, &ticket_for_tx)?;
             check_destination(transaction, &ticket_for_tx.account_id, &ticket_for_tx.admission, &name_key_for_tx)?;
             let staging_path: String = transaction.query_row(
                 "SELECT staging_path FROM upload_attempt WHERE mutation_id=?1 AND completed_sha256=?2 AND completed_length=?3 ORDER BY attempt_no DESC LIMIT 1",

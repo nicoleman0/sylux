@@ -60,8 +60,8 @@ jobs:
           CARGO_DENY_BIN: ${{ runner.temp }}/cargo-deny/bin/cargo-deny
         run: scripts/check.sh
 
-      - name: Check listing metadata contracts
-        run: cargo test --locked --features test-harness --test integration_names_listing --test contract_uploads
+      - name: Check storage and folder recovery contracts
+        run: cargo test --locked --features test-harness --test integration_names_listing --test contract_uploads --test contract_private_storage --test contract_content --test contract_isolation --test integration_poc_journey --test integration_retry_reconcile
 
       - name: Install pinned browser prerequisites
         run: npm --prefix web exec -- playwright install --with-deps chromium
@@ -70,7 +70,7 @@ jobs:
         run: npm --prefix web run smoke -- --grep 'account authority|account screens'
 
       - name: Check action feedback and navigation lifetime
-        run: npm --prefix web run smoke -- bulk-actions.spec.ts desktop-upload.spec.ts moves.spec.ts replacement.spec.ts smoke.spec.ts
+        run: npm --prefix web run smoke -- bulk-actions.spec.ts desktop-upload.spec.ts moves.spec.ts replacement.spec.ts smoke.spec.ts folder-recovery.spec.ts
 
       - name: Check PDF reader and failure recovery
         run: npm --prefix web run smoke -- preview.spec.ts pdf-render.spec.ts pdf-compatibility.spec.ts

@@ -12,7 +12,6 @@ pub enum NamespaceError {
     InvalidName,
     Conflict,
     Stale,
-    NotEmpty,
     ParentUnavailable,
     InvalidDestination,
     DepthLimit,
@@ -114,33 +113,8 @@ pub fn create_folder(
     name: &str,
 ) -> Result<Entry, NamespaceError> {
     let name = EntryName::parse(name).map_err(|_| NamespaceError::InvalidName)?;
-    let parent_row: Option<String> = db
-        .query_row(
-            "SELECT kind FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='active'",
-            params![parent, owner],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|_| NamespaceError::Sql)?;
-    if parent_row.as_deref() != Some("folder") {
-        return Err(NamespaceError::NotFound);
-    }
-    // The root is depth zero; the submitted entry is one level below its parent.
-    // A recursive ancestor walk runs inside the caller's write transaction.
-    let parent_depth: i64 = db
-        .query_row(
-            "WITH RECURSIVE ancestors(entry_id,parent_id,depth) AS (\
-                 SELECT entry_id,parent_id,0 FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='active' \
-                 UNION ALL \
-                 SELECT parent.entry_id,parent.parent_id,ancestors.depth+1 \
-                 FROM entry AS parent JOIN ancestors ON ancestors.parent_id=parent.entry_id \
-                 WHERE parent.owner_account_id=?2 AND parent.state='active'\
-             ) SELECT COALESCE(MAX(depth),-1) FROM ancestors WHERE parent_id IS NULL",
-            params![parent, owner],
-            |row| row.get(0),
-        )
-        .map_err(|_| NamespaceError::Sql)?;
-    if parent_depth < 0 || parent_depth + 1 > MAX_ENTRY_DEPTH {
+    let path = folder_path(db, owner, parent)?;
+    if path.len() as i64 > MAX_ENTRY_DEPTH {
         return Err(NamespaceError::InvalidName);
     }
     let id = id()?;
@@ -207,6 +181,7 @@ pub fn list(
     after: Option<(&[u8], &str)>,
     limit: usize,
 ) -> Result<Vec<Entry>, NamespaceError> {
+    folder_path(db, owner, folder)?;
     let mut stmt = db.prepare("SELECT entry_id,parent_id,original_name,kind,generation FROM entry WHERE owner_account_id=?1 AND parent_id=?2 AND state='active' AND (?3 IS NULL OR name_key>?3 OR (name_key=?3 AND entry_id>?4)) ORDER BY name_key,entry_id LIMIT ?5").map_err(|_| NamespaceError::Sql)?;
     let rows = stmt
         .query_map(
@@ -247,6 +222,7 @@ pub fn list_sorted(
     after: Option<&ListingPosition>,
     limit: usize,
 ) -> Result<Vec<ListedEntry>, NamespaceError> {
+    folder_path(db, owner, folder)?;
     let sql = listing_sql(sort);
     let mut stmt = db.prepare(&sql).map_err(|_| NamespaceError::Sql)?;
     let rows = stmt
@@ -370,9 +346,10 @@ pub fn rename(
     let Some((parent, kind, generation)) = row else {
         return Err(NamespaceError::NotFound);
     };
-    if parent.is_none() {
+    let Some(parent_id) = &parent else {
         return Err(NamespaceError::NotFound);
-    }
+    };
+    folder_path(db, owner, parent_id)?;
     if if_match != folder_etag(entry, generation as u64) {
         return Err(NamespaceError::Stale);
     }
@@ -412,6 +389,7 @@ pub fn move_entry(
     let Some((Some(parent), name, kind, generation)) = row else {
         return Err(NamespaceError::NotFound);
     };
+    folder_path(db, owner, &parent)?;
     if if_match != folder_etag(entry, generation as u64) {
         return Err(NamespaceError::Stale);
     }
@@ -464,37 +442,36 @@ pub fn move_entry(
     })
 }
 
-/// Trash keeps payloads and revisions indefinitely. Folders must be empty.
+/// Hide a tree behind its root marker while retaining payloads and earlier deletions.
 pub fn trash(
     db: &Transaction<'_>,
     owner: &str,
     entry: &str,
     if_match: &str,
 ) -> Result<(), NamespaceError> {
-    let row: Option<(Option<String>, String, i64)> = db.query_row(
-        "SELECT parent_id,kind,generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='active'",
-        params![entry, owner], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+    let row: Option<(Option<String>, i64)> = db.query_row(
+        "SELECT parent_id,generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='active'",
+        params![entry, owner], |r| Ok((r.get(0)?,r.get(1)?))
     ).optional().map_err(|_| NamespaceError::Sql)?;
-    let Some((Some(parent), kind, generation)) = row else {
+    let Some((Some(parent), generation)) = row else {
         return Err(NamespaceError::NotFound);
     };
+    folder_path(db, owner, &parent)?;
     if if_match != folder_etag(entry, generation as u64) {
         return Err(NamespaceError::Stale);
     }
-    if kind == "folder" {
-        let children: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM entry WHERE parent_id=?1 AND state='active')",
-                [entry],
-                |r| r.get(0),
-            )
-            .map_err(|_| NamespaceError::Sql)?;
-        if children {
-            return Err(NamespaceError::NotEmpty);
-        }
-    }
     db.execute(
-        "UPDATE entry SET state='deleted',generation=generation+1 WHERE entry_id=?1",
+        "WITH RECURSIVE tree(entry_id,kind) AS (
+            SELECT entry_id,kind FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='active'
+            UNION ALL
+            SELECT e.entry_id,e.kind FROM entry e JOIN tree t ON e.parent_id=t.entry_id
+            WHERE t.kind='folder' AND e.owner_account_id=?2 AND e.state='active'
+        ) UPDATE entry SET generation=generation+1 WHERE entry_id IN (SELECT entry_id FROM tree)",
+        params![entry, owner],
+    )
+    .map_err(|_| NamespaceError::Sql)?;
+    db.execute(
+        "UPDATE entry SET state='deleted' WHERE entry_id=?1",
         [entry],
     )
     .map_err(|_| NamespaceError::Sql)?;
@@ -574,10 +551,10 @@ pub fn restore(
     if if_match != folder_etag(entry, generation as u64) {
         return Err(NamespaceError::Stale);
     }
-    let parent_active: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='active' AND kind='folder')", params![parent,owner], |r| r.get(0)).map_err(|_| NamespaceError::Sql)?;
-    if !parent_active {
-        return Err(NamespaceError::ParentUnavailable);
-    }
+    folder_path(db, owner, &parent).map_err(|failure| match failure {
+        NamespaceError::NotFound => NamespaceError::ParentUnavailable,
+        other => other,
+    })?;
     db.execute("UPDATE entry SET state='active',generation=generation+1 WHERE entry_id=?1", [entry]).map_err(|e| if matches!(e,rusqlite::Error::SqliteFailure(ref x,_) if x.code==rusqlite::ErrorCode::ConstraintViolation) { NamespaceError::Conflict } else { NamespaceError::Sql })?;
     db.execute(
         "UPDATE entry SET generation=generation+1 WHERE entry_id=?1",
