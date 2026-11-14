@@ -253,9 +253,14 @@ test('browsing remains available while a real upload body is delayed', { annotat
   await requestArrived;
   await page.getByRole('button', { name: `Open ${fixtures.folder}`, exact: true }).click();
   await expect(page.getByRole('heading', { name: fixtures.folder })).toBeVisible();
+  const report = page.getByRole('region', { name: 'Upload results', exact: true });
+  await expect(report).toBeVisible();
+  await expect(report.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
   release();
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled({ timeout: 20_000 });
-  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);
+  await expect(report).toBeVisible();
+  await report.locator('summary').click();
+  await expect(report.locator(`[data-upload-result="slow-upload-${phase}.bin"]`)).toContainText('Saved');
   await page.getByRole('navigation', { name: 'Files', exact: true }).getByRole('button', { name: 'Files', exact: true }).click();
   await expect(page.getByRole('article', { name: `slow-upload-${phase}.bin`, exact: true })).toBeVisible();
 });
