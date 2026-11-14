@@ -419,3 +419,39 @@ test('clearing search after interrupting a folder load fetches that folder inste
   await expect(page.getByRole('button', { name: 'Preview Nested.txt', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Preview Obsolete.txt', exact: true })).toHaveCount(0);
 });
+
+for (const action of ['Home', 'Files sidebar']) {
+  test(`${action} completion cannot cancel Back while its root listing is pending`, async ({ page }) => {
+    await backend(page); await page.goto('/#files/projects'); await signIn(page);
+    await expect(page.getByRole('button', { name: 'Preview Match 0.txt', exact: true })).toBeVisible();
+    let releaseRoot!: () => void;
+    let requestedRoot!: () => void;
+    let releasePath!: () => void;
+    let requestedPath!: () => void;
+    const rootGate = new Promise<void>(resolve => { releaseRoot = resolve; });
+    const rootPending = new Promise<void>(resolve => { requestedRoot = resolve; });
+    const pathGate = new Promise<void>(resolve => { releasePath = resolve; });
+    const pathPending = new Promise<void>(resolve => { requestedPath = resolve; });
+    await page.route('**/folders/root/children*', async route => {
+      requestedRoot(); await rootGate;
+      await route.fulfill({ json: { items: [child], next_cursor: null, has_more: false } });
+    });
+    await page.route('**/folders/projects/path', async route => {
+      requestedPath(); await pathGate;
+      await route.fulfill({ json: { items: [root, child] } });
+    });
+    if (action === 'Home') await page.getByRole('link', { name: 'Sylux', exact: true }).click();
+    else await page.getByRole('navigation', { name: 'Files', exact: true }).getByRole('button', { name: 'Files', exact: true }).click();
+    await rootPending;
+    await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
+    await page.goBack(); await pathPending;
+    const rootResponse = page.waitForResponse('**/folders/root/children*');
+    releaseRoot(); await rootResponse;
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    releasePath();
+    await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Preview Match 0.txt', exact: true })).toBeVisible();
+    expect(new URL(page.url()).hash).toBe('#files/projects');
+    await expect.poll(() => page.evaluate(() => history.state?.sylux?.folder)).toBe('projects');
+  });
+}
