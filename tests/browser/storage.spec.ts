@@ -108,7 +108,7 @@ test('loading, empty, and recoverable listing error are distinguishable', { anno
   await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   markListingProgress('returned-to-root');
   await page.getByRole('button', { name: `Open ${fixtures.folder}`, exact: true }).click();
-  await page.getByRole('article').filter({ hasText: fixtures.nested }).getByRole('button', { name: 'Open' }).click();
+  await page.locator('.file-row').filter({ hasText: fixtures.nested }).getByRole('button', { name: 'Open' }).click();
   await expect(page.getByText(fixtures.file, { exact: true })).toBeVisible();
   markListingProgress('nested-file-visible');
   const breadcrumb = page.getByRole('navigation', { name: 'Folder path' });
@@ -131,7 +131,7 @@ test('loading, empty, and recoverable listing error are distinguishable', { anno
   await page.getByRole('button', { name: 'New folder', exact: true }).click();
   await page.getByLabel('Folder name', { exact: true }).fill(emptyName);
   await page.getByRole('button', { name: 'Create folder' }).click();
-  await page.getByRole('article').filter({ hasText: emptyName }).getByRole('button', { name: 'Open' }).click();
+  await page.locator('.file-row').filter({ hasText: emptyName }).getByRole('button', { name: 'Open' }).click();
   await expect(page.getByText('This folder is empty')).toBeVisible();
   markListingProgress('empty-folder-complete');
 
@@ -193,11 +193,11 @@ test('loading, empty, and recoverable listing error are distinguishable', { anno
   markListingProgress('first-page-visible');
   await page.getByRole('button', { name: 'Next page' }).click();
   await expect(page.getByRole('button', { name: 'Previous page' })).toBeVisible();
-  await expect(page.getByRole('article').filter({ hasText: `page-${phase}-100` })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: `page-${phase}-100` })).toBeVisible();
   markListingProgress('next-page-visible');
   await page.getByRole('button', { name: 'Previous page' }).click();
-  await expect(page.getByRole('article').filter({ hasText: `page-${phase}-000` })).toBeVisible();
-  await expect(page.getByRole('article').filter({ hasText: `page-${phase}-100` })).toHaveCount(0);
+  await expect(page.locator('.file-row').filter({ hasText: `page-${phase}-000` })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: `page-${phase}-100` })).toHaveCount(0);
   expect(cursors).toEqual([null, 'synthetic-next-page', null]);
   markListingProgress('previous-page-verified');
 });
@@ -222,7 +222,7 @@ test('Unicode, zero-byte, and binary files round-trip through real upload and do
   ];
   for (const item of cases) {
     await chooseUpload({ name: item.name, mimeType: 'application/octet-stream', buffer: Buffer.from(item.bytes) });
-    const savedItem = page.getByRole('article').filter({ has: page.getByText(item.name, { exact: true }) });
+    const savedItem = page.locator('.file-row').filter({ has: page.getByText(item.name, { exact: true }) });
     await expect(savedItem.getByText(item.name, { exact: true })).toBeVisible({ timeout: 15_000 });
     const downloadPromise = page.waitForEvent('download');
     await savedItem.getByRole('button', { name: `Options for ${item.name}`, exact: true }).click();
@@ -262,7 +262,7 @@ test('browsing remains available while a real upload body is delayed', { annotat
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
   await expect(report.locator('details')).toHaveCount(0);
   await page.getByRole('navigation', { name: 'Files', exact: true }).getByRole('button', { name: 'Files', exact: true }).click();
-  await expect(page.getByRole('article', { name: `slow-upload-${phase}.bin`, exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: `slow-upload-${phase}.bin`, exact: true })).toBeVisible();
 });
 
 test('cancel aborts the in-flight upload without claiming a saved file', { annotation: { type: 'harness_case', description: 'storage_upload_cancel' } }, async () => {
@@ -278,7 +278,7 @@ test('cancel aborts the in-flight upload without claiming a saved file', { annot
   await page.getByRole('button', { name: 'Cancel upload' }).click();
   release();
   await expect(page.getByRole('status').filter({ hasText: 'Upload canceled' })).toContainText('Upload canceled');
-  await expect(page.getByRole('article').filter({ hasText: fileName })).toHaveCount(0);
+  await expect(page.locator('.file-row').filter({ hasText: fileName })).toHaveCount(0);
 });
 
 test('lost commit response is resolved through the original upload status', { annotation: { type: 'harness_case', description: 'storage_lost_commit_response' } }, async () => {
@@ -342,7 +342,7 @@ test('lost commit response is resolved through the original upload status', { an
   await expect(page.getByRole('status').filter({ hasText: 'Uploaded to Files' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Check upload status' }).click();
   await expect(unresolved).toBeHidden();
-  await expect(page.getByRole('article').filter({ hasText: fileName })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.file-row').filter({ hasText: fileName })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('status').filter({ hasText: 'Uploaded to Files' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Upload results', exact: true }).locator('details')).toHaveCount(0);
   await expect(page.locator('.upload-status')).toHaveCount(0);
@@ -402,7 +402,7 @@ test('lost commit response is resolved through the original upload status', { an
   await expect(page.locator('#upload-file')).toBeDisabled();
   expect(ticketRequests).toBe(1);
   expect(admissionRequests).toBe(1);
-  await expect(page.getByRole('article').filter({ hasText: admissionFile })).toHaveCount(0);
+  await expect(page.locator('.file-row').filter({ hasText: admissionFile })).toHaveCount(0);
 });
 
 test('uploaded PDF renders and changes pages over real TLS', { annotation: { type: 'harness_case', description: 'storage_pdf_preview' } }, async () => {

@@ -138,8 +138,24 @@ const MAX_CURSOR_BYTES: usize = 4096;
 #[serde(deny_unknown_fields)]
 pub struct SearchQuery {
     q: String,
+    sort: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
+}
+
+fn result_sort(value: Option<&str>) -> Result<namespace::ResultSort, Response> {
+    use namespace::ResultSort;
+    match value.unwrap_or("name_asc") {
+        "name_asc" => Ok(ResultSort::NameAsc),
+        "name_desc" => Ok(ResultSort::NameDesc),
+        "size_asc" => Ok(ResultSort::SizeAsc),
+        "size_desc" => Ok(ResultSort::SizeDesc),
+        "modified_asc" => Ok(ResultSort::ModifiedAsc),
+        "modified_desc" => Ok(ResultSort::ModifiedDesc),
+        "location_asc" => Ok(ResultSort::LocationAsc),
+        "location_desc" => Ok(ResultSort::LocationDesc),
+        _ => Err(error(StatusCode::BAD_REQUEST, "invalid_sort")),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -147,6 +163,7 @@ struct SearchCursor {
     version: u8,
     actor: String,
     query: String,
+    sort: namespace::ResultSort,
     fingerprint: String,
     offset: usize,
 }
@@ -154,7 +171,7 @@ struct SearchCursor {
 fn search_cursor_encode(key: &[u8; 32], cursor: &SearchCursor) -> Option<String> {
     let body = serde_json::to_vec(cursor).ok()?;
     let mut mac = HmacSha256::new_from_slice(key).ok()?;
-    mac.update(b"sylux:account-search-cursor:v1\0");
+    mac.update(b"sylux:account-search-cursor:v2\0");
     mac.update(&body);
     let token = format!(
         "{}.{}",
@@ -172,7 +189,7 @@ fn search_cursor_decode(key: &[u8; 32], value: &str) -> Option<SearchCursor> {
     let body = URL_SAFE_NO_PAD.decode(body).ok()?;
     let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
     let mut mac = HmacSha256::new_from_slice(key).ok()?;
-    mac.update(b"sylux:account-search-cursor:v1\0");
+    mac.update(b"sylux:account-search-cursor:v2\0");
     mac.update(&body);
     mac.verify_slice(&signature).ok()?;
     serde_json::from_slice(&body).ok()
@@ -200,7 +217,12 @@ pub async fn search(
     let key = cursor_key(&s);
     let result = s
         .workers
-        .read(move |db| Ok(build_search(db, cookie, account, q, limit, key)))
+        .read(move |db| {
+            let snapshot = db.unchecked_transaction()?;
+            let reply = build_search(&snapshot, cookie, account, q, limit, key);
+            snapshot.commit()?;
+            Ok(reply)
+        })
         .await;
     match result {
         Ok(Ok(reply)) => (StatusCode::OK, Json(reply)).into_response(),
@@ -228,13 +250,15 @@ fn build_search(
     if current != account {
         return Err(error(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
-    let found = domain_search::find(db, &account, &q.q)
+    let sort = result_sort(q.sort.as_deref())?;
+    let found = domain_search::find_sorted(db, &account, &q.q, sort)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?;
     let offset = if let Some(token) = q.cursor {
         let Some(cursor) = search_cursor_decode(&key, &token) else {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
         };
-        if cursor.version != 1
+        if cursor.version != 2
+            || cursor.sort != sort
             || cursor.actor != account
             || cursor.query != q.q
             || cursor.offset == 0
@@ -256,7 +280,8 @@ fn build_search(
         search_cursor_encode(
             &key,
             &SearchCursor {
-                version: 1,
+                version: 2,
+                sort,
                 actor: account,
                 query: q.q,
                 fingerprint: found.fingerprint,
@@ -780,6 +805,7 @@ pub async fn move_entry(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrashQuery {
+    sort: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
 }
@@ -788,6 +814,7 @@ pub struct TrashQuery {
 struct TrashCursor {
     version: u8,
     actor: String,
+    sort: namespace::ResultSort,
     fingerprint: String,
     last_name: String,
     last_id: String,
@@ -796,7 +823,7 @@ struct TrashCursor {
 fn trash_cursor_encode(key: &[u8; 32], cursor: &TrashCursor) -> Option<String> {
     let body = serde_json::to_vec(cursor).ok()?;
     let mut mac = HmacSha256::new_from_slice(key).ok()?;
-    mac.update(b"sylux:trash-list-cursor:v1\0");
+    mac.update(b"sylux:trash-list-cursor:v2\0");
     mac.update(&body);
     let token = format!(
         "{}.{}",
@@ -814,7 +841,7 @@ fn trash_cursor_decode(key: &[u8; 32], value: &str) -> Option<TrashCursor> {
     let body = URL_SAFE_NO_PAD.decode(body).ok()?;
     let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
     let mut mac = HmacSha256::new_from_slice(key).ok()?;
-    mac.update(b"sylux:trash-list-cursor:v1\0");
+    mac.update(b"sylux:trash-list-cursor:v2\0");
     mac.update(&body);
     mac.verify_slice(&signature).ok()?;
     serde_json::from_slice(&body).ok()
@@ -825,6 +852,10 @@ pub async fn trash_listing(
     headers: HeaderMap,
     Query(q): Query<TrashQuery>,
 ) -> Response {
+    let sort = match result_sort(q.sort.as_deref()) {
+        Ok(sort) => sort,
+        Err(response) => return response,
+    };
     let limit = q.limit.unwrap_or(100);
     if limit == 0 || limit > namespace::MAX_TRASH_PAGE_SIZE {
         return error(StatusCode::BAD_REQUEST, "invalid_limit");
@@ -852,7 +883,7 @@ pub async fn trash_listing(
             if current != account {
                 return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
             }
-            let reply = build_trash_listing(&snapshot, &account, q.cursor, limit, key);
+            let reply = build_trash_listing(&snapshot, &account, q.cursor, sort, limit, key);
             snapshot.commit()?;
             Ok(reply)
         })
@@ -868,13 +899,15 @@ fn build_trash_listing(
     db: &rusqlite::Connection,
     account: &str,
     cursor: Option<String>,
+    sort: namespace::ResultSort,
     limit: usize,
     key: [u8; 32],
 ) -> Result<serde_json::Value, Response> {
     let decoded = if let Some(token) = cursor {
         let cursor = trash_cursor_decode(&key, &token)
             .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_cursor"))?;
-        if cursor.version != 1
+        if cursor.version != 2
+            || cursor.sort != sort
             || cursor.actor != account
             || crate::domain::names::EntryName::parse(&cursor.last_name).is_err()
             || cursor.last_id.len() != 32
@@ -901,7 +934,7 @@ fn build_trash_listing(
         name: cursor.last_name,
         id: cursor.last_id,
     });
-    let page = namespace::trashed_page(db, account, after.as_ref(), limit)
+    let page = namespace::trashed_page_sorted(db, account, sort, after.as_ref(), limit)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?;
     let next_cursor = if page.has_more {
         let last = page.items.last().expect("nonempty bounded Trash page");
@@ -909,7 +942,8 @@ fn build_trash_listing(
             trash_cursor_encode(
                 &key,
                 &TrashCursor {
-                    version: 1,
+                    version: 2,
+                    sort,
                     actor: account.to_owned(),
                     fingerprint,
                     last_name: last.entry.name.clone(),

@@ -159,6 +159,20 @@ pub enum ListingSort {
     ModifiedDesc,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultSort {
+    #[default]
+    NameAsc,
+    NameDesc,
+    SizeAsc,
+    SizeDesc,
+    ModifiedAsc,
+    ModifiedDesc,
+    LocationAsc,
+    LocationDesc,
+}
+
 #[derive(Debug)]
 pub struct ListingPosition {
     pub kind_rank: u8,
@@ -490,6 +504,8 @@ pub struct DeletedEntry {
     #[serde(flatten)]
     pub entry: Entry,
     pub original_path: Vec<String>,
+    pub size: Option<i64>,
+    pub modified_at: Option<i64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub needs_reference: bool,
 }
@@ -499,26 +515,38 @@ pub struct TrashPosition {
     pub id: String,
 }
 
+struct TrashSortPosition {
+    kind_rank: u8,
+    name: String,
+    size: Option<i64>,
+    modified_at: Option<i64>,
+    location: String,
+}
+
 pub struct TrashPage {
     pub items: Vec<DeletedEntry>,
     pub has_more: bool,
 }
 
-fn deleted_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
+fn deleted_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Entry, Option<i64>, Option<i64>)> {
     let id: String = row.get(0)?;
     let generation: i64 = row.get(4)?;
-    Ok(Entry {
-        etag: folder_etag(&id, generation as u64),
-        id,
-        parent_id: row.get(1)?,
-        name: row.get(2)?,
-        kind: row.get(3)?,
-        generation,
-    })
+    Ok((
+        Entry {
+            etag: folder_etag(&id, generation as u64),
+            id,
+            parent_id: row.get(1)?,
+            name: row.get(2)?,
+            kind: row.get(3)?,
+            generation,
+        },
+        row.get(5)?,
+        row.get(6)?,
+    ))
 }
 
 pub fn trashed(db: &Connection, owner: &str) -> Result<Vec<DeletedEntry>, NamespaceError> {
-    let mut stmt = db.prepare("SELECT entry_id,parent_id,original_name,kind,generation FROM entry WHERE owner_account_id=?1 AND state='deleted' ORDER BY original_name,entry_id").map_err(|_| NamespaceError::Sql)?;
+    let mut stmt = db.prepare("SELECT e.entry_id,e.parent_id,e.original_name,e.kind,e.generation,CASE e.kind WHEN 'file' THEN r.length END,CASE e.kind WHEN 'file' THEN r.committed_at END FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id WHERE e.owner_account_id=?1 AND e.state='deleted' ORDER BY e.original_name,e.entry_id").map_err(|_| NamespaceError::Sql)?;
     let rows = stmt
         .query_map([owner], deleted_entry)
         .map_err(|_| NamespaceError::Sql)?
@@ -534,23 +562,139 @@ pub fn trashed_page(
     after: Option<&TrashPosition>,
     limit: usize,
 ) -> Result<TrashPage, NamespaceError> {
+    trashed_page_sorted(db, owner, ResultSort::NameAsc, after, limit)
+}
+
+/// Sort every deleted root in SQL before bounding the page and resolving its paths.
+pub fn trashed_page_sorted(
+    db: &Connection,
+    owner: &str,
+    sort: ResultSort,
+    after: Option<&TrashPosition>,
+    limit: usize,
+) -> Result<TrashPage, NamespaceError> {
     if limit == 0 || limit > MAX_TRASH_PAGE_SIZE {
         return Err(NamespaceError::InvalidLimit);
     }
-    let mut stmt = db
-        .prepare(
-            "SELECT entry_id,parent_id,original_name,kind,generation FROM entry
-         WHERE owner_account_id=?1 AND state='deleted'
-         AND (?2 IS NULL OR (original_name,entry_id)>(?2,?3))
-         ORDER BY original_name,entry_id LIMIT ?4",
-        )
-        .map_err(|_| NamespaceError::Sql)?;
+    let name_after = "(original_name>?3 OR (original_name=?3 AND entry_id>?6))";
+    let (predicate, order, location) = match sort {
+        ResultSort::NameAsc => (name_after.to_owned(), "original_name,entry_id", false),
+        ResultSort::NameDesc => (
+            "(original_name<?3 OR (original_name=?3 AND entry_id>?6))".to_owned(),
+            "original_name DESC,entry_id",
+            false,
+        ),
+        ResultSort::LocationAsc | ResultSort::LocationDesc => {
+            let comparison = if sort == ResultSort::LocationAsc {
+                ">"
+            } else {
+                "<"
+            };
+            (
+                format!("(location_key{comparison}?7 OR (location_key=?7 AND {name_after}))"),
+                if sort == ResultSort::LocationAsc {
+                    "location_key,original_name,entry_id"
+                } else {
+                    "location_key DESC,original_name,entry_id"
+                },
+                true,
+            )
+        }
+        ResultSort::SizeAsc
+        | ResultSort::SizeDesc
+        | ResultSort::ModifiedAsc
+        | ResultSort::ModifiedDesc => {
+            let (column, parameter, comparison, order) = match sort {
+                ResultSort::SizeAsc => (
+                    "byte_size",
+                    "?4",
+                    ">",
+                    "kind_rank,CASE WHEN kind_rank=0 THEN original_name END,byte_size IS NULL,byte_size,original_name,entry_id",
+                ),
+                ResultSort::SizeDesc => (
+                    "byte_size",
+                    "?4",
+                    "<",
+                    "kind_rank,CASE WHEN kind_rank=0 THEN original_name END,byte_size IS NULL,byte_size DESC,original_name,entry_id",
+                ),
+                ResultSort::ModifiedAsc => (
+                    "modified_at",
+                    "?5",
+                    ">",
+                    "kind_rank,CASE WHEN kind_rank=0 THEN original_name END,modified_at IS NULL,modified_at,original_name,entry_id",
+                ),
+                ResultSort::ModifiedDesc => (
+                    "modified_at",
+                    "?5",
+                    "<",
+                    "kind_rank,CASE WHEN kind_rank=0 THEN original_name END,modified_at IS NULL,modified_at DESC,original_name,entry_id",
+                ),
+                _ => unreachable!(),
+            };
+            (
+                format!(
+                    "(kind_rank>?2 OR (kind_rank=?2 AND ((kind_rank=0 AND {name_after}) OR (kind_rank=1 AND (({parameter} IS NOT NULL AND ({column} IS NULL OR {column}{comparison}{parameter} OR ({column}={parameter} AND {name_after}))) OR ({parameter} IS NULL AND {column} IS NULL AND {name_after}))))))"
+                ),
+                order,
+                false,
+            )
+        }
+    };
+    let paths = if location {
+        format!("paths(entry_id,location_key,child_key,depth) AS (
+            SELECT entry_id,'','',0 FROM entry WHERE owner_account_id=?1 AND parent_id IS NULL
+            UNION ALL
+            SELECT e.entry_id,p.child_key,p.child_key || CAST(e.name_key AS TEXT) || char(0),p.depth+1
+            FROM paths p CROSS JOIN entry e ON e.parent_id=p.entry_id
+            WHERE e.owner_account_id=?1 AND p.depth<{MAX_ENTRY_DEPTH}
+        ),")
+    } else {
+        String::new()
+    };
+    let location_column = if location { "p.location_key" } else { "''" };
+    let location_join = if location {
+        "JOIN paths p ON p.entry_id=e.entry_id"
+    } else {
+        ""
+    };
+    let listing = format!("WITH RECURSIVE {paths} listing AS (
+        SELECT e.entry_id,e.parent_id,e.original_name,e.kind,e.generation,
+            CASE e.kind WHEN 'file' THEN r.length END AS byte_size,
+            CASE e.kind WHEN 'file' THEN r.committed_at END AS modified_at,
+            CASE e.kind WHEN 'folder' THEN 0 ELSE 1 END AS kind_rank,
+            {location_column} AS location_key
+        FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id
+        {location_join} WHERE e.owner_account_id=?1 AND e.state='deleted'
+    )");
+    let pivot = if let Some(after) = after {
+        Some(db.query_row(
+            &format!("{listing} SELECT kind_rank,original_name,byte_size,modified_at,location_key FROM listing WHERE entry_id=?2"),
+            params![owner, after.id],
+            |row| Ok(TrashSortPosition {
+                kind_rank: row.get(0)?,
+                name: row.get(1)?,
+                size: row.get(2)?,
+                modified_at: row.get(3)?,
+                location: row.get(4)?,
+            }),
+        ).map_err(|_| NamespaceError::Sql)?)
+    } else {
+        None
+    };
+    let sql = format!(
+        "{listing} SELECT entry_id,parent_id,original_name,kind,generation,byte_size,modified_at FROM listing WHERE ?6 IS NULL OR {predicate} ORDER BY {order} LIMIT ?8"
+    );
+    let mut stmt = db.prepare(&sql).map_err(|_| NamespaceError::Sql)?;
     let mut rows = stmt
         .query_map(
             params![
                 owner,
-                after.map(|p| &p.name),
-                after.map(|p| &p.id),
+                pivot.as_ref().map(|p| p.kind_rank),
+                pivot.as_ref().map(|p| p.name.as_str()),
+                pivot.as_ref().and_then(|p| p.size),
+                pivot.as_ref().and_then(|p| p.modified_at),
+                after.map(|p| p.id.as_str()),
+                pivot.as_ref().map(|p| p.location.as_str()),
                 (limit + 1) as i64
             ],
             deleted_entry,
@@ -572,8 +716,8 @@ pub fn trash_fingerprint(db: &Connection, owner: &str) -> Result<String, Namespa
 
     let mut stmt = db
         .prepare(
-            "SELECT entry_id,parent_id,original_name,kind,state,generation,current_revision_id
-         FROM entry WHERE owner_account_id=?1 ORDER BY parent_id,state,name_key,entry_id",
+            "SELECT e.entry_id,parent_id,original_name,e.kind,e.state,e.generation,e.current_revision_id,r.length,r.committed_at
+         FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id WHERE owner_account_id=?1 ORDER BY parent_id,state,name_key,e.entry_id",
         )
         .map_err(|_| NamespaceError::Sql)?;
     let mut rows = stmt.query([owner]).map_err(|_| NamespaceError::Sql)?;
@@ -592,6 +736,11 @@ pub fn trash_fingerprint(db: &Connection, owner: &str) -> Result<String, Namespa
         }
         let generation: i64 = row.get(5).map_err(|_| NamespaceError::Sql)?;
         digest.update(generation.to_be_bytes());
+        for column in [7, 8] {
+            let value: Option<i64> = row.get(column).map_err(|_| NamespaceError::Sql)?;
+            digest.update([u8::from(value.is_some())]);
+            digest.update(value.unwrap_or_default().to_be_bytes());
+        }
     }
     Ok(URL_SAFE_NO_PAD.encode(digest.finalize()))
 }
@@ -634,12 +783,12 @@ fn deleted_path(
 fn deleted_paths(
     db: &Connection,
     owner: &str,
-    rows: Vec<Entry>,
+    rows: Vec<(Entry, Option<i64>, Option<i64>)>,
 ) -> Result<Vec<DeletedEntry>, NamespaceError> {
     let mut ancestors = DeletedAncestors::new();
     let mut result = Vec::with_capacity(rows.len());
     let mut counts = std::collections::HashMap::new();
-    for entry in rows {
+    for (entry, size, modified_at) in rows {
         let original_path = deleted_path(db, owner, entry.parent_id.as_deref(), &mut ancestors)?;
         *counts
             .entry((entry.name.clone(), original_path.clone()))
@@ -647,6 +796,8 @@ fn deleted_paths(
         result.push(DeletedEntry {
             entry,
             original_path,
+            size,
+            modified_at,
             needs_reference: false,
         });
     }

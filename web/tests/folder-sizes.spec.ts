@@ -30,7 +30,7 @@ async function workspace(page: Page) {
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password', { exact: true }).fill('password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('article', { name: longName, exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: longName, exact: true })).toBeVisible();
   return {
     changeAndPause: () => { bytes = 4096; pending = new Promise<void>(resolve => release = resolve); },
     finish: () => { release?.(); pending = undefined; },
@@ -43,7 +43,7 @@ for (const theme of ['light', 'dark'] as const) {
       await page.setViewportSize({ width, height: 900 });
       await page.emulateMedia({ colorScheme: theme });
       const backend = await workspace(page);
-      const size = (name: string) => page.getByRole('article', { name, exact: true }).locator(width <= 620 ? '.mobile-file-size' : ':scope > .file-size');
+      const size = (name: string) => page.getByRole('row', { name, exact: true }).locator(width <= 620 ? '.mobile-file-size' : ':scope > .file-size');
       for (const name of [longName, 'Empty', 'Unavailable', 'Older response', 'Notes.txt']) {
         await expect(size(name)).toBeVisible();
       }

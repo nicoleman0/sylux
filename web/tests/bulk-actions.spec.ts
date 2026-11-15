@@ -67,7 +67,7 @@ async function signIn(page: Page, handle: string) {
   await page.getByLabel('Account name').fill(handle);
   await page.getByLabel('Password', { exact: true }).fill('password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('article', { name: 'alpha.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'alpha.bin', exact: true })).toBeVisible();
 }
 
 async function select(page: Page, ...names: string[]) {
@@ -120,9 +120,9 @@ test('bulk move confirms a destination, reports per-item failures, and retries o
   backend.failures.set('gamma', { status: 403, code: 'forbidden' });
   await select(page, 'alpha.bin', 'beta.bin', 'gamma.bin');
   await moveSelected(page);
-  await expect(page.getByRole('article', { name: 'alpha.bin', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('article', { name: 'beta.bin', exact: true })).toBeVisible();
-  await expect(page.getByRole('article', { name: 'gamma.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'alpha.bin', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('row', { name: 'beta.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'gamma.bin', exact: true })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Move results' }).getByText(/another.*name|name.*exists|name.*conflict|another folder/i)).toBeVisible();
   await expect(page.getByRole('region', { name: 'Move results' }).getByText(/permission|forbidden|not allowed/i)).toBeVisible();
   expect(backend.mutations).toEqual(['alpha', 'beta', 'gamma'].map(id => ({ id, action: 'move', parent: 'destination', etag: `"${id}:1"` })));
@@ -132,8 +132,8 @@ test('bulk move confirms a destination, reports per-item failures, and retries o
   await page.getByRole('button', { name: 'Retry failed items', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Destination', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Move here', exact: true }).click();
-  await expect(page.getByRole('article', { name: 'beta.bin', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('article', { name: 'gamma.bin', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('row', { name: 'beta.bin', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('row', { name: 'gamma.bin', exact: true })).toHaveCount(0);
   expect(backend.mutations.map(item => item.id)).toEqual(['alpha', 'beta', 'gamma', 'beta', 'gamma']);
 });
 
@@ -149,9 +149,9 @@ test('bulk trash requires confirmation and keeps conflicting or forbidden items 
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   expect(backend.mutations).toEqual([]);
   await trashSelected(page);
-  await expect(page.getByRole('article', { name: 'alpha.bin', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('article', { name: 'Destination', exact: true })).toBeVisible();
-  await expect(page.getByRole('article', { name: 'beta.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'alpha.bin', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('row', { name: 'Destination', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'beta.bin', exact: true })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Trash results' }).getByText('This item could not be moved to trash. Refresh before retrying.', { exact: true })).toBeVisible();
   expect(backend.mutations).toEqual(['alpha', 'beta', 'destination'].map(id => ({ id, action: 'trash', etag: `"${id}:1"` })));
 });
@@ -161,8 +161,8 @@ test('uncertain bulk responses require a refresh before any retry', async ({ pag
   backend.failures.set('beta', { status: 503, code: 'unavailable' });
   await select(page, 'alpha.bin', 'beta.bin');
   await trashSelected(page);
-  await expect(page.getByRole('article', { name: 'alpha.bin', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('article', { name: 'beta.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'alpha.bin', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('row', { name: 'beta.bin', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Refresh before retry', exact: true })).toBeVisible();
   const retry = page.getByRole('button', { name: 'Retry failed items', exact: true });
   if (await retry.count()) await expect(retry).toBeDisabled();
@@ -216,7 +216,7 @@ test('refresh reconciles committed trash beyond page one after its response fail
   });
   await page.getByRole('button', { name: 'Refresh before retry', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Refresh before retry', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('article', { name: 'alpha.bin', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('row', { name: 'alpha.bin', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Retry failed items', exact: true })).toHaveCount(0);
   expect(backend.mutations.map(item => item.id)).toEqual(['alpha', 'beta']);
   expect(trashReads).toEqual([0, 100]);

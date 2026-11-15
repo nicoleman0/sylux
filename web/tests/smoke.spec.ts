@@ -108,7 +108,7 @@ async function login(page: import('@playwright/test').Page): Promise<void> {
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
   await expect(page.getByRole('heading', { level: 1, name: 'Files' })).toBeVisible();
-  await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: 'Welcome.txt' })).toBeVisible();
 }
 
 test('setup is explicit and returns to login rather than creating a session', async ({ page }) => {
@@ -131,7 +131,7 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
   await page.getByRole('button', { name: 'New folder', exact: true }).click();
   await page.getByLabel('Folder name', { exact: true }).fill('Research');
   await page.getByRole('button', { name: 'Create folder' }).click();
-  await expect(page.getByRole('article').filter({ hasText: 'Research' })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: 'Research' })).toBeVisible();
   await page.getByRole('button', { name: 'Options for Welcome.txt', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.getByLabel('New name').fill('Notes');
@@ -139,7 +139,7 @@ test('login, folder create/rename, and upload work with mocked API', async ({ pa
   await expect(page.getByText('Notes')).toBeVisible();
 
   await page.locator('#upload-file').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.from('mock fixture') });
-  await expect(page.getByRole('article').filter({ hasText: 'fixture.txt' })).toBeVisible({ timeout: 8000 });
+  await expect(page.locator('.file-row').filter({ hasText: 'fixture.txt' })).toBeVisible({ timeout: 8000 });
   await expect(page.getByRole('region', { name: 'Upload results', exact: true }).getByRole('status')).toHaveText('Uploaded to Files');
   await expect(page.locator('.upload-status')).toHaveCount(0);
   await expect(page.locator('.upload-batch-status')).toHaveCount(0);
@@ -248,7 +248,7 @@ test('search retries, pages, and ignores an obsolete response', async ({ page })
   await page.getByRole('button', { name: 'Clear search' }).click();
   lateRelease();
   await expect(page.getByRole('button', { name: 'Open Late result' })).toHaveCount(0);
-  await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: 'Welcome.txt' })).toBeVisible();
 });
 
 test('clearing search after a rename restores the previous browsing page with fresh entries', async ({ page }) => {
@@ -434,14 +434,14 @@ test('delete confirmation and restore work at mobile width', async ({ page }) =>
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await expect(page.getByRole('dialog')).toContainText('Move this file to trash. You can restore it later.');
   await page.getByRole('button', { name: 'Move to trash' }).click();
-  await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toHaveCount(0);
+  await expect(page.locator('.file-row').filter({ hasText: 'Welcome.txt' })).toHaveCount(0);
   await page.locator('[data-slot=sidebar-trigger]').click();
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await page.getByRole('button', { name: 'Restore Welcome.txt' }).click();
   await expect(page.getByRole('heading', { name: 'Trash', exact: true })).toBeVisible();
   await page.locator('[data-slot=sidebar-trigger]').click();
   await page.getByRole('button', { name: 'Files', exact: true }).click();
-  await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: 'Welcome.txt' })).toBeVisible();
   expect(await page.locator('body').evaluate((body) => body.scrollWidth <= window.innerWidth)).toBeTruthy();
 });
 
@@ -498,9 +498,9 @@ test('trash entries show their original folders for duplicate names', async ({ p
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
-  await expect(page.getByRole('listitem').filter({ hasText: 'notes.txt' })).toHaveCount(2);
-  await expect(page.getByRole('listitem').filter({ hasText: 'Files / Work' })).toBeVisible();
-  await expect(page.getByRole('listitem').filter({ hasText: 'Files / Home' })).toBeVisible();
+  await expect(page.locator('.trash-row').filter({ hasText: 'notes.txt' })).toHaveCount(2);
+  await expect(page.locator('.trash-row').filter({ hasText: 'Files / Work' })).toBeVisible();
+  await expect(page.locator('.trash-row').filter({ hasText: 'Files / Home' })).toBeVisible();
 });
 
 
@@ -549,8 +549,8 @@ test('identical deleted names and paths have distinct references', async ({ page
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
-  await expect(page.getByRole('listitem').filter({ hasText: 'Item reference: older-entry' })).toBeVisible();
-  await expect(page.getByRole('listitem').filter({ hasText: 'Item reference: newer-entry' })).toBeVisible();
+  await expect(page.locator('.trash-row').filter({ hasText: 'Item reference: older-entry' })).toBeVisible();
+  await expect(page.locator('.trash-row').filter({ hasText: 'Item reference: newer-entry' })).toBeVisible();
   await expect(page.getByRole('button', { name: /Restore notes.txt.*item reference older-entry/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /Restore notes.txt.*item reference newer-entry/ })).toBeVisible();
 });
@@ -939,7 +939,7 @@ test('signed-in root failure offers file retry without reporting a login failure
   await expect(page.getByRole('alert')).toContainText('Could not load this folder');
   await expect(page.getByText('Sign-in could not be completed', { exact: false })).toHaveCount(0);
   await page.getByRole('button', { name: 'Try again', exact: true }).click();
-  await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: 'Welcome.txt' })).toBeVisible();
   expect(attempts).toBe(2);
 });
 
@@ -958,7 +958,7 @@ test('confirmed folder creation survives a failed refresh without encouraging an
   await expect(page.getByLabel('Folder name', { exact: true })).toHaveValue('');
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Refresh folder' }).click();
-  await expect(page.getByRole('article').filter({ hasText: 'Research' })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: 'Research' })).toBeVisible();
   expect(creates).toBe(1);
 });
 
@@ -1038,11 +1038,11 @@ test('an old unauthorized response cannot end the next session', async ({ page }
   await signOut(page);
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: 'Welcome.txt' })).toBeVisible();
   const response = page.waitForResponse((r) => new URL(r.url()).pathname === '/folders/root-1/children' && r.status() === 401);
   release(); await response; await page.evaluate(() => new Promise(requestAnimationFrame));
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
-  await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: 'Welcome.txt' })).toBeVisible();
 });
 
 test('wrong current password and rejected upload tickets do not end a valid session', async ({ page }) => {
@@ -1080,10 +1080,10 @@ test('mobile delete failure, cancellation, confirmation and restore keep focus r
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await page.getByRole('button', { name: 'Restore Welcome.txt' }).click();
   await expect(page.getByRole('heading', { name: 'Trash' })).toBeFocused();
-  await expect(page.getByRole('article', { name: 'Welcome.txt', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('row', { name: 'Welcome.txt', exact: true })).toHaveCount(0);
   await page.locator('[data-slot=sidebar-trigger]').click();
   await page.getByRole('button', { name: 'Files', exact: true }).click();
-  await expect(page.getByRole('article').filter({ hasText: 'Welcome.txt' })).toBeVisible();
+  await expect(page.locator('.file-row').filter({ hasText: 'Welcome.txt' })).toBeVisible();
 });
 
 for (const width of [1280, 390]) {
@@ -1095,7 +1095,7 @@ for (const width of [1280, 390]) {
     await expect(page.getByRole('region', { name: 'Upload results', exact: true }).getByRole('status')).toHaveText('Uploaded to Files');
     await expect(page.locator('.upload-status')).toHaveCount(0);
     await expect(page.locator('[data-upload-result]')).toHaveCount(0);
-    await expect(page.getByRole('article', { name: longName, exact: true })).toBeVisible();
+    await expect(page.getByRole('row', { name: longName, exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -1224,14 +1224,14 @@ test('home returns from a nested folder and other screens to root files', async 
   const home = page.getByRole('link', { name: 'Sylux', exact: true });
   await home.click();
   await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
-  await expect(page.getByRole('article', { name: 'Welcome.txt', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'Welcome.txt', exact: true })).toBeVisible();
   for (const section of ['Trash', 'Account', 'Settings']) {
     await page.getByRole('button', { name: section, exact: true }).click();
     await expect(page.getByRole('heading', { name: section, exact: true })).toBeVisible();
-    await expect(page.getByRole('article', { name: 'Welcome.txt', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('row', { name: 'Welcome.txt', exact: true })).toHaveCount(0);
     await home.click();
     await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
-    await expect(page.getByRole('article', { name: 'Welcome.txt', exact: true })).toBeVisible();
+    await expect(page.getByRole('row', { name: 'Welcome.txt', exact: true })).toBeVisible();
   }
   expect(errors).toEqual([]);
 });
@@ -1307,10 +1307,10 @@ test('browser history cannot reveal a previous account folder after reload', asy
   await page.getByLabel('Account name').fill('bob');
   await page.getByLabel('Password', { exact: true }).fill('bob password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('article', { name: 'Bob notes.txt', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'Bob notes.txt', exact: true })).toBeVisible();
   await page.goBack();
   await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
-  await expect(page.getByRole('article', { name: 'Bob notes.txt', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'Bob notes.txt', exact: true })).toBeVisible();
   await expect(page.getByText(privateName, { exact: true })).toHaveCount(0);
 });
 

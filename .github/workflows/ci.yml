@@ -87,4 +87,4 @@ jobs:
         run: npm --prefix web run smoke -- preview.spec.ts pdf-render.spec.ts pdf-compatibility.spec.ts
 
       - name: Check listing metadata browser journeys
-        run: npm --prefix web run smoke -- folder-sizes.spec.ts modified-dates.spec.ts sorting.spec.ts browsing-context.spec.ts compact-files.spec.ts design-system.spec.ts
+        run: npm --prefix web run smoke -- folder-sizes.spec.ts modified-dates.spec.ts sorting.spec.ts column-sorting.spec.ts mock-result-sorting.spec.ts trash-sort-validation.spec.ts browsing-context.spec.ts compact-files.spec.ts design-system.spec.ts

@@ -127,7 +127,7 @@ test('changed replacement target explains failure and allows a fresh upload', as
   await expect(page.getByText('Upload status needs checking')).toHaveCount(0);
   await expect(page.getByLabel('Choose files to upload')).toBeEnabled();
   await page.getByLabel('Choose files to upload').setInputFiles({ name: 'fresh.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('fresh bytes') });
-  await expect(page.getByRole('article', { name: 'fresh.bin', exact: true })).toBeVisible();
-  await expect(page.getByRole('article', { name: 'same.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'fresh.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'same.bin', exact: true })).toBeVisible();
   expect(backend.sent()).toBe(2);
 });

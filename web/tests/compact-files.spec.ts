@@ -54,7 +54,7 @@ for (const theme of ['light', 'dark'] as const) {
     await workspace(page, fileNames);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     for (const fullName of fileNames) {
-      const row = page.getByRole('article', { name: fullName, exact: true });
+      const row = page.getByRole('row', { name: fullName, exact: true });
       const label = row.locator('.filename');
       await expect(label).toHaveText(fullName);
       expect(await label.evaluate(el => el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1)).toBe(true);

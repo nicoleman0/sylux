@@ -19,7 +19,7 @@ async function login(page: Page) {
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password', { exact: true }).fill('password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('article')).toBeVisible();
+  await expect(page.locator('.file-row')).toBeVisible();
 }
 
 for (const surface of ['Files', 'Trash', 'Accounts'] as const) {
@@ -31,6 +31,8 @@ for (const surface of ['Files', 'Trash', 'Accounts'] as const) {
     const name = surface === 'Files' ? 'Refresh folder' : surface === 'Trash' ? 'Refresh trash' : 'Refresh';
     const button = page.getByRole('button', { name, exact: true });
     await expect(button).toBeEnabled();
+    await expect(button).toHaveAttribute('title', name);
+    await expect(button).toHaveText('');
     let held: Route | undefined;
     let requests = 0;
     const path = surface === 'Files' ? '**/folders/root/children*' : surface === 'Trash' ? '**/trash?*' : '**/accounts';
@@ -41,13 +43,13 @@ for (const surface of ['Files', 'Trash', 'Accounts'] as const) {
     await expect.poll(() => !!held).toBe(true);
     await expect(button).toBeDisabled();
     await expect(button).toHaveAttribute('aria-busy', 'true');
-    await expect(button).toContainText('Refreshing');
+    await expect(button.locator('[data-refreshing="true"]')).toBeVisible();
     const during = await button.boundingBox();
     expect(during?.width).toBe(before?.width);
     // A second activation while the request is held must not dispatch again.
     await page.keyboard.press('Enter');
     expect(requests).toBe(1);
-    if (surface === 'Files') await expect(page.getByRole('article')).toBeVisible();
+    if (surface === 'Files') await expect(page.locator('.file-row')).toBeVisible();
     if (surface === 'Trash') await expect(page.getByRole('button', { name: /Restore notes/ })).toBeVisible();
     await held!.fulfill({ status: 503, json: { code: 'unavailable' } });
     await expect(button).toBeEnabled();
@@ -73,7 +75,8 @@ test('instance reload remains visible and busy through retry success and failure
   await reload.click();
   await expect.poll(() => !!held).toBe(true);
   await expect(reload).toBeDisabled();
-  await expect(reload).toContainText(/Reloading|Refreshing/);
+  await expect(reload).toHaveAttribute('aria-busy', 'true');
+  await expect(reload.locator('[data-refreshing="true"]')).toBeVisible();
   await page.keyboard.press('Enter');
   expect(count).toBe(1);
   await held!.fulfill({ status: 503, json: { code: 'unavailable' } });
@@ -100,7 +103,7 @@ test('folder and destination retry controls stay busy until their requests settl
   await expect(retry).toBeDisabled();
   await expect(retry).toHaveAttribute('aria-busy', 'true');
   await held!.fulfill({ json: { items: [file], next_cursor: null, has_more: false } });
-  await expect(page.getByRole('article')).toBeVisible();
+  await expect(page.locator('.file-row')).toBeVisible();
   await page.getByRole('button', { name: 'Options for notes.txt', exact: true }).click();
   // Fail the first destination load, then recover through its own retry.
   await page.route('**/folders/root/children*', route => route.fulfill({ status: 503, json: { code: 'unavailable' } }));
@@ -167,9 +170,9 @@ test('held folder retry feedback does not cover a newer successful navigation', 
   await expect.poll(() => !!held).toBe(true);
   await page.unroute('**/folders/root/children*');
   await page.getByRole('button', { name: 'Files', exact: true }).click();
-  await expect(page.getByRole('article')).toBeVisible();
+  await expect(page.locator('.file-row')).toBeVisible();
   await expect(retry).toHaveCount(0);
   await held!.fulfill({ status: 503, json: { code: 'unavailable' } });
-  await expect(page.getByRole('article')).toBeVisible();
+  await expect(page.locator('.file-row')).toBeVisible();
   await expect(page.getByRole('alert')).toHaveCount(0);
 });

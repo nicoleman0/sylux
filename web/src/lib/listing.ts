@@ -1,19 +1,33 @@
 import type { ApiClient } from './api';
 
 export type Folder = { id: string; parent_id: string | null; name: string; kind: 'folder'; size?: number | null; modified_at?: number | null; etag: string };
-export type FileEntry = { id: string; parent_id: string; name: string; kind: 'file'; size: number; modified_at?: number | null; etag: string };
+export type FileEntry = { id: string; parent_id: string; name: string; kind: 'file'; size: number | null; modified_at?: number | null; etag: string };
 export type Entry = Folder | FileEntry;
 export type FolderSort = 'name_asc' | 'name_desc' | 'size_asc' | 'size_desc' | 'modified_asc' | 'modified_desc';
+export type ResultSort = FolderSort | 'location_asc' | 'location_desc';
 export type DeletedEntry = Entry & { original_path: string[]; needs_reference?: boolean };
 export type TrashPage = { items: DeletedEntry[]; next_cursor: string | null; has_more: boolean };
 
-export function compareDeleted(left: DeletedEntry, right: DeletedEntry): number {
+export function compareDeleted(left: DeletedEntry, right: DeletedEntry, sort: ResultSort = 'name_asc'): number {
   const compare = (a: string, b: string) => {
     const x = new TextEncoder().encode(a), y = new TextEncoder().encode(b);
     for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] - y[i];
     return x.length - y.length;
   };
-  return compare(left.name, right.name) || compare(left.id, right.id);
+  const name = compare(left.name, right.name);
+  const tie = () => name || compare(left.id, right.id);
+  if (sort.startsWith('name_')) return name * (sort === 'name_desc' ? -1 : 1) || compare(left.id, right.id);
+  if (sort.startsWith('location_')) {
+    const path = (item: DeletedEntry) => item.original_path.map(part => part.normalize('NFC')).join('\0');
+    return compare(path(left), path(right)) * (sort === 'location_desc' ? -1 : 1) || tie();
+  }
+  if (left.kind !== right.kind) return left.kind === 'folder' ? -1 : 1;
+  if (left.kind === 'folder') return tie();
+  const value = (item: DeletedEntry) => sort.startsWith('size_') ? item.size : item.modified_at;
+  const a = value(left), b = value(right);
+  const knownA = typeof a === 'number', knownB = typeof b === 'number';
+  if (knownA !== knownB) return knownA ? -1 : 1;
+  return (knownA && knownB ? (a - b) * (sort.endsWith('_desc') ? -1 : 1) : 0) || tie();
 }
 export type Listing<T extends Entry = Entry> = { items: T[]; next_cursor: string | null; has_more: boolean };
 export type RootListing = { items: Entry[]; root: Folder; next_cursor: string | null; has_more: boolean };
@@ -34,8 +48,8 @@ export class ListingApi {
   path(folderId: string): Promise<{ items: Folder[] }> {
     return this.client.request(`/folders/${encodeURIComponent(folderId)}/path`);
   }
-  search(query: string, cursor?: string | null, signal?: AbortSignal): Promise<SearchListing> {
-    return this.client.request(`/entries/search?q=${encodeURIComponent(query)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
+  search(query: string, cursor?: string | null, signal?: AbortSignal, sort: ResultSort = 'name_asc'): Promise<SearchListing> {
+    return this.client.request(`/entries/search?q=${encodeURIComponent(query)}&limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
   }
   async createFolder(parentId: string, name: string, _etag: string): Promise<Folder> {
     return this.client.request('/folders/children', {
@@ -55,19 +69,23 @@ export class ListingApi {
       method: 'POST', headers: { 'If-Match': etag }, body: { parent_id: parentId },
     });
   }
-  async deleted(cursor?: string | null): Promise<TrashPage> {
-    const page = await this.client.request<TrashPage>(`/trash?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+  async deleted(cursor?: string | null, sort: ResultSort = 'name_asc'): Promise<TrashPage> {
+    const page = await this.client.request<TrashPage>(`/trash?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
     if (!Array.isArray(page.items) || page.items.length > 100 || typeof page.has_more !== 'boolean' ||
       (page.has_more ? !page.items.length || typeof page.next_cursor !== 'string' || !page.next_cursor || page.next_cursor === cursor : page.next_cursor !== null)) {
       throw new Error('Invalid Trash pagination response');
     }
+    const numeric = (value: unknown, size: boolean) => value === undefined || value === null ||
+      (typeof value === 'number' && Number.isSafeInteger(value) && (size ? value >= 0 : Math.abs(value) <= 8_640_000_000_000));
     const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
     for (const item of page.items) {
       if (!item || !text(item.id) || !text(item.name) || !text(item.etag) || !text(item.parent_id) ||
         !['file', 'folder'].includes(item.kind) || !Array.isArray(item.original_path) || !item.original_path.every(text) ||
-        (item.needs_reference !== undefined && typeof item.needs_reference !== 'boolean')) throw new Error('Invalid Trash entry response');
+        (item.needs_reference !== undefined && typeof item.needs_reference !== 'boolean') ||
+        !numeric(item.size, true) || !numeric(item.modified_at, false)) throw new Error('Invalid Trash entry response');
     }
-    for (let i = 1; i < page.items.length; i++) if (compareDeleted(page.items[i - 1], page.items[i]) >= 0) throw new Error('Trash pagination did not advance');
+    if (new Set(page.items.map(item => item.id)).size !== page.items.length) throw new Error('Trash pagination repeated an item');
+    for (let i = 1; i < page.items.length; i++) if (compareDeleted(page.items[i - 1], page.items[i], sort) >= 0) throw new Error('Trash pagination did not advance');
     return page;
   }
   async deletedTargets(ids: Iterable<string>, isCurrent: () => boolean): Promise<DeletedEntry[]> {

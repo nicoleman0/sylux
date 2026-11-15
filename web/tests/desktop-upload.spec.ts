@@ -107,7 +107,7 @@ async function backend(page: Page, fault?: { name: string; outcome: 'failed' | '
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('article', { name: 'Destination', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'Destination', exact: true })).toBeVisible();
   return { events, entries, sent, maxActive: () => maxActive, resolve: (name: string, state: 'committed' | 'rejected') => {
     const [id, admission] = [...tickets.entries()].find(([, body]) => body.name === name)!;
     states.set(id, state);
@@ -197,7 +197,7 @@ test('mixed desktop drops preserve nested and empty folders across directory bat
 
 test('files fallback supports folder rows and Files sidebar as separate drop destinations', async ({ page }) => {
   const store = await backend(page);
-  await desktopDrop(page, page.getByRole('article', { name: 'Destination', exact: true }), [{ name: 'row.txt', content: '' }], true);
+  await desktopDrop(page, page.getByRole('row', { name: 'Destination', exact: true }), [{ name: 'row.txt', content: '' }], true);
   await expect(completed(page)).toBeAttached();
   await expect(completed(page)).toHaveText('Uploaded to Destination');
   await expect(page.locator('[data-upload-result]')).toHaveCount(0);
@@ -247,7 +247,7 @@ test('folder chooser preserves the selected root and nested paths in the current
     await writeFile(join(directory, 'Nested', 'second.txt'), 'second');
     const store = await backend(page);
     await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
-    await expect(page.getByText('Choose folder skips empty folders. Drop a folder to include them.', { exact: true })).toBeVisible();
+    await expect(page.getByText('Choose folder skips empty folders. Drop a folder to include them.', { exact: true })).toHaveCount(0);
     const chooser = page.getByLabel('Choose folder to upload', { exact: true });
     const [dialog] = await Promise.all([page.waitForEvent('filechooser'), page.getByRole('button', { name: 'Choose folder', exact: true }).click()]);
     await dialog.setFiles(directory);
@@ -365,7 +365,7 @@ for (const outcome of ['failed', 'uncertain'] as const) {
     await expect(page.locator('[data-upload-result="broken.txt"]')).toContainText(outcome === 'uncertain' ? 'Outcome unknown' : 'Failed');
     await expect(page.locator('[data-upload-result="after.txt"]')).toContainText('Not attempted');
     expect(store.sent).toEqual(['saved.txt', 'broken.txt']);
-    await expect(page.getByRole('article', { name: 'saved.txt', exact: true })).toBeVisible();
+    await expect(page.getByRole('row', { name: 'saved.txt', exact: true })).toBeVisible();
     if (outcome === 'failed') {
       await page.getByRole('button', { name: 'Account', exact: true }).click();
       await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);
@@ -410,12 +410,12 @@ test('lost folder response states uncertainty and stops later items', async ({ p
   await page.getByRole('button', { name: 'Account', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Dismiss results', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Inspect destination', exact: true }).click();
-  await expect(page.getByRole('article', { name: 'New folder', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'New folder', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Dismiss results', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toHaveCount(0);
   expect(store.sent).toEqual([]);
   await page.getByRole('button', { name: 'Files', exact: true }).click();
-  await expect(page.getByRole('article', { name: 'New folder', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'New folder', exact: true })).toBeVisible();
 });
 
 test('cancel during saving retains the confirmed file and stops the remaining queue', async ({ page }) => {
@@ -649,7 +649,7 @@ test('drop targets are rounded and confined to the listing, with outside drops b
   expect(store.events).toEqual([]);
   await region.dispatchEvent('dragover', { dataTransfer: transfer });
   await expect(region).toHaveAttribute('data-drop-active', 'true');
-  for (const target of [region, page.getByRole('article', { name: 'Destination', exact: true }), page.locator('[data-sidebar=menu-button][data-drop-target=root]')]) {
+  for (const target of [region, page.getByRole('row', { name: 'Destination', exact: true }), page.locator('[data-sidebar=menu-button][data-drop-target=root]')]) {
     await target.dispatchEvent('dragover', { dataTransfer: transfer });
     expect(await target.evaluate(element => parseFloat(getComputedStyle(element).borderRadius))).toBeGreaterThan(0);
   }
@@ -935,7 +935,7 @@ test('unknown folder creation remains inspectable and can be acknowledged withou
   const unknown = page.getByRole('region', { name: 'Unconfirmed folder upload', exact: true });
   await expect(unknown.getByRole('button', { name: 'Dismiss checked results', exact: true })).toHaveCount(0);
   await unknown.getByRole('button', { name: 'Inspect destination', exact: true }).click();
-  await expect(page.getByRole('article', { name: 'Unknown', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'Unknown', exact: true })).toBeVisible();
   await expect(unknown).toContainText('Outcome unknown');
   await unknown.getByRole('button', { name: 'Dismiss checked results', exact: true }).click();
   await expect(unknown).toHaveCount(0);
@@ -990,7 +990,7 @@ for (const failure of ['unavailable', 'changed-session']) {
       await page.getByLabel('Account name').fill('owner');
       await page.getByLabel('Password', { exact: true }).fill('password');
       await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-      await expect(page.getByRole('article', { name: 'Destination', exact: true })).toBeVisible();
+      await expect(page.getByRole('row', { name: 'Destination', exact: true })).toBeVisible();
       await page.getByRole('button', { name: 'Account', exact: true }).click();
     }
     inspection.resolve();
@@ -1038,7 +1038,7 @@ for (const width of [1280, 390]) {
     expect(store.sent).toHaveLength(60);
     expect(requests.filter(path => path === '/folders/root/path')).toHaveLength(60);
     expect(requests.filter(path => path.endsWith('/children'))).toEqual(['/folders/children', '/folders/root/children']);
-    await expect(page.getByRole('article', { name: 'batch-59.txt', exact: true })).toBeVisible();
+    await expect(page.getByRole('row', { name: 'batch-59.txt', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
     await expect(completed(page)).toHaveCount(0);
   });
@@ -1074,7 +1074,7 @@ test('navigation during a held descriptor read preserves destination and final f
     if (++reads === 2) await gate.promise;
     return route.fallback();
   });
-  await desktopDrop(page, page.getByRole('article', { name: 'Destination', exact: true }), [{ name: 'first.txt' }, { name: 'second.txt' }]);
+  await desktopDrop(page, page.getByRole('row', { name: 'Destination', exact: true }), [{ name: 'first.txt' }, { name: 'second.txt' }]);
   await expect.poll(() => reads).toBe(2);
   await page.getByRole('button', { name: 'Account', exact: true }).click();
   await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
@@ -1114,7 +1114,7 @@ test('a moved nested destination retains its ID and uses its current descriptor'
   });
   await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
-  await desktopDrop(page, page.getByRole('article', { name: 'Inner', exact: true }), [{ name: 'first.txt' }, { name: 'second.txt' }]);
+  await desktopDrop(page, page.getByRole('row', { name: 'Inner', exact: true }), [{ name: 'first.txt' }, { name: 'second.txt' }]);
   await expect(completed(page)).toHaveText('2 items uploaded');
   expect(store.events).toEqual([{ kind: 'file', name: 'first.txt', parent: 'inner' }, { kind: 'file', name: 'second.txt', parent: 'inner' }]);
   expect(reads).toBe(2);

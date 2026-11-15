@@ -77,11 +77,11 @@ test('sort resets paging and selection and persists through folders, history and
   await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
 });
 
-test('one sorting control exposes all orders and supports keyboard focus', async ({ page }) => {
+test('sorting dropdown and headings expose all orders and supports keyboard focus', async ({ page }) => {
   const requests = await installSortingBackend(page);
   const sort = page.getByLabel('Sort files by', { exact: true });
   await expect(page.getByRole('combobox')).toHaveCount(1);
-  await expect(page.getByRole('button', { name: /^Sort by/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Sort by/ })).toHaveCount(3);
   await sort.focus();
   await expect(sort).toBeFocused();
   for (const order of ['name_desc', 'size_asc', 'size_desc', 'modified_asc', 'modified_desc', 'name_asc']) {
@@ -108,7 +108,7 @@ test('late listing responses cannot replace a newer sort', async ({ page }) => {
   release();
   await staleResponse;
   await expect.poll(() => names(page)).toEqual(['Projects', 'Alpha.txt']);
-  await expect(page.getByRole('article', { name: 'Stale.txt', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('row', { name: 'Stale.txt', exact: true })).toHaveCount(0);
   await expect(sort).toHaveValue('size_desc');
 });
 
@@ -168,7 +168,7 @@ test('search and destination picker keep their separate defaults and logout rese
   await page.getByLabel('Search files and folders').fill('Alpha');
   await expect(page.getByRole('region', { name: 'Search results', exact: true })).toBeVisible();
   await expect.poll(() => requests.at(-1)?.pathname).toBe('/entries/search');
-  expect(requests.at(-1)?.searchParams.has('sort')).toBe(false);
+  expect(requests.at(-1)?.searchParams.get('sort')).toBe('name_asc');
   await page.getByRole('button', { name: 'Clear search', exact: true }).click();
   await expect(page.getByLabel('Sort files by', { exact: true })).toHaveValue('size_desc');
   await page.getByRole('button', { name: 'Log out', exact: true }).click();

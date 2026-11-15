@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { ApiClient, ResponseTooLargeError, type ApiTransport, type RequestOptions } from '../src/lib/api';
 import type { FileEntry } from '../src/lib/listing';
-import { loadPreview, PREVIEW_LIMIT, PDF_PREVIEW_LIMIT } from '../src/lib/preview';
+import { previewUnavailable, loadPreview, PREVIEW_LIMIT, PDF_PREVIEW_LIMIT } from '../src/lib/preview';
 import { scannedPdf, mixedPdf, manyPagesPdf, blankPdf, annotatedPdf } from './fixtures/pdf-fixtures';
 
 const entry = (name: string, size = 10): FileEntry => ({ id: 'preview', parent_id: 'root', kind: 'file', name, size, etag: '"1"' });
@@ -380,4 +380,15 @@ test('PDF page regions have accessible labels without duplicate canvas announcem
   const canvas = await rendered(page);
   await expect(page.locator('.page[data-page-number="1"]')).toHaveAttribute('aria-label', /Page.*1/);
   await expect(canvas).toHaveAttribute('role', 'presentation');
+});
+
+test('unknown search file size still enforces the response preview limit', async () => {
+  const file: FileEntry = { id: 'unknown', parent_id: 'root', name: 'unknown.txt', kind: 'file', size: null, etag: 'unknown:1' };
+  expect(previewUnavailable(file)).toBeNull();
+  const client = new ApiClient({ request: async (_path: string, options?: RequestOptions) => {
+    expect(options?.maxResponseBytes).toBe(PREVIEW_LIMIT);
+    throw new ResponseTooLargeError();
+  } });
+  const preview = await loadPreview(client, file, '/entries/unknown/content', new AbortController().signal);
+  expect(preview.kind).toBe('unsupported');
 });

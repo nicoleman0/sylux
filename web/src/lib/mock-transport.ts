@@ -1,6 +1,6 @@
 import { HttpError, type ApiTransport, type RequestOptions } from './api';
 import type { User, Account } from './session';
-import type { Entry, Folder, SearchHit } from './listing';
+import type { Entry, Folder, ResultSort, SearchHit } from './listing';
 import type { UploadStatus } from './transfers';
 
 const root: Folder = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root-1"' };
@@ -8,6 +8,58 @@ const seed: Entry[] = [
   { id: 'folder-projects', parent_id: root.id, name: 'Projects', kind: 'folder', etag: '"folder-1"' },
   { id: 'file-welcome', parent_id: root.id, name: 'Welcome.txt', kind: 'file', size: 238, modified_at: 1735689600, etag: '"file-1"' },
 ];
+
+const resultSorts = ['name_asc', 'name_desc', 'size_asc', 'size_desc', 'modified_asc', 'modified_desc', 'location_asc', 'location_desc'] as const;
+const fold = (value: string) => value.normalize('NFC').toLowerCase().normalize('NFC');
+const compareBytes = (a: string, b: string): number => {
+  const left = new TextEncoder().encode(a), right = new TextEncoder().encode(b);
+  for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i] - right[i];
+  return left.length - right.length;
+};
+const resultSort = (params: URLSearchParams): ResultSort => {
+  const sort = params.get('sort') ?? 'name_asc';
+  if (!resultSorts.includes(sort as ResultSort)) throw new HttpError(400, { code: 'invalid_sort', message: 'Invalid sort', request_id: 'mock' });
+  return sort as ResultSort;
+};
+const resultMetadata = (entry: Entry): Entry => ({
+  ...entry,
+  size: entry.kind === 'file' && Number.isFinite(entry.size) ? entry.size : null,
+  modified_at: entry.kind === 'file' && typeof entry.modified_at === 'number' && Number.isFinite(entry.modified_at) ? entry.modified_at : null,
+} as Entry);
+const fingerprintOf = (value: unknown): number => {
+  let fingerprint = 2166136261;
+  for (const byte of new TextEncoder().encode(JSON.stringify(value))) fingerprint = Math.imul(fingerprint ^ byte, 16777619) >>> 0;
+  return fingerprint;
+};
+const encodeResultCursor = (value: object): string => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
+const invalidResultCursor = () => new HttpError(400, { code: 'invalid_cursor', message: 'Invalid cursor', request_id: 'mock' });
+const decodeResultCursor = (value: string): unknown => {
+  try {
+    if (value.length > 4096) throw new Error('Cursor too long');
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(value), char => char.charCodeAt(0))));
+  } catch { throw invalidResultCursor(); }
+};
+
+function compareResults(a: Entry, b: Entry, sort: ResultSort, leftPath: string[], rightPath: string[], search: boolean): number {
+  const name = (entry: Entry) => search ? fold(entry.name) : entry.name;
+  const location = (parts: string[]) => parts.map(part => search ? fold(part) : part.normalize('NFC')).join('\0');
+  const names = () => compareBytes(name(a), name(b));
+  const locations = () => compareBytes(location(leftPath), location(rightPath));
+  let order: number;
+  if (sort.startsWith('location_')) order = locations() * (sort === 'location_desc' ? -1 : 1) || names();
+  else if (sort.startsWith('name_')) order = names() * (sort === 'name_desc' ? -1 : 1);
+  else if (a.kind !== b.kind) order = a.kind === 'folder' ? -1 : 1;
+  else if (a.kind === 'folder') order = names();
+  else {
+    const left = sort.startsWith('size_') ? a.size : a.modified_at;
+    const right = sort.startsWith('size_') ? b.size : b.modified_at;
+    const leftKnown = typeof left === 'number' && Number.isFinite(left);
+    const rightKnown = typeof right === 'number' && Number.isFinite(right);
+    order = leftKnown !== rightKnown ? (leftKnown ? -1 : 1) :
+      (leftKnown && rightKnown ? (left - right) * (sort.endsWith('_desc') ? -1 : 1) : 0) || names();
+  }
+  return order || (search ? locations() : 0) || compareBytes(a.id, b.id);
+}
 
 /** Deterministic in-memory contract fixture. It never persists credentials. */
 export class MockTransport implements ApiTransport {
@@ -119,11 +171,10 @@ export class MockTransport implements ApiTransport {
       if (!this.user) throw new HttpError(401);
       const params = new URLSearchParams(path.split('?')[1]);
       const query = params.get('q') ?? '';
+      const sort = resultSort(params);
       const limit = Number(params.get('limit') ?? '100');
       if (!query || new TextEncoder().encode(query).length > 255 || /[\u0000-\u001f\u007f]/.test(query)) throw new HttpError(400);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new HttpError(400);
-      const fold = (value: string) => value.normalize('NFC').toLowerCase().normalize('NFC');
-      const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
       const locationFor = (entry: Entry): Folder[] | null => {
         const path: Folder[] = [];
         let parentId: string | null = entry.parent_id;
@@ -139,28 +190,23 @@ export class MockTransport implements ApiTransport {
       };
       const hits: SearchHit[] = this.entries.flatMap((entry) => {
         const location = locationFor(entry);
-        const { modified_at: _modifiedAt, ...searchEntry } = entry;
-        return location && fold(entry.name).includes(fold(query)) ? [{ entry: searchEntry, location }] : [];
-      }).sort((a, b) => compare(fold(a.entry.name), fold(b.entry.name)) ||
-        compare(fold(a.location.slice(1).map((part) => part.name).join('\0')), fold(b.location.slice(1).map((part) => part.name).join('\0'))) ||
-        compare(a.entry.id, b.entry.id));
-      const fingerprint = JSON.stringify(this.entries.map((entry) => [entry.id, entry.parent_id, entry.name, entry.etag]));
-      const encodeCursor = (value: object): string => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
-      const decodeCursor = (value: string): unknown => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(value), (char) => char.charCodeAt(0))));
+        return location && fold(entry.name).includes(fold(query)) ? [{ entry: resultMetadata(entry), location }] : [];
+      }).sort((a, b) => compareResults(a.entry, b.entry, sort, a.location.slice(1).map(part => part.name), b.location.slice(1).map(part => part.name), true));
+      const fingerprint = fingerprintOf([this.root, this.entries]);
       let offset = 0;
       if (params.has('cursor')) {
-        let cursor: { query: string; offset: number; fingerprint: string };
+        let cursor: { account: string; query: string; sort: ResultSort; offset: number; fingerprint: number };
         let parsed: unknown;
-        try { parsed = decodeCursor(params.get('cursor')!); } catch { throw new HttpError(400); }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new HttpError(400);
+        try { parsed = decodeResultCursor(params.get('cursor')!); } catch { throw invalidResultCursor(); }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw invalidResultCursor();
         cursor = parsed as typeof cursor;
-        if (cursor.query !== query || !Number.isInteger(cursor.offset) || cursor.offset < 1) throw new HttpError(400);
-        if (cursor.fingerprint !== fingerprint) throw new HttpError(409);
-        if (cursor.offset >= hits.length) throw new HttpError(400);
+        if (cursor.account !== this.user.id || cursor.sort !== sort || cursor.query !== query || !Number.isInteger(cursor.offset) || cursor.offset < 1) throw invalidResultCursor();
+        if (cursor.fingerprint !== fingerprint) throw new HttpError(409, { code: 'listing_changed', message: 'Search changed', request_id: 'mock' });
+        if (cursor.offset >= hits.length) throw invalidResultCursor();
         offset = cursor.offset;
       }
       const end = Math.min(offset + limit, hits.length);
-      return { items: hits.slice(offset, end), next_cursor: end < hits.length ? encodeCursor({ query, offset: end, fingerprint }) : null, has_more: end < hits.length } as T;
+      return { items: hits.slice(offset, end), next_cursor: end < hits.length ? encodeResultCursor({ account: this.user.id, query, sort, offset: end, fingerprint }) : null, has_more: end < hits.length } as T;
     }
     if ((route === '/folders/children' || /^\/folders\/[^/]+\/children$/.test(route)) && method === 'GET') {
       const params = new URLSearchParams(path.split('?')[1]);
@@ -183,7 +229,7 @@ export class MockTransport implements ApiTransport {
           if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
           return (leftKnown && rightKnown ? (leftTime - rightTime) * (sort === 'modified_desc' ? -1 : 1) : 0) || name || compare(a.id, b.id);
         }
-        if (sort.startsWith('size_')) return (a.size - b.size) * (sort === 'size_desc' ? -1 : 1) || name || compare(a.id, b.id);
+        if (sort.startsWith('size_')) return Number(a.size === null) - Number(b.size === null) || ((a.size ?? 0) - (b.size ?? 0)) * (sort === 'size_desc' ? -1 : 1) || name || compare(a.id, b.id);
         return name * (sort === 'name_desc' ? -1 : 1) || compare(a.id, b.id);
       });
       const children = new Map<string, Entry[]>();
@@ -203,7 +249,7 @@ export class MockTransport implements ApiTransport {
           seen.add(id);
           for (const entry of children.get(id) ?? []) {
             if (entry.kind === 'folder') pending.push(entry.id);
-            else if (!Number.isFinite(entry.size)) return null;
+            else if (typeof entry.size !== 'number' || !Number.isFinite(entry.size)) return null;
             else bytes += entry.size;
           }
         }
@@ -223,29 +269,11 @@ export class MockTransport implements ApiTransport {
     if (route === '/trash' && method === 'GET') {
       if (!this.user) throw new HttpError(401);
       const params = new URLSearchParams(path.split('?')[1]);
+      const sort = resultSort(params);
       const limit = Number(params.get('limit') ?? '100');
       if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new HttpError(400);
-      const compare = (a: string, b: string) => {
-        const left = new TextEncoder().encode(a), right = new TextEncoder().encode(b);
-        for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i] - right[i];
-        return left.length - right.length;
-      };
-      const sorted = [...this.deletedEntries].sort((a, b) => compare(a.name, b.name) || compare(a.id, b.id));
-      const metadata = JSON.stringify([this.root, this.entries, this.deletedEntries]);
-      let fingerprint = 2166136261;
-      for (const byte of new TextEncoder().encode(metadata)) fingerprint = Math.imul(fingerprint ^ byte, 16777619) >>> 0;
-      let offset = 0;
-      if (params.has('cursor')) {
-        let cursor: { account: string; offset: number; fingerprint: number };
-        try { cursor = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(params.get('cursor')!), char => char.charCodeAt(0)))); }
-        catch { throw new HttpError(400); }
-        if (!cursor || cursor.account !== this.user.id || !Number.isInteger(cursor.offset) || cursor.offset < 1) throw new HttpError(400);
-        if (cursor.fingerprint !== fingerprint) throw new HttpError(409, { code: 'listing_changed', message: 'Trash changed', request_id: 'mock' });
-        if (cursor.offset >= sorted.length) throw new HttpError(400);
-        offset = cursor.offset;
-      }
-      const items = sorted.slice(offset, offset + limit).map(entry => {
-        const original_path: string[] = [];
+      const originalPath = (entry: Entry): string[] => {
+        const parts: string[] = [];
         const seen = new Set<string>();
         let parentId = entry.parent_id;
         while (parentId && parentId !== root.id) {
@@ -253,14 +281,31 @@ export class MockTransport implements ApiTransport {
           seen.add(parentId);
           const parent = [...this.entries, ...this.deletedEntries].find(item => item.id === parentId);
           if (!parent) throw new Error('Missing parent');
-          original_path.unshift(parent.name); parentId = parent.parent_id;
+          parts.unshift(parent.name); parentId = parent.parent_id;
         }
-        const needs_reference = sorted.some(other => other.id !== entry.id && other.name === entry.name && other.parent_id === entry.parent_id);
-        return { ...entry, original_path, ...(needs_reference ? { needs_reference: true } : {}) };
+        return parts;
+      };
+      const sorted = [...this.deletedEntries].sort((a, b) => compareResults(a, b, sort,
+        sort.startsWith('location_') ? originalPath(a) : [], sort.startsWith('location_') ? originalPath(b) : [], false));
+      const fingerprint = fingerprintOf([this.root, this.entries, this.deletedEntries]);
+      let offset = 0;
+      if (params.has('cursor')) {
+        let cursor: { account: string; sort: ResultSort; offset: number; fingerprint: number };
+        try { cursor = decodeResultCursor(params.get('cursor')!) as typeof cursor; }
+        catch { throw invalidResultCursor(); }
+        if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor) || cursor.account !== this.user.id || cursor.sort !== sort || !Number.isInteger(cursor.offset) || cursor.offset < 1) throw invalidResultCursor();
+        if (cursor.fingerprint !== fingerprint) throw new HttpError(409, { code: 'listing_changed', message: 'Trash changed', request_id: 'mock' });
+        if (cursor.offset >= sorted.length) throw invalidResultCursor();
+        offset = cursor.offset;
+      }
+      const items = sorted.slice(offset, offset + limit).map(entry => {
+        const original_path = originalPath(entry);
+        const needs_reference = sorted.some(other => other.id !== entry.id && other.name === entry.name && JSON.stringify(originalPath(other)) === JSON.stringify(original_path));
+        return { ...resultMetadata(entry), original_path, ...(needs_reference ? { needs_reference: true } : {}) };
       });
       const end = offset + items.length;
       const has_more = end < sorted.length;
-      const next_cursor = has_more ? btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify({ account: this.user.id, offset: end, fingerprint })))) : null;
+      const next_cursor = has_more ? encodeResultCursor({ account: this.user.id, sort, offset: end, fingerprint }) : null;
       return { items, next_cursor, has_more } as T;
     }
     if (route.startsWith('/trash/') && route.endsWith('/restore') && method === 'POST') {
