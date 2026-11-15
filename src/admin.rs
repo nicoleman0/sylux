@@ -18,12 +18,12 @@ use crate::{
 
 const VERIFY_PAGE: i64 = 64;
 
-/// Outcome of `verify_payloads`. Damaged entries carry only blob IDs, which
-/// are random server-generated hex and safe to log.
+/// Counts from `verify_payloads`. Damaged payloads are reported through the
+/// callback as found, so a killed run keeps its findings.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PayloadReport {
     pub checked: u64,
-    pub damaged: Vec<(String, PayloadFault)>,
+    pub damaged: u64,
 }
 
 impl PayloadReport {
@@ -40,8 +40,12 @@ impl PayloadReport {
 
 /// Check every payload against the length and SHA-256 recorded in metadata.
 /// Takes the writer lock like recovery, but opens SQLite read-only and
-/// creates nothing. Damage is reported, not an error.
-pub fn verify_payloads(root_path: &Path) -> Result<PayloadReport, &'static str> {
+/// creates nothing. Damage goes to `on_damaged` (blob IDs are random hex, safe
+/// to log); a failing callback aborts the run.
+pub fn verify_payloads(
+    root_path: &Path,
+    mut on_damaged: impl FnMut(&str, PayloadFault) -> io::Result<()>,
+) -> Result<PayloadReport, &'static str> {
     verify_recovery_owner(root_path, rustix::process::geteuid().as_raw()).map_err(
         |code| match code {
             "recovery_service_identity_required" => "verify_service_identity_required",
@@ -110,7 +114,8 @@ pub fn verify_payloads(root_path: &Path) -> Result<PayloadReport, &'static str> 
                 if fault == PayloadFault::InvalidId {
                     return Err("verify_metadata_invalid");
                 }
-                report.damaged.push((blob_id, fault));
+                report.damaged += 1;
+                on_damaged(&blob_id, fault).map_err(|_| "verify_output_failed")?;
             }
         }
     }

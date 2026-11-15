@@ -248,6 +248,72 @@ fn non_private_payload_file_is_reported() {
 }
 
 #[test]
+fn symlinked_payload_is_reported_without_a_path() {
+    let mut case = Case::new();
+    let blob = case.add(b"payload replaced by a link");
+    let target = case.root.join("elsewhere");
+    fs::rename(case.path(&blob), &target).unwrap();
+    std::os::unix::fs::symlink(&target, case.path(&blob)).unwrap();
+
+    let output = case.run();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        text(&output.stdout),
+        format!(
+            "damaged blob={blob} reason=unreadable\n\
+             payload_verification checked=1 verified=0 damaged=1\n"
+        )
+    );
+    assert!(output.stderr.is_empty());
+    assert_redacted(&case, &output);
+    case.cleanup();
+}
+
+#[test]
+fn unclean_wal_is_read_and_left_byte_identical() {
+    let mut case = Case::new();
+    case.add(b"first payload");
+    // Leak the connection so SQLite never checkpoints or removes the WAL.
+    let db = Connection::open(case.root.join("metadata/sylux.sqlite3")).unwrap();
+    db.query_row("PRAGMA wal_autocheckpoint=0", [], |_| Ok(()))
+        .unwrap();
+    let bytes = b"payload committed only to the WAL";
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let store = PayloadStore::open(&case.root).unwrap();
+    let blob = format!("a{:031x}", 99);
+    let mut staging = store
+        .start(&format!("{:032x}-{blob}", 99), bytes.len() as u64)
+        .unwrap();
+    staging.write_chunk(bytes).unwrap();
+    staging.publish(digest).unwrap();
+    db.execute(
+        "INSERT INTO blob(blob_id,shard,length,sha256,lifecycle) VALUES(?1,substr(?1,1,2),?2,?3,'live')",
+        params![blob, bytes.len() as i64, digest.to_vec()],
+    )
+    .unwrap();
+    let wal = case.root.join("metadata/sylux.sqlite3-wal");
+    assert!(fs::metadata(&wal).unwrap().len() > 0, "fixture needs a WAL");
+    let main_before = fs::read(case.root.join("metadata/sylux.sqlite3")).unwrap();
+    let wal_before = fs::read(&wal).unwrap();
+
+    let output = case.run();
+    std::mem::forget(db);
+
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        "payload_verification checked=2 verified=2 damaged=0\n"
+    );
+    assert_eq!(
+        fs::read(case.root.join("metadata/sylux.sqlite3")).unwrap(),
+        main_before
+    );
+    assert_eq!(fs::read(&wal).unwrap(), wal_before);
+    case.cleanup();
+}
+
+#[test]
 fn missing_payload_directory_reports_every_blob_missing() {
     let mut case = Case::new();
     let blob = case.add(b"payload in a vanished directory");
@@ -325,13 +391,13 @@ fn run_sampling_rss(case: &Case) -> (Output, u64) {
 }
 
 #[test]
-fn one_gibibyte_payload_is_hashed_in_bounded_memory() {
-    const GIB: u64 = 1 << 30;
+fn large_payload_is_hashed_in_bounded_memory() {
+    const SIZE: u64 = 256 << 20;
     let mut case = Case::new();
     // A sparse file reads as zeros; the digest is computed from a fixed buffer too.
     let mut hasher = Sha256::new();
     let zeros = vec![0u8; 1 << 20];
-    for _ in 0..(GIB >> 20) {
+    for _ in 0..(SIZE >> 20) {
         hasher.update(&zeros);
     }
     let digest: [u8; 32] = hasher.finalize().into();
@@ -341,13 +407,13 @@ fn one_gibibyte_payload_is_hashed_in_bounded_memory() {
         .write(true)
         .open(&path)
         .unwrap()
-        .set_len(GIB)
+        .set_len(SIZE)
         .unwrap();
     Connection::open(case.root.join("metadata/sylux.sqlite3"))
         .unwrap()
         .execute(
             "UPDATE blob SET length=?2,sha256=?3 WHERE blob_id=?1",
-            params![blob, GIB as i64, digest.to_vec()],
+            params![blob, SIZE as i64, digest.to_vec()],
         )
         .unwrap();
 
@@ -360,7 +426,7 @@ fn one_gibibyte_payload_is_hashed_in_bounded_memory() {
     );
     assert!(peak > 0, "no RSS sample was taken");
     assert!(
-        peak < 128 << 20,
+        peak < 64 << 20,
         "verifier peak RSS {peak} bytes is not bounded"
     );
     case.cleanup();

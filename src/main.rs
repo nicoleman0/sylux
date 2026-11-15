@@ -55,26 +55,29 @@ async fn main() -> ExitCode {
 }
 
 fn run_verify_payloads(configuration: &CliConfig) -> ExitCode {
-    match sylux::admin::verify_payloads(&configuration.root) {
-        Ok(report) => {
-            for (blob_id, fault) in &report.damaged {
-                println!(
-                    "damaged blob={blob_id} reason={}",
-                    sylux::admin::PayloadReport::fault_label(*fault)
-                );
-            }
-            let verified = report.checked - report.damaged.len() as u64;
-            println!(
-                "payload_verification checked={} verified={verified} damaged={}",
-                report.checked,
-                report.damaged.len()
-            );
-            if report.damaged.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
-        }
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let result = sylux::admin::verify_payloads(&configuration.root, |blob_id, fault| {
+        writeln!(
+            out,
+            "damaged blob={blob_id} reason={}",
+            sylux::admin::PayloadReport::fault_label(fault)
+        )
+    })
+    .and_then(|report| {
+        writeln!(
+            out,
+            "payload_verification checked={} verified={} damaged={}",
+            report.checked,
+            report.checked - report.damaged,
+            report.damaged
+        )
+        .map_err(|_| "verify_output_failed")?;
+        Ok(report)
+    });
+    match result {
+        Ok(report) if report.damaged == 0 => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
         Err(reason) => {
             eprintln!("sylux: {reason}");
             ExitCode::FAILURE

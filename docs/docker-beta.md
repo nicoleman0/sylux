@@ -200,9 +200,10 @@ Use an image built from a release that includes `admin verify-payloads`.
 
 Limits: it reports and never repairs. A pass means the bytes matched at the time
 of the run. It says nothing about later damage, power-loss durability or the
-backup. Restore damaged payloads from a verified archive (step 4). SQLite may
-leave an empty `-wal` file and a `-shm` file in `metadata/`; the service
-reuses them on the next start.
+backup. Restore damaged payloads from a verified archive (step 4). Payload
+files with no metadata row are not checked here; startup reconciliation covers
+them. The command leaves any existing `-wal` unchanged and may create an empty
+`-wal` and a `-shm` in `metadata/`.
 
 ## 5. Upgrade and roll back
 
