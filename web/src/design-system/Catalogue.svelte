@@ -12,6 +12,7 @@
   import AccountStatus from '$lib/AccountStatus.svelte';
   import AccountOptions from '$lib/AccountOptions.svelte';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { readTypographyExperiment, typographyExperimentHref, type TypographyExperiment } from '$lib/typography-experiment';
 
   type ColorSample = { label: string; token: string; value: string };
   const colorTokens = [
@@ -39,6 +40,13 @@
     { label: 'Note', token: '--type-note', sample: 'Private to your account' },
   ];
   const sampleModified = modifiedTime({ kind: 'file', modified_at: 1767227400 })!;
+  const experimentModes: { id: TypographyExperiment; label: string; description: string }[] = [
+    { id: 'baseline', label: 'Baseline', description: 'Current type styles' },
+    { id: 'metadata', label: 'Metadata', description: 'Metadata uses monospace' },
+    { id: 'headings', label: 'Headings', description: 'Metadata and table headings use monospace' },
+    { id: 'filenames', label: 'Filenames', description: 'Metadata, headings, and filenames use monospace' },
+  ];
+  const currentExperiment = readTypographyExperiment(window.location.search);
   let darkMode = $state(false);
   let samples = $state<ColorSample[]>(colorTokens.map((color) => ({ ...color, value: '' })));
   let sampleNotice = $state('');
@@ -80,6 +88,24 @@
   </header>
 
   <main class="catalogue-main">
+    {#if import.meta.env.DEV}
+      <section class="catalogue-section experiment-section" aria-labelledby="typography-experiment-title">
+        <div class="section-heading"><h2 id="typography-experiment-title">Monospace experiment</h2><p>Dev only. Compare JetBrains Mono 400 on metadata, headings, and filenames.</p></div>
+        <nav class="experiment-controls" aria-label="Typography experiment variants">
+          {#each experimentModes as mode}
+            <a href={typographyExperimentHref(mode.id)} aria-current={currentExperiment === mode.id ? 'page' : undefined}>
+              <strong>{mode.label}</strong><span>{mode.description}</span>
+            </a>
+          {/each}
+        </nav>
+        <div class="experiment-links" aria-label="Open samples in the application">
+          <span>Application samples</span>
+          {#each experimentModes as mode}
+            <a href={typographyExperimentHref(mode.id, '/')}>{mode.label}</a>
+          {/each}
+        </div>
+      </section>
+    {/if}
     <section class="catalogue-section" aria-labelledby="refresh-title">
       <h2 id="refresh-title">Refresh</h2>
       <div class="flex flex-wrap gap-2"><RefreshButton label="Refresh files" busy={false} onclick={() => {}} /><RefreshButton label="Refresh files" busyLabel="Refreshing…" busy={true} onclick={() => {}} /></div>
@@ -164,6 +190,12 @@
           <span class="file-modified"><time datetime={sampleModified.datetime} title={sampleModified.full}><span aria-hidden="true">{sampleModified.compact}</span><span class="sr-only">Modified {sampleModified.full}</span></time></span><span class="file-size">42 KB</span>
           <div class="options-cell"><Button.Root variant="ghost" size="icon" class="size-11" aria-label="Report actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root></div>
         </article>
+        <article class="file-row selectable-row modified-row">
+          <label class="entry-selection"><input type="checkbox" aria-label="Select quarterly results sample" /></label>
+          <div class="name-cell"><button type="button" class="item-name" title="quarterly-results-export_2026-11-14_final-review-approved.pdf" onclick={() => sampleNotice = 'File action selected.'}><span aria-hidden="true"><FileIcon /></span><span class="item-label"><span class="filename">quarterly-results-export_2026-11-14_final-review-approved.pdf</span><span class="mobile-file-size" aria-hidden="true">1.15 GB · <time datetime={sampleModified.datetime} title={sampleModified.full}>{sampleModified.compact}</time></span></span></button></div>
+          <span class="file-modified"><time datetime={sampleModified.datetime} title={sampleModified.full}><span aria-hidden="true">{sampleModified.compact}</span><span class="sr-only">Modified {sampleModified.full}</span></time></span><span class="file-size">1.15 GB</span>
+          <div class="options-cell"><Button.Root variant="ghost" size="icon" class="size-11" aria-label="Quarterly results file actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root></div>
+        </article>
         <div class="account-row">
           <div class="account-identity"><strong>alex</strong></div><span class="account-role">User</span>
           <span class="status-label enabled">Active</span>
@@ -183,6 +215,13 @@
   .wordmark :global(svg) { color: var(--primary); width: var(--icon-file); height: var(--icon-file); }
   .header-copy { flex: 1; min-width: 0; }
   .sample-caption { color: var(--muted-foreground); font-size: var(--type-note); margin: 0 0 3px; }
+  .experiment-controls { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .experiment-controls a { display: grid; gap: 4px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); color: var(--foreground); text-decoration: none; }
+  .experiment-controls a:hover, .experiment-controls a:focus-visible, .experiment-controls a[aria-current="page"] { border-color: var(--primary); }
+  .experiment-controls a[aria-current="page"] { background: var(--accent); }
+  .experiment-controls span, .experiment-links { color: var(--muted-foreground); font-size: var(--type-meta); }
+  .experiment-links { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 12px; }
+  .experiment-links a { color: var(--primary); }
   .header-copy h1 { font-size: var(--type-brand); letter-spacing: 0; margin: 0; }
   .catalogue-main { width: min(100%, 1120px); margin: 0 auto; padding: 8px clamp(16px, 4vw, 48px) 40px; }
   .catalogue-section { padding: 24px 0; border-bottom: 1px solid var(--border); }
@@ -210,6 +249,7 @@
   .sample-notice { min-height: 1.5em; margin: 8px 0 0; color: var(--muted-foreground); font-size: var(--type-meta); }
   @media (max-width: 680px) {
     .type-sample { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    .experiment-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .catalogue-header { gap: 12px; padding-inline: 16px; }
     .wordmark span { display: none; }
     .catalogue-main { padding-inline: 16px; }

@@ -1,0 +1,18 @@
+/* Dev-only experiment. The root attribute is set only for an explicit URL mode. */
+@import "@fontsource/jetbrains-mono/latin-400.css";
+
+:root:is([data-typography-experiment="metadata"], [data-typography-experiment="headings"], [data-typography-experiment="filenames"]) {
+  --typography-experiment-mono: "JetBrains Mono", monospace;
+}
+
+:root:is([data-typography-experiment="metadata"], [data-typography-experiment="headings"], [data-typography-experiment="filenames"]) :is(.file-size, .file-modified, .mobile-file-size, .trash-metadata, .account-role, .sidebar-account-role, .search-location):not(.list-head *):not([role="columnheader"]) {
+  font-family: var(--typography-experiment-mono);
+}
+
+:root:is([data-typography-experiment="headings"], [data-typography-experiment="filenames"]) :is(.sort-heading, .list-head, .account-head, .account-sort, .trash-sort) {
+  font-family: var(--typography-experiment-mono);
+}
+
+:root[data-typography-experiment="filenames"] :is(.filename, .trash-name) {
+  font-family: var(--typography-experiment-mono);
+}
