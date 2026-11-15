@@ -21,7 +21,7 @@
   --shadow-overlay: 0 8px 24px #132d2924;
 }
 
-:root {
+:root, .appearance-defaults {
   --background: #ffffff;
   --foreground: #202b2b;
   --card: #ffffff;
@@ -50,7 +50,7 @@
   --sidebar-border: #e3e8e7;
   --sidebar-ring: #277e71;
 }
-.dark {
+.dark, .dark .appearance-defaults {
   --background: #171c1c;
   --foreground: #e4eae8;
   --card: #171c1c;

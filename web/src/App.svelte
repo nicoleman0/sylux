@@ -2,12 +2,14 @@
   import './app.css';
   import * as Sidebar from '$lib/components/ui/sidebar/index.js';
   import AppSidebar from '$lib/components/app-sidebar.svelte';
+  import AppearanceSettings from '$lib/AppearanceSettings.svelte';
+  import BrandLogo from '$lib/BrandLogo.svelte';
+  import { appearanceStyle, defaultAppearance, readAppearance, type Appearance } from '$lib/appearance';
   import { onMount, tick, untrack } from 'svelte';
   import MoonIcon from '@lucide/svelte/icons/moon';
   import SunIcon from '@lucide/svelte/icons/sun';
   import SettingsIcon from '@lucide/svelte/icons/settings';
   import TrashIcon from '@lucide/svelte/icons/trash-2';
-  import FolderOpenIcon from '@lucide/svelte/icons/folder-open';
   import UserRoundIcon from '@lucide/svelte/icons/user-round';
   import LogOutIcon from '@lucide/svelte/icons/log-out';
   import EntryOptions from './lib/EntryOptions.svelte';
@@ -78,6 +80,7 @@
     };
     preference.addEventListener('change', onChange);
     void loadInstance();
+    void loadAppearance();
     const previousScrollRestoration = window.history.scrollRestoration;
     window.history.scrollRestoration = 'manual';
     window.addEventListener('scroll', scheduleScrollSave, { passive: true });
@@ -88,10 +91,36 @@
   let user = $state<User | null>(null);
   let accountView = $state(false);
   let settingsView = $state(false);
-  let settingsTab = $state<'accounts' | 'instance'>('accounts');
+  let settingsTab = $state<'accounts' | 'instance' | 'appearance'>('accounts');
+  let appearance = $state<Appearance>({ ...defaultAppearance });
+  let appearanceLoadError = $state('');
+  let appearanceLoading = $state(false);
+  let appearanceRequest = 0;
+  let appearanceProperties: string[] = [];
+  $effect(() => {
+    for (const property of appearanceProperties) document.documentElement.style.removeProperty(property);
+    appearanceProperties = [];
+    for (const declaration of appearanceStyle(appearance, darkMode).split(';').filter(Boolean)) {
+      const [property, value] = declaration.split(':');
+      document.documentElement.style.setProperty(property, value);
+      appearanceProperties.push(property);
+    }
+  });
+  async function loadAppearance(): Promise<void> {
+    const request = ++appearanceRequest;
+    appearanceLoading = true; appearanceLoadError = '';
+    try {
+      const value = readAppearance(await client.request('/instance/appearance'));
+      if (request === appearanceRequest) appearance = value;
+    } catch { if (request === appearanceRequest) appearanceLoadError = 'Appearance could not be loaded.'; }
+    finally { if (request === appearanceRequest) appearanceLoading = false; }
+  }
   let instanceName = $state('Sylux');
   let instanceDraft = $state('Sylux');
-  let instanceBusy = $state(false);
+  let instanceNameBusy = $state(false);
+  let appearanceBusy = $state(false);
+  let appearanceError = $state('');
+  let instanceBusy = $derived(instanceNameBusy || appearanceBusy);
   let instanceLoading = $state(false);
   let instanceError = $state('');
   let instanceNotice = $state('');
@@ -113,7 +142,7 @@
 
   $effect(() => {
     if (deferredNavigation && !bulkBusy && !accountBusy && !instanceBusy &&
-      (!deferredAccountOperation || (!changePasswordOpen && !createAccountOpen && !disableTarget && !authorityTarget && !resetId)) && (!deferredInstanceOperation || !instanceError)) {
+      (!deferredAccountOperation || (!changePasswordOpen && !createAccountOpen && !disableTarget && !authorityTarget && !resetId)) && (!deferredInstanceOperation || (!instanceError && !appearanceError))) {
       deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false;
       void untrack(restoreNavigation);
     }
@@ -156,14 +185,14 @@
     event.preventDefault();
     if (instanceBusy || !instanceDraft.trim()) return;
     const generation = sessionGeneration;
-    instanceBusy = true; instanceError = ''; instanceNotice = '';
+    instanceNameBusy = true; instanceError = ''; instanceNotice = '';
     try {
       const result = await client.request<{ name: string }>('/instance', { method: 'PATCH', body: { name: instanceDraft.trim() } });
       if (generation !== sessionGeneration) return;
       if (!result || typeof result.name !== 'string' || !result.name.trim()) throw new Error('Invalid instance name response');
       instanceName = result.name; instanceDraft = result.name; instanceNotice = 'Instance name saved.';
     } catch { if (generation === sessionGeneration) instanceError = 'Could not save the instance name. Try again.'; }
-    finally { if (generation === sessionGeneration) instanceBusy = false; }
+    finally { if (generation === sessionGeneration) instanceNameBusy = false; }
   }
 
   function recordNavigation(): void {
@@ -1073,7 +1102,7 @@
     trashRequest++; deletedItems = []; trashPageIndex = 0; trashPageCursors = [null]; trashNextCursor = null; trashHasMore = false; trashRetry = null; trashPaging = null; trashNotice = ''; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false; restoringId = ''; restoringName = ''; namespaceUnknown = null; namespaceInspecting = false;
   }
   function clearAccountForms(): void {
-    changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null; instanceBusy = false; instanceNotice = '';
+    changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null; instanceNameBusy = false; appearanceBusy = false; appearanceError = ''; instanceNotice = '';
     accountHandle = ''; accountPassword = ''; currentPassword = ''; newPassword = '';
     resetId = ''; resetPassword = ''; accounts = []; accountNotice = ''; accountBusy = false; accountsLoading = false; accountsError = ''; accountsRequest++;
   }
@@ -2157,7 +2186,7 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   {#if !user || loggingOut}
   <header class="app-header">
-    <a class="brand" href="#files" onclick={home}><FolderOpenIcon /><span>{instanceName}</span></a>
+    <a class="brand" href="#files" onclick={home}><BrandLogo url={appearance.logoUrl} /><span>{instanceName}</span></a>
     <div class="header-actions">
       <HeaderIconButton label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} pressed={darkMode} onclick={toggleTheme}>{#if darkMode}<SunIcon />{:else}<MoonIcon />{/if}</HeaderIconButton>
       {#if user && !loggingOut}<HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>{/if}
@@ -2167,8 +2196,9 @@
   {#if loggingOut}
     <main id="main-content" class="signin-main"><p role="status">Signing out…</p></main>
   {:else if !user}
-    <main id="main-content" class="signin-main">
+    <main id="main-content" class="signin-main" class:branded-signin={!!appearance.loginBackgroundColor || !!appearance.loginImageUrl} style:background-color={appearance.loginBackgroundColor ?? undefined} style:background-image={appearance.loginImageUrl ? `url("${appearance.loginImageUrl}")` : undefined}>
       <section class="signin-form" aria-labelledby="auth-heading">
+        {#if appearanceLoadError}<p role="alert">{appearanceLoadError} <Button variant="link" disabled={appearanceLoading} onclick={loadAppearance}>Reload appearance</Button></p>{/if}
         <h1 id="auth-heading">{view === 'setup' ? 'Set up ' + instanceName : 'Sign in to ' + instanceName}</h1>
         <p class="signin-intro">{view === 'setup' ? 'Create the first administrator account.' : 'Private file storage.'}</p>
         <form class="grid gap-5" onsubmit={signIn}>
@@ -2183,7 +2213,7 @@
     </main>
   {:else}
     <Sidebar.Provider>
-      <AppSidebar {instanceName} onhome={home}>
+      <AppSidebar {instanceName} logoUrl={appearance.logoUrl} onhome={home}>
         {#snippet navigation(close)}
           <nav aria-label="Files"><Sidebar.Menu>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" isActive={!showTrash && !accountView && !settingsView} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files', true, false); close(); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
@@ -2321,7 +2351,7 @@
         {:else if settingsView && user.role === 'administrator'}
           <section class="settings-content">
             <h1 id="settings-title" tabindex="-1">Settings</h1>
-            <nav class="settings-tabs" aria-label="Settings"><Button variant="ghost" class={settingsTab === 'accounts' ? 'active' : ''} aria-current={settingsTab === 'accounts' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'accounts'; }}>Accounts</Button><Button variant="ghost" class={settingsTab === 'instance' ? 'active' : ''} aria-current={settingsTab === 'instance' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'instance'; }}>Instance</Button></nav>
+            <nav class="settings-tabs" aria-label="Settings"><Button disabled={instanceBusy} variant="ghost" class={settingsTab === 'accounts' ? 'active' : ''} aria-current={settingsTab === 'accounts' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'accounts'; }}>Accounts</Button><Button disabled={instanceBusy} variant="ghost" class={settingsTab === 'instance' ? 'active' : ''} aria-current={settingsTab === 'instance' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'instance'; }}>Instance</Button><Button disabled={instanceBusy} variant="ghost" class={settingsTab === 'appearance' ? 'active' : ''} aria-current={settingsTab === 'appearance' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'appearance'; }}>Appearance</Button></nav>
             {#if settingsTab === 'accounts'}
               <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files.</p></div><div class="flex flex-wrap gap-2"><RefreshButton label="Refresh" busyLabel="Refreshing…" busy={accountsLoading} disabled={accountBusy} onclick={() => { if (accountsLoading || accountBusy) return; clearCompletedFeedback(); accountNotice = ''; void loadAccounts(); }} /><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
                 {#if accountsLoading}<p role="status">Loading accounts…</p>{:else if accountsError}<p role="alert">{accountsError}</p>{:else if accounts.length === 0}<p>No accounts to show.</p>{/if}
@@ -2341,6 +2371,8 @@
                 {/each}</div></div>
               </section>
               {#if accountNotice && !createAccountOpen && !resetId && !disableTarget && !authorityTarget}<p role="status" class="form-notice">{accountNotice}</p>{/if}
+            {:else if settingsTab === 'appearance'}
+              <AppearanceSettings {client} {instanceName} dark={darkMode} bind:busy={appearanceBusy} bind:error={appearanceError} onsaved={value => { appearanceRequest++; appearanceLoading = false; appearance = value; appearanceLoadError = ''; }} />
             {:else}
               <section class="settings-section"><h2>Instance</h2><p class="section-description">The instance name appears for everyone, including on sign in.</p><form class="settings-form grid gap-3" onsubmit={saveInstance}><Label for="instance-name">Instance name</Label><Input id="instance-name" bind:value={instanceDraft} maxlength={40} disabled={instanceBusy || instanceLoading} required /><Button type="submit" class="justify-self-start mt-2" disabled={instanceBusy || instanceLoading || !instanceDraft.trim()}>{instanceBusy ? 'Saving…' : 'Save changes'}</Button></form>{#if instanceError}<p class="form-notice" role="alert">{instanceError}</p>{/if}{#if instanceError || instanceLoading}<RefreshButton variant="link" label="Reload instance name" busyLabel="Reloading…" busy={instanceLoading} class="mt-2" aria-label="Reload instance name" onclick={() => { if (instanceLoading) return; clearCompletedFeedback(); void loadInstance(); }} />{/if}{#if instanceLoading}<p role="status">Reloading instance name…</p>{/if}{#if instanceNotice}<p class="form-notice" role="status">{instanceNotice}</p>{/if}</section>
             {/if}
