@@ -217,6 +217,22 @@ pub fn open_bound_database(
     root: &Path,
     busy_timeout: Duration,
 ) -> Result<BoundDatabase, BindingError> {
+    open_bound_database_as(root, busy_timeout, sqlite::ConnectionRole::Writer)
+}
+
+/// Same validation as `open_bound_database`, but the connection cannot write.
+pub fn open_bound_database_read_only(
+    root: &Path,
+    busy_timeout: Duration,
+) -> Result<BoundDatabase, BindingError> {
+    open_bound_database_as(root, busy_timeout, sqlite::ConnectionRole::Reader)
+}
+
+fn open_bound_database_as(
+    root: &Path,
+    busy_timeout: Duration,
+    role: sqlite::ConnectionRole,
+) -> Result<BoundDatabase, BindingError> {
     let root_fd = open_root_directory(root)?;
     let metadata_fd = open_subdirectory(&root_fd, METADATA_DIR).map_err(|error| match error {
         SubdirectoryError::Missing => BindingError::DatabaseMissing,
@@ -238,7 +254,7 @@ pub fn open_bound_database(
     .map_err(BindingError::DatabaseInvalid)?;
     let expected = (stat.st_dev, stat.st_ino);
     let path = root.join(METADATA_DIR).join(DB_NAME);
-    let connection = sqlite::open_writer(&path, busy_timeout)
+    let connection = sqlite::open_connection(&path, role, busy_timeout)
         .map_err(|error| BindingError::DatabaseInvalid(connection_open_code(error)))?;
     let after = fs::statat(&metadata_fd, DB_NAME, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|_| BindingError::Io("database_stat_failed"))?;
