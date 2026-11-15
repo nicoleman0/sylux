@@ -1,15 +1,15 @@
 import { dirname } from 'node:path';
 
-export const usage = 'Usage: node scripts/measure-workflows.mjs [--quick] [--release] [--scale=1000|10000|100000] [--without-search | --search-only | --search-matrix | --transfers-only]';
+export const usage = 'Usage: node scripts/measure-workflows.mjs [--quick] [--release] [--scale=1000|10000|100000|100020] [--without-search | --search-only | --search-matrix | --transfers-only | --trash-only]';
 export function parseArgs(args) {
-  const switches = ['--quick', '--release', '--without-search', '--search-only', '--search-matrix', '--transfers-only'];
-  if (args.some(a => !switches.includes(a) && !/^--scale=(1000|10000|100000)$/.test(a))) throw new Error(usage);
+  const switches = ['--quick', '--release', '--without-search', '--search-only', '--search-matrix', '--transfers-only', '--trash-only'];
+  if (args.some(a => !switches.includes(a) && !/^--scale=(1000|10000|100000|100020)$/.test(a))) throw new Error(usage);
   const keys = args.map(a => a.split('=')[0]);
   if (new Set(keys).size !== keys.length) throw new Error(`Duplicate option. ${usage}`);
-  if (args.filter(a => ['--without-search', '--search-only', '--search-matrix', '--transfers-only'].includes(a)).length > 1) throw new Error(`Conflicting workload options. ${usage}`);
+  if (args.filter(a => ['--without-search', '--search-only', '--search-matrix', '--transfers-only', '--trash-only'].includes(a)).length > 1) throw new Error(`Conflicting workload options. ${usage}`);
   const quick = args.includes('--quick');
   const scale = args.find(a => a.startsWith('--scale='));
-  return { quick, profile: args.includes('--release') ? 'release' : 'debug', transfersOnly: args.includes('--transfers-only'), searchOnly: args.includes('--search-only'), searchMatrix: args.includes('--search-matrix'), withoutSearch: args.includes('--without-search'), scales: scale ? [Number(scale.split('=')[1])] : quick ? [1000] : [10000, 100000] };
+  return { quick, profile: args.includes('--release') ? 'release' : 'debug', transfersOnly: args.includes('--transfers-only'), searchOnly: args.includes('--search-only'), searchMatrix: args.includes('--search-matrix'), trashOnly: args.includes('--trash-only'), withoutSearch: args.includes('--without-search'), scales: scale ? [Number(scale.split('=')[1])] : quick ? [1000] : [10000, 100000] };
 }
 
 export function redactFailure(error, fixture, checkout) {
@@ -40,10 +40,9 @@ export function validateSearch(data, expectedIds, total) {
   const page = { ...data, items: data.items.map(hit => hit.entry) };
   validatePage(page, expectedIds, total);
 }
-export function validateTrash(data, expectedIds) {
-  requireValue(Array.isArray(data?.items) && data.items.length === expectedIds.length, 'Trash count differs from seed');
-  const actual = new Set(data.items.map(row => row.id));
-  requireValue(actual.size === expectedIds.length && expectedIds.every(id => actual.has(id)), 'Trash membership differs from seed');
+export function validateTrash(data, expectedIds, offset = 0, seen = new Set()) {
+  validatePage(data, expectedIds, expectedIds.length, offset, seen);
+  requireValue(data.items.every(row => Array.isArray(row.original_path)), 'Trash location missing');
 }
 export function validatePath(data, expectedIds) {
   requireValue(Array.isArray(data?.items) && data.items.length === expectedIds.length && data.items.every((row, n) => row.id === expectedIds[n]), 'Deep ancestry differs from seed');

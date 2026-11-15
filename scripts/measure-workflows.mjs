@@ -14,7 +14,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 if (process.versions.node !== '24.22.2') throw new Error('Use pinned Node 24.22.2 from .nvmrc');
 const args = process.argv.slice(2);
-const { quick, profile, transfersOnly, searchOnly, searchMatrix, withoutSearch, scales } = parseArgs(args);
+const { quick, profile, transfersOnly, searchOnly, searchMatrix, trashOnly, withoutSearch, scales } = parseArgs(args);
 const repetitions = quick ? 2 : 7;
 const contentSizes = quick ? [4 * 1024 ** 2, 8 * 1024 ** 2] : [256 * 1024 ** 2, 1024 ** 3];
 const output = resolve('reports/syl-48', `${new Date().toISOString().replaceAll(':', '-')}-${quick ? 'quick' : 'full'}`);
@@ -32,7 +32,7 @@ const run = (cmd, argv) => {
 const evidence = {
   schema: 1, command: `${process.execPath} scripts/measure-workflows.mjs${args.length ? ' ' + args.join(' ') : ''}`,
   source: null,
-  fixtureWorkerThreads: 4, ttfbDefinition: 'request start to response headers callback; headers-arrival proxy', profile, quick, scales, repetitions, contentSizes, transfersOnly, searchOnly, searchMatrix, withoutSearch, exclusions: withoutSearch ? ['all account search', 'search during upload', 'repeated typing', 'search queue probes'] : searchMatrix ? ['browser journeys', 'uploads and content', 'standalone browse cases'] : [],
+  fixtureWorkerThreads: 4, ttfbDefinition: 'request start to response headers callback; headers-arrival proxy', profile, quick, scales, repetitions: trashOnly ? 1 : repetitions, contentSizes, transfersOnly, searchOnly, searchMatrix, trashOnly, withoutSearch, exclusions: trashOnly ? ['search', 'uploads and content', 'browse matrix', 'queue probes'] : withoutSearch ? ['all account search', 'search during upload', 'repeated typing', 'search queue probes'] : searchMatrix ? ['browser journeys', 'uploads and content', 'standalone browse cases'] : [],
   started: new Date().toISOString(), node: process.versions.node,
   machine: { os: platform(), release: release(), architecture: arch(), cpu: cpus()[0].model, logicalCpus: cpus().length, ramBytes: totalmem() },
   harnessHashes: {},
@@ -385,6 +385,65 @@ async function browserMatrix() {
 
   await context.close(); await browser.close(); browser = undefined;
 }
+async function trashBrowser() {
+  const certificate = new X509Certificate(readFileSync(fixture.leaf));
+  const spki = createHash('sha256').update(certificate.publicKey.export({ type: 'spki', format: 'der' })).digest('base64');
+  browser = await chromium.launch({ channel: 'chrome', timeout: 15000, headless: true, args: [`--ignore-certificate-errors-spki-list=${spki}`, '--host-resolver-rules=MAP fixture.test 127.0.0.1', '--no-proxy-server'] });
+  evidence.browser = browser.version();
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage(); page.setDefaultTimeout(30000);
+  await page.goto(fixture.origin);
+  await page.locator('#handle').fill('measure-owner'); await page.locator('#password').fill(fixture.password);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await page.locator('#folder-sort').waitFor();
+  let requests = 0;
+  page.on('request', request => { if (new URL(request.url()).pathname === '/trash') requests++; });
+  async function action(label, act, offset) {
+    const before = requests, started = performance.now();
+    const waiting = page.waitForResponse(response => new URL(response.url()).pathname === '/trash' && response.status() === 200);
+    waiting.catch(() => {});
+    await act();
+    const response = await waiting;
+    const bytes = await response.body();
+    const data = JSON.parse(bytes.toString());
+    validateTrash(data, fixture.expectations.trash, offset);
+    await page.waitForFunction(names => {
+      const section = document.querySelector('.trash-content');
+      return section?.getAttribute('aria-busy') === 'false' && JSON.stringify([...section.querySelectorAll('.trash-name')].map(row => row.textContent)) === JSON.stringify(names);
+    }, data.items.map(row => row.name));
+    await paint(page);
+    record({ kind: 'browser_trash', scale: fixture.dimensions.metadata_entries, label, elapsedMs: performance.now() - started, requestCount: requests - before, responseBytes: bytes.length, renderedRows: await page.locator('.trash-row').count() });
+  }
+  await action('first_page', () => page.getByRole('button', { name: 'Trash', exact: true }).click(), 0);
+  await page.screenshot({ path: resolve(output, `trash-${currentScale}-desktop-light.png`), fullPage: true });
+  if (fixture.expectations.trash.length > 100) {
+    await action('next_page', () => page.getByRole('button', { name: 'Next page', exact: true }).click(), 100);
+    await action('previous_page', () => page.getByRole('button', { name: 'Previous page', exact: true }).click(), 0);
+  } else if (await page.getByRole('button', { name: 'Next page', exact: true }).count()) throw new Error('Unexpected next Trash page');
+  await page.getByRole('button', { name: 'Switch to dark mode', exact: true }).click();
+  await page.screenshot({ path: resolve(output, `trash-${currentScale}-desktop-dark.png`), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: resolve(output, `trash-${currentScale}-narrow-dark.png`), fullPage: true });
+  await page.getByRole('button', { name: 'Switch to light mode', exact: true }).click();
+  await page.screenshot({ path: resolve(output, `trash-${currentScale}-narrow-light.png`), fullPage: true });
+  if (!await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)) throw new Error('Trash overflows narrow viewport');
+  await context.close(); await browser.close(); browser = undefined;
+}
+async function trashMatrix() {
+  const seen = new Set();
+  let cursor = null, offset = 0;
+  const cursors = new Set();
+  do {
+    const found = await request(`trash:page:${offset / 100 + 1}`, `/trash?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    validateTrash(found.data, fixture.expectations.trash, offset, seen);
+    offset += found.data.items.length;
+    cursor = found.data.next_cursor;
+    if (cursor && cursors.has(cursor)) throw new Error('Repeated Trash cursor');
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
+  if (offset !== fixture.expectations.trash.length) throw new Error('Incomplete Trash traversal');
+  await trashBrowser();
+}
 async function content() {
   for (const length of contentSizes) {
     progress(`${fixture.dimensions.metadata_entries}: real content ${length / 1024 ** 2} MiB`);
@@ -444,7 +503,10 @@ try {
   for (const scale of scales) {
     progress(`starting ${scale} metadata fixture (${profile})`);
     await startFixture(scale);
-    if (searchMatrix) {
+    if (trashOnly) {
+      progress(`${scale}: bounded Trash API traversal and browser pages`);
+      await trashMatrix();
+    } else if (searchMatrix) {
       progress(`${scale}: four search shapes with concurrent browsing`);
       await searchMatrixSamples();
       await queueProbes(scale);

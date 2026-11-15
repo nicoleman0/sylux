@@ -2297,3 +2297,339 @@ fn folder_recovery_preserves_the_maximum_depth_boundary() {
     );
     tx.commit().unwrap();
 }
+
+#[tokio::test]
+async fn trash_pages_are_bounded_ordered_and_mark_duplicates_across_pages() {
+    let fixture = HttpFixture::new("trash-pages", 205).await;
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            for entry in namespace::list(tx, OWNER, ROOT, None, 500).unwrap() {
+                namespace::trash(tx, OWNER, &entry.id, &entry.etag).unwrap();
+            }
+            for name in ["same", "same", "Å", "A\u{30a}"] {
+                let entry = namespace::create_folder(tx, OWNER, ROOT, name).unwrap();
+                namespace::trash(tx, OWNER, &entry.id, &entry.etag).unwrap();
+            }
+            let foreign = namespace::create_folder(tx, OTHER, OTHER_ROOT, "foreign").unwrap();
+            namespace::trash(tx, OTHER, &foreign.id, &foreign.etag).unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for (query, expected, more) in [("", 100, true), ("?limit=200", 200, true)] {
+        let (status, body) = fixture
+            .get_as(&format!("/trash{query}"), SESSION, SECRET)
+            .await;
+        assert_eq!(status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), expected);
+        assert_eq!(page["has_more"], more);
+    }
+    let expected = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .read(|db| {
+            Ok(namespace::trashed(db, OWNER)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.entry.id)
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    let mut cursor = None;
+    loop {
+        let query = cursor
+            .as_ref()
+            .map(|token| format!("&cursor={token}"))
+            .unwrap_or_default();
+        let (status, body) = fixture
+            .get_as(&format!("/trash?limit=1{query}"), SESSION, SECRET)
+            .await;
+        assert_eq!(status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = page["items"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        ids.push(row["id"].as_str().unwrap().to_owned());
+        if row["name"] == "same" {
+            assert_eq!(
+                row["needs_reference"], true,
+                "duplicate exists on another page"
+            );
+        } else {
+            assert!(row.get("needs_reference").is_none());
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        assert_eq!(page["has_more"], cursor.is_some());
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids, expected);
+    assert_eq!(ids.len(), 209);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn trash_cursors_reject_tampering_cross_account_and_invalid_limits() {
+    let fixture = HttpFixture::new("trash-cursor-errors", 2).await;
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            for entry in namespace::list(tx, OWNER, ROOT, None, 10).unwrap() {
+                namespace::trash(tx, OWNER, &entry.id, &entry.etag).unwrap();
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = fixture.get_as("/trash?limit=1", SESSION, SECRET).await;
+    let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let cursor = page["next_cursor"].as_str().unwrap();
+    for limit in [0, 201, usize::MAX] {
+        let (status, body) = fixture
+            .get_as(&format!("/trash?limit={limit}"), SESSION, SECRET)
+            .await;
+        assert_eq!(status, 400);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+            "invalid_limit"
+        );
+    }
+    let mut tampered = cursor.as_bytes().to_vec();
+    tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+    for invalid in [String::from_utf8(tampered).unwrap(), "A".repeat(4097)] {
+        let (status, body) = fixture
+            .get_as(&format!("/trash?cursor={invalid}"), SESSION, SECRET)
+            .await;
+        assert_eq!(status, 400);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+            "invalid_cursor"
+        );
+    }
+    let (status, body) = fixture
+        .get_as(
+            &format!("/trash?cursor={cursor}"),
+            OTHER_SESSION,
+            OTHER_SECRET,
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+        "invalid_cursor"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn trash_cursor_tracks_owner_tree_changes_and_ignores_other_accounts() {
+    let fixture = HttpFixture::new("trash-stale", 0).await;
+    let (parent, destination, spare) = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            let parent = namespace::create_folder(tx, OWNER, ROOT, "parent").unwrap();
+            let destination = namespace::create_folder(tx, OWNER, ROOT, "destination").unwrap();
+            let spare = namespace::create_folder(tx, OWNER, ROOT, "spare").unwrap();
+            for name in ["a", "b", "c"] {
+                let child = namespace::create_folder(tx, OWNER, &parent.id, name).unwrap();
+                namespace::trash(tx, OWNER, &child.id, &child.etag).unwrap();
+            }
+            Ok((parent.id, destination.id, spare.id))
+        })
+        .await
+        .unwrap();
+    for operation in 0..6 {
+        let (_, body) = fixture.get_as("/trash?limit=1", SESSION, SECRET).await;
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let cursor = page["next_cursor"].as_str().unwrap();
+        let parent = parent.clone();
+        let destination = destination.clone();
+        let spare = spare.clone();
+        fixture.workers.as_ref().unwrap().transact(move |tx| {
+            let tag = |id: &str| {
+                let generation: i64 = tx.query_row("SELECT generation FROM entry WHERE entry_id=?1", [id], |r| r.get(0)).unwrap();
+                sylux::domain::upload::folder_etag(id, generation as u64)
+            };
+            match operation {
+                0 => { namespace::create_folder(tx, OTHER, OTHER_ROOT, "other change").unwrap(); }
+                1 => namespace::rename(tx, OWNER, &parent, "renamed", &tag(&parent)).map(|_| ()).unwrap(),
+                2 => namespace::move_entry(tx, OWNER, &parent, &destination, &tag(&parent)).map(|_| ()).unwrap(),
+                3 => namespace::trash(tx, OWNER, &spare, &tag(&spare)).unwrap(),
+                4 => namespace::restore(tx, OWNER, &spare, &tag(&spare)).unwrap(),
+                5 => {
+                    // Upload replacement preserves the previous entry as a deleted row.
+                    insert_sized_file(tx, "00000000000000000000000000007001", "replaced", 1);
+                    tx.execute("UPDATE entry SET state='deleted',generation=generation+1 WHERE entry_id='00000000000000000000000000007001'", [])?;
+                    insert_sized_file(tx, "00000000000000000000000000007002", "replaced", 2);
+                }
+                _ => unreachable!(),
+            }
+            Ok(())
+        }).await.unwrap();
+        let (status, body) = fixture
+            .get_as(&format!("/trash?limit=1&cursor={cursor}"), SESSION, SECRET)
+            .await;
+        if operation == 0 {
+            assert_eq!(status, 200, "foreign namespace change leaves cursor valid");
+        } else {
+            assert_eq!(status, 409, "operation {operation}");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+                "listing_changed"
+            );
+        }
+    }
+    fixture.close().await;
+}
+
+#[test]
+fn trash_page_resolves_only_returned_paths_and_preserves_hidden_ancestors() {
+    let db = namespace_db();
+    db.pragma_update(None, "foreign_keys", false).unwrap();
+    for limit in [0, 201, usize::MAX] {
+        assert!(matches!(
+            namespace::trashed_page(&db, OWNER, None, limit),
+            Err(NamespaceError::InvalidLimit)
+        ));
+    }
+    let tx = db.unchecked_transaction().unwrap();
+    let parent = namespace::create_folder(&tx, OWNER, ROOT, "parent").unwrap();
+    let first = namespace::create_folder(&tx, OWNER, &parent.id, "a").unwrap();
+    let second = namespace::create_folder(&tx, OWNER, ROOT, "z").unwrap();
+    namespace::trash(&tx, OWNER, &first.id, &first.etag).unwrap();
+    namespace::trash(&tx, OWNER, &second.id, &second.etag).unwrap();
+    let generation: i64 = tx
+        .query_row(
+            "SELECT generation FROM entry WHERE entry_id=?1",
+            [&parent.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    namespace::trash(
+        &tx,
+        OWNER,
+        &parent.id,
+        &sylux::domain::upload::folder_etag(&parent.id, generation as u64),
+    )
+    .unwrap();
+    let page = namespace::trashed_page(&tx, OWNER, None, 1).unwrap();
+    assert!(page.has_more);
+    assert_eq!(page.items[0].entry.id, first.id);
+    assert_eq!(page.items[0].original_path, vec!["parent"]);
+    tx.execute_batch("DROP TRIGGER entry_update_parent_active_folder;")
+        .unwrap();
+    tx.execute(
+        "UPDATE entry SET parent_id='missing' WHERE entry_id=?1",
+        [&second.id],
+    )
+    .unwrap();
+    let page = namespace::trashed_page(
+        &tx,
+        OWNER,
+        Some(&namespace::TrashPosition {
+            name: "a".into(),
+            id: first.id,
+        }),
+        1,
+    )
+    .unwrap();
+    assert_eq!(page.items[0].entry.id, parent.id);
+    assert!(page.has_more, "sentinel path is not resolved");
+    assert!(namespace::trashed(&tx, OWNER).is_err());
+}
+
+#[tokio::test]
+async fn trash_pages_disambiguate_historical_displayed_paths_across_parent_ids() {
+    let fixture = HttpFixture::new("trash-historical-paths", 0).await;
+    let expected = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            let mut children = Vec::new();
+            for parent_name in ["history", "history", "elsewhere"] {
+                let parent = namespace::create_folder(tx, OWNER, ROOT, parent_name).unwrap();
+                let nested = namespace::create_folder(tx, OWNER, &parent.id, "nested").unwrap();
+                let child = namespace::create_folder(tx, OWNER, &nested.id, "same").unwrap();
+                namespace::trash(tx, OWNER, &child.id, &child.etag).unwrap();
+                let generation: i64 = tx.query_row(
+                    "SELECT generation FROM entry WHERE entry_id=?1",
+                    [&parent.id],
+                    |row| row.get(0),
+                )?;
+                namespace::trash(
+                    tx,
+                    OWNER,
+                    &parent.id,
+                    &sylux::domain::upload::folder_etag(&parent.id, generation as u64),
+                )
+                .unwrap();
+                children.push((child.id, nested.id, parent_name.to_owned()));
+            }
+            let foreign_parent =
+                namespace::create_folder(tx, OTHER, OTHER_ROOT, "elsewhere").unwrap();
+            let foreign_nested =
+                namespace::create_folder(tx, OTHER, &foreign_parent.id, "nested").unwrap();
+            let foreign_child =
+                namespace::create_folder(tx, OTHER, &foreign_nested.id, "same").unwrap();
+            namespace::trash(tx, OTHER, &foreign_child.id, &foreign_child.etag).unwrap();
+            Ok(children)
+        })
+        .await
+        .unwrap();
+    assert_ne!(
+        expected[0].1, expected[1].1,
+        "historical parents have distinct IDs"
+    );
+    let mut cursor = None;
+    let mut checked = 0;
+    loop {
+        let query = cursor
+            .as_ref()
+            .map(|token| format!("&cursor={token}"))
+            .unwrap_or_default();
+        let (status, body) = fixture
+            .get_as(&format!("/trash?limit=1{query}"), SESSION, SECRET)
+            .await;
+        assert_eq!(status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        let row = &page["items"][0];
+        if let Some((_, parent_id, path)) =
+            expected.iter().find(|(id, _, _)| row["id"] == id.as_str())
+        {
+            assert_eq!(row["parent_id"], parent_id.as_str());
+            assert_eq!(row["original_path"], serde_json::json!([path, "nested"]));
+            if path == "history" {
+                assert_eq!(
+                    row["needs_reference"], true,
+                    "equal displayed paths on another page need a reference"
+                );
+            } else {
+                assert!(
+                    row.get("needs_reference").is_none(),
+                    "distinct owner paths and foreign peers need no reference"
+                );
+            }
+            checked += 1;
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(checked, 3);
+    fixture.close().await;
+}

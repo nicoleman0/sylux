@@ -12,7 +12,7 @@ async function login(page: Page) {
     if (path === '/accounts') return json([{ account_id: 'owner', handle: 'owner', role: 'administrator', enabled: true }]);
     if (path === '/folders/children') return json({ root, items: [], next_cursor: null, has_more: false });
     if (path === '/folders/root/children') return json({ items: [file], next_cursor: null, has_more: false });
-    if (path === '/trash') return json({ items: [{ ...file, original_path: ['Work'] }] });
+    if (path === '/trash') return json({ items: [{ ...file, original_path: ['Work'] }], next_cursor: null, has_more: false });
     return route.continue();
   });
   await page.goto('/');
@@ -33,7 +33,7 @@ for (const surface of ['Files', 'Trash', 'Accounts'] as const) {
     await expect(button).toBeEnabled();
     let held: Route | undefined;
     let requests = 0;
-    const path = surface === 'Files' ? '**/folders/root/children*' : surface === 'Trash' ? '**/trash' : '**/accounts';
+    const path = surface === 'Files' ? '**/folders/root/children*' : surface === 'Trash' ? '**/trash?*' : '**/accounts';
     await page.route(path, route => { requests++; held = route; });
     const before = await button.boundingBox();
     await button.focus();
@@ -148,7 +148,7 @@ test('a held Files refresh does not block Trash refresh', async ({ page }) => {
   const refresh = page.getByRole('button', { name: 'Refresh trash', exact: true });
   await expect(refresh).toBeEnabled();
   let requests = 0;
-  await page.route('**/trash', route => { requests++; return route.fulfill({ json: { items: [] } }); });
+  await page.route('**/trash?*', route => { requests++; return route.fulfill({ json: { items: [], next_cursor: null, has_more: false } }); });
   await refresh.click();
   await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
   expect(requests).toBe(1);

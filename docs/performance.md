@@ -16,6 +16,8 @@ node scripts/measure-workflows.mjs --release
 node scripts/measure-workflows.mjs --release --without-search
 node scripts/measure-workflows.mjs --release --search-only
 node scripts/measure-workflows.mjs --release --search-matrix
+node scripts/measure-workflows.mjs --release --trash-only
+node scripts/measure-workflows.mjs --release --trash-only --scale=100020
 node scripts/measure-workflows.mjs --release --scale=10000 --transfers-only
 ```
 
@@ -139,6 +141,26 @@ Queue evidence is separate from HTTP latency: each scale/pass has three twelve-c
 The before 10k run overlapped other benchmark fixtures, including the bounded 100k baseline, and local compilation. The after run used a quiet benchmark window. These descriptive timings are not a controlled speedup ratio. Seeding warmed metadata; no OS cache eviction or physical storage qualification occurred. Fixture-path filesystem type was observed, but physical media metadata was unavailable. Sparse maxima do not establish tails or capacity. This focused pass contains no browser, transfer, deployment, durability or upgrade evidence.
 
 Regression checks compare complete ordered traversal inputs before/after on a wide tree and a depth 128 chain, including case-equivalent duplicate file names, Unicode, literal wildcards, other accounts, deleted ancestors and the depth cutoff. Rename, generation, move and deletion preserve query equivalence while changing fingerprints. Plan checks use fresh 10k/100k mixed wide/deep data before and after `ANALYZE`. All 70 library and 41 names/listing integration tests passed, including real TLS search pagination and stale-cursor rejection; the expanded two search regressions passed again after review. Release all-target Clippy and seven measurement-helper groups passed. Web source and dependency inputs were unchanged; current built assets were reused before Cargo.
+
+## Bounded Trash (SYL-59)
+
+`GET /trash` now returns at most 200 rows (100 by default), with signed account/state cursors and deterministic original-name/ID ordering. Returned paths stay page-bounded; same-name peers are streamed one ancestry at a time to disambiguate historical locations. The UI renders one 100-row page at a time. Namespace fingerprinting streams account rows; SQL scanning/sorting still scales with account size. This change bounds retained response/path objects and DOM rows, rather than making database cost independent of inventory size.
+
+`--trash-only` traverses every API page against the seed oracle, then opens Trash and uses Next/Previous through the actual TLS UI. It records response bytes, request counts, exact rendered-name matching, loading completion and two animation frames, plus one-second process CPU/RSS samples. It excludes search, uploads, content and queue probes. Full-mode Trash HTTP samples now mean the first bounded page. `--scale=100020` extends the same seed to exactly 10,000 deleted rows; it does not alter the production schema or seed deletion rule.
+
+Final runs on 15 November 2026 used release Rust 1.99.1, Node 24.22.2, Playwright 1.65.0 and installed Chrome 157.0.8103.51 on Apple M4/Darwin arm64, loopback TLS. [Portable raw samples, resource observations and attribution](measurements/syl-59-trash.jsonl) retain the exact assets/harness/diff hashes and fixture cleanup. Source was `2cd32f7124827c586523cd5164dd895944301a37` plus the recorded SYL-59 diff. Original scales: `2026-11-15T10-30-26.203Z-full`; exact-10k-deleted extension: `2026-11-15T10-30-43.486Z-full`.
+
+| Metadata / deleted entries | API pages traversed | UI rows per page | First / Next / Previous completion |
+| --- | ---: | ---: | --- |
+| 10,000 / 998 | 10 | 100 | 103.6 / 91.1 / 99.5 ms |
+| 100,000 / 9,998 | 100 | 100 | 173.4 / 326.4 / 165.4 ms |
+| 100,020 / 10,000 | 100 | 100 | 454.6 / 161.7 / 164.6 ms |
+
+Each UI action made one Trash request and returned 21,343 bytes in these first/second-page samples. One sample per action/scale, after API traversal warmed metadata. The full API traversal checked every seeded deleted ID in order, including the short last page. Both final runs passed and every fixture joined and cleaned. The original unbounded UI crash was reproduced earlier on the unchanged Trash code in `2026-11-15T08-48-34.883Z-full`; that run's 100k failure and earlier complete-response HTTP samples are retained in the linked raw record. It used the broader upload/content workload and different source/assets, so timings and resource maxima are not controlled before/after ratios.
+
+One-second descendant RSS maxima were about 867 MiB across the two-scale final run and 821 MiB in the extension. These aggregate Chrome/sampler descendants, include full-page screenshots and are not browser heap measurements. CPU/RSS observations are retained without attributing the earlier crash to OOM or a specific component. Concurrent browser regressions shared the host during part of this work. Seeding and traversal warmed metadata; no cache eviction, network emulation or physical-device/storage qualification occurred. Fixture-path physical media metadata was unavailable. Functional success does not establish supported capacity, durability or upgrades.
+
+Svelte check/build, 70 library, 46 listing, 29 upload-contract and 14 real TLS journey tests passed, as did release all-target Clippy and seven harness-helper groups. Browser checks cover bounded paging, pending controls, retry/stale errors, focus/session/navigation races, restore/reset/uncertainty and target inspection beyond page one. The focused 101-test suite and final 30-test Trash/smoke sweep passed; after review fixes, all 30 Trash tests passed, including Unicode ordering, malformed rows and stale-restart failure recovery. Quick Trash mode also passed with 98 deleted entries and no Next control (`2026-11-15T10-30-15.854Z-quick`); workload metadata now records one observation per page/action. Desktop/narrow screenshots in both themes were inspected; Impeccable's mechanical detector returned no findings. Required Linux CI and beta qualification remain separate gates.
 
 ## Proposed budgets
 

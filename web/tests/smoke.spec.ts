@@ -61,7 +61,7 @@ async function installBackend(page: import('@playwright/test').Page): Promise<vo
       return json(folder, 201);
     }
     if (path === '/folders/root-1/children') return json({ items: entries, next_cursor: null, has_more: false });
-    if (path === '/trash' && method === 'GET') return json({ items: deleted.map((entry) => ({ ...entry, original_path: [] })) });
+    if (path === '/trash' && method === 'GET') return json({ items: deleted.map((entry) => ({ ...entry, original_path: [] })), next_cursor: null, has_more: false });
     if (path.startsWith('/entries/') && method === 'DELETE') {
       const entry = entries.find((item) => item.id === path.split('/')[2]);
       if (entry) { entries.splice(entries.indexOf(entry), 1); deleted.push(entry); }
@@ -458,11 +458,11 @@ test('deleted names stay with their session when a request finishes late', async
     active = (route.request().postDataJSON() as { handle: string }).handle;
     await route.fulfill({ json: { account_id: active, handle: active, role: 'user', csrf_token: 'session-csrf' } });
   });
-  await page.route('**/trash', async (route) => {
+  await page.route('**/trash?*', async (route) => {
     const actor = active;
     if (actor === 'owner' && ++count === 2) { started(); await held; }
     const item = actor === 'owner' ? [{ id: 'private', name: 'Private A', kind: 'file', parent_id: 'root-1', etag: 'a', original_path: [] }] : [];
-    await route.fulfill({ json: { items: item } });
+    await route.fulfill({ json: { items: item, next_cursor: null, has_more: false } });
   });
   await page.goto('/');
   await page.getByLabel('Account name').fill('owner');
@@ -479,7 +479,7 @@ test('deleted names stay with their session when a request finishes late', async
   await expect(page.getByRole('heading', { name: 'Trash' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await expect(page.getByText('Trash is empty.')).toBeVisible();
-  const lateResponse = page.waitForResponse((response) => response.url().endsWith('/trash'));
+  const lateResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/trash');
   release();
   await lateResponse;
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
@@ -489,10 +489,10 @@ test('deleted names stay with their session when a request finishes late', async
 
 test('trash entries show their original folders for duplicate names', async ({ page }) => {
   await installBackend(page);
-  await page.route('**/trash', (route) => route.fulfill({ json: { items: [
+  await page.route('**/trash?*', (route) => route.fulfill({ json: { items: [
     { id: 'a', name: 'notes.txt', kind: 'file', parent_id: 'a-folder', etag: 'a', original_path: ['Work'] },
     { id: 'b', name: 'notes.txt', kind: 'file', parent_id: 'b-folder', etag: 'b', original_path: ['Home'] },
-  ] } }));
+  ], next_cursor: null, has_more: false } }));
   await page.goto('/');
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('mock-password');
@@ -515,7 +515,7 @@ test('sign out hides account controls until the logout request finishes', async 
     actor = (route.request().postDataJSON() as { handle: string }).handle;
     return route.fulfill({ json: { account_id: actor, handle: actor, role: 'user', csrf_token: 'session-csrf' } });
   });
-  await page.route('**/trash', (route) => route.fulfill({ json: { items: actor === 'owner' ? [{ id: 'secret', name: 'Private A', kind: 'file', parent_id: 'root-1', etag: 'a', original_path: [] }] : [] } }));
+  await page.route('**/trash?*', (route) => route.fulfill({ json: { items: actor === 'owner' ? [{ id: 'secret', name: 'Private A', kind: 'file', parent_id: 'root-1', etag: 'a', original_path: [] }] : [], next_cursor: null, has_more: false } }));
   await page.route('**/auth/logout', async (route) => { started(); await held; await route.fulfill({ status: 204 }); });
   await page.goto('/');
   await page.getByLabel('Account name').fill('owner');
@@ -540,10 +540,10 @@ test('sign out hides account controls until the logout request finishes', async 
 
 test('identical deleted names and paths have distinct references', async ({ page }) => {
   await installBackend(page);
-  await page.route('**/trash', (route) => route.fulfill({ json: { items: [
-    { id: 'older-entry', name: 'notes.txt', kind: 'file', parent_id: 'old-folder', etag: 'a', original_path: ['Work'] },
+  await page.route('**/trash?*', (route) => route.fulfill({ json: { items: [
     { id: 'newer-entry', name: 'notes.txt', kind: 'file', parent_id: 'new-folder', etag: 'b', original_path: ['Work'] },
-  ] } }));
+    { id: 'older-entry', name: 'notes.txt', kind: 'file', parent_id: 'old-folder', etag: 'a', original_path: ['Work'] },
+  ], next_cursor: null, has_more: false } }));
   await page.goto('/');
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('mock-password');
@@ -901,7 +901,7 @@ test('password change clears trash before the next session', async ({ page }) =>
     actor = (route.request().postDataJSON() as { handle: string }).handle;
     return route.fulfill({ json: { account_id: actor, handle: actor, role: 'user', csrf_token: 'session-csrf' } });
   });
-  await page.route('**/trash', (route) => route.fulfill({ json: { items: actor === 'owner' ? [{ id: 'secret', name: 'Private A', kind: 'file', parent_id: 'root-1', etag: 'a', original_path: [] }] : [] } }));
+  await page.route('**/trash?*', (route) => route.fulfill({ json: { items: actor === 'owner' ? [{ id: 'secret', name: 'Private A', kind: 'file', parent_id: 'root-1', etag: 'a', original_path: [] }] : [], next_cursor: null, has_more: false } }));
   await page.goto('/');
   await page.getByLabel('Account name').fill('owner'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
@@ -995,14 +995,14 @@ for (const resource of ['accounts', 'trash'] as const) {
     await login(page);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    await page.route(`**/${resource}`, async (route) => { await gate; await route.fulfill({ status: 503 }); });
+    await page.route(`**/${resource}${resource === 'trash' ? '?*' : ''}`, async (route) => { await gate; await route.fulfill({ status: 503 }); });
     await page.getByRole('button', { name: resource === 'accounts' ? 'Settings' : 'Trash', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: resource === 'accounts' ? 'Loading accounts' : 'Loading trash' })).toBeVisible();
     await expect(page.getByText(resource === 'accounts' ? 'No accounts to show.' : 'Trash is empty.', { exact: true })).toHaveCount(0);
     release();
     await expect(page.getByRole('alert')).toContainText(resource === 'accounts' ? 'Could not load accounts' : 'Could not load trash');
     await expect(page.getByText(resource === 'accounts' ? 'No accounts to show.' : 'Trash is empty.', { exact: true })).toHaveCount(0);
-    await page.unroute(`**/${resource}`);
+    await page.unroute(`**/${resource}${resource === 'trash' ? '?*' : ''}`);
     await page.getByRole('button', { name: resource === 'accounts' ? 'Refresh' : 'Refresh trash' }).click();
     if (resource === 'accounts') await expect(page.getByText('Administrator', { exact: true })).toBeVisible();
     else await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();

@@ -4,7 +4,17 @@ export type Folder = { id: string; parent_id: string | null; name: string; kind:
 export type FileEntry = { id: string; parent_id: string; name: string; kind: 'file'; size: number; modified_at?: number | null; etag: string };
 export type Entry = Folder | FileEntry;
 export type FolderSort = 'name_asc' | 'name_desc' | 'size_asc' | 'size_desc' | 'modified_asc' | 'modified_desc';
-export type DeletedEntry = Entry & { original_path: string[] };
+export type DeletedEntry = Entry & { original_path: string[]; needs_reference?: boolean };
+export type TrashPage = { items: DeletedEntry[]; next_cursor: string | null; has_more: boolean };
+
+export function compareDeleted(left: DeletedEntry, right: DeletedEntry): number {
+  const compare = (a: string, b: string) => {
+    const x = new TextEncoder().encode(a), y = new TextEncoder().encode(b);
+    for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] - y[i];
+    return x.length - y.length;
+  };
+  return compare(left.name, right.name) || compare(left.id, right.id);
+}
 export type Listing<T extends Entry = Entry> = { items: T[]; next_cursor: string | null; has_more: boolean };
 export type RootListing = { items: Entry[]; root: Folder; next_cursor: string | null; has_more: boolean };
 export type SearchHit = { entry: Entry; location: Folder[] };
@@ -45,7 +55,44 @@ export class ListingApi {
       method: 'POST', headers: { 'If-Match': etag }, body: { parent_id: parentId },
     });
   }
-  deleted(): Promise<{ items: DeletedEntry[] }> { return this.client.request('/trash'); }
+  async deleted(cursor?: string | null): Promise<TrashPage> {
+    const page = await this.client.request<TrashPage>(`/trash?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    if (!Array.isArray(page.items) || page.items.length > 100 || typeof page.has_more !== 'boolean' ||
+      (page.has_more ? !page.items.length || typeof page.next_cursor !== 'string' || !page.next_cursor || page.next_cursor === cursor : page.next_cursor !== null)) {
+      throw new Error('Invalid Trash pagination response');
+    }
+    const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+    for (const item of page.items) {
+      if (!item || !text(item.id) || !text(item.name) || !text(item.etag) || !text(item.parent_id) ||
+        !['file', 'folder'].includes(item.kind) || !Array.isArray(item.original_path) || !item.original_path.every(text) ||
+        (item.needs_reference !== undefined && typeof item.needs_reference !== 'boolean')) throw new Error('Invalid Trash entry response');
+    }
+    for (let i = 1; i < page.items.length; i++) if (compareDeleted(page.items[i - 1], page.items[i]) >= 0) throw new Error('Trash pagination did not advance');
+    return page;
+  }
+  async deletedTargets(ids: Iterable<string>, isCurrent: () => boolean): Promise<DeletedEntry[]> {
+    const requested = new Set(ids);
+    if (!requested.size) return [];
+    const found = new Map<string, DeletedEntry>();
+    const cursors = new Set<string>();
+    let cursor: string | null = null;
+    let previous: DeletedEntry | undefined;
+    do {
+      if (!isCurrent()) throw new Error('Trash inspection session changed');
+      const page = await this.deleted(cursor);
+      if (!isCurrent()) throw new Error('Trash inspection session changed');
+      for (const item of page.items) {
+        if (previous && compareDeleted(previous, item) >= 0) throw new Error('Trash pagination did not advance');
+        previous = item;
+        if (requested.has(item.id)) found.set(item.id, item);
+      }
+      cursor = page.next_cursor;
+      if (cursor && cursors.has(cursor)) throw new Error('Trash pagination repeated a cursor');
+      if (cursor) cursors.add(cursor);
+      if (found.size === requested.size) return [...found.values()];
+    } while (cursor);
+    return [...found.values()];
+  }
   restore(entryId: string, etag: string): Promise<void> {
     return this.client.request(`/trash/${encodeURIComponent(entryId)}/restore`, { method: 'POST', headers: { 'If-Match': etag } });
   }

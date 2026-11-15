@@ -777,7 +777,58 @@ pub async fn move_entry(
     }
 }
 
-pub async fn trash_listing(State(s): State<AuthState>, headers: HeaderMap) -> Response {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrashQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TrashCursor {
+    version: u8,
+    actor: String,
+    fingerprint: String,
+    last_name: String,
+    last_id: String,
+}
+
+fn trash_cursor_encode(key: &[u8; 32], cursor: &TrashCursor) -> Option<String> {
+    let body = serde_json::to_vec(cursor).ok()?;
+    let mut mac = HmacSha256::new_from_slice(key).ok()?;
+    mac.update(b"sylux:trash-list-cursor:v1\0");
+    mac.update(&body);
+    let token = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(body),
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    );
+    (token.len() <= MAX_CURSOR_BYTES).then_some(token)
+}
+
+fn trash_cursor_decode(key: &[u8; 32], value: &str) -> Option<TrashCursor> {
+    if value.len() > MAX_CURSOR_BYTES {
+        return None;
+    }
+    let (body, signature) = value.split_once('.')?;
+    let body = URL_SAFE_NO_PAD.decode(body).ok()?;
+    let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+    let mut mac = HmacSha256::new_from_slice(key).ok()?;
+    mac.update(b"sylux:trash-list-cursor:v1\0");
+    mac.update(&body);
+    mac.verify_slice(&signature).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+pub async fn trash_listing(
+    State(s): State<AuthState>,
+    headers: HeaderMap,
+    Query(q): Query<TrashQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(100);
+    if limit == 0 || limit > namespace::MAX_TRASH_PAGE_SIZE {
+        return error(StatusCode::BAD_REQUEST, "invalid_limit");
+    }
     let (account, _) = match principal(&s, &headers).await {
         Ok(x) => x,
         Err(r) => return error(r.0, r.1),
@@ -785,34 +836,94 @@ pub async fn trash_listing(State(s): State<AuthState>, headers: HeaderMap) -> Re
     let Some(cookie) = session_cookie(&headers) else {
         return error(StatusCode::UNAUTHORIZED, "unauthorized");
     };
-    match s
+    let key = cursor_key(&s);
+    let result = s
         .workers
         .read(move |db| {
             let snapshot = db.unchecked_transaction()?;
-            let db = &snapshot;
             let Some((current, _, _)) = authz::validate_session(
-                db,
+                &snapshot,
                 &cookie.session_id,
                 &cookie.secret,
                 crate::http::auth::now(),
             ) else {
-                return Ok(None);
+                return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
             };
             if current != account {
-                return Ok(None);
+                return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
             }
-            namespace::trashed(db, &account)
-                .map(Some)
-                .map_err(|_| rusqlite::Error::InvalidQuery)
+            let reply = build_trash_listing(&snapshot, &account, q.cursor, limit, key);
+            snapshot.commit()?;
+            Ok(reply)
         })
-        .await
-    {
-        Ok(Some(items)) => {
-            (StatusCode::OK, Json(serde_json::json!({"items":items}))).into_response()
-        }
-        Ok(None) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
+        .await;
+    match result {
+        Ok(Ok(reply)) => (StatusCode::OK, Json(reply)).into_response(),
+        Ok(Err(response)) => response,
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
+}
+
+fn build_trash_listing(
+    db: &rusqlite::Connection,
+    account: &str,
+    cursor: Option<String>,
+    limit: usize,
+    key: [u8; 32],
+) -> Result<serde_json::Value, Response> {
+    let decoded = if let Some(token) = cursor {
+        let cursor = trash_cursor_decode(&key, &token)
+            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_cursor"))?;
+        if cursor.version != 1
+            || cursor.actor != account
+            || crate::domain::names::EntryName::parse(&cursor.last_name).is_err()
+            || cursor.last_id.len() != 32
+            || !cursor
+                .last_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
+        }
+        Some(cursor)
+    } else {
+        None
+    };
+    let fingerprint = namespace::trash_fingerprint(db, account)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?;
+    if decoded
+        .as_ref()
+        .is_some_and(|cursor| cursor.fingerprint != fingerprint)
+    {
+        return Err(error(StatusCode::CONFLICT, "listing_changed"));
+    }
+    let after = decoded.map(|cursor| namespace::TrashPosition {
+        name: cursor.last_name,
+        id: cursor.last_id,
+    });
+    let page = namespace::trashed_page(db, account, after.as_ref(), limit)
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?;
+    let next_cursor = if page.has_more {
+        let last = page.items.last().expect("nonempty bounded Trash page");
+        Some(
+            trash_cursor_encode(
+                &key,
+                &TrashCursor {
+                    version: 1,
+                    actor: account.to_owned(),
+                    fingerprint,
+                    last_name: last.entry.name.clone(),
+                    last_id: last.entry.id.clone(),
+                },
+            )
+            .ok_or_else(|| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?,
+        )
+    } else {
+        None
+    };
+    Ok(
+        serde_json::json!({"items": page.items, "next_cursor": next_cursor, "has_more": page.has_more}),
+    )
 }
 
 pub async fn trash(

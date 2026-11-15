@@ -28,7 +28,7 @@ async function installBulkBackend(page: Page, paginated = false) {
       return json({ account_id: handle, handle, role: 'user', csrf_token: 'csrf' });
     }
     if (path === '/auth/logout') return route.fulfill({ status: 204 });
-    if (path === '/trash') return json({ items: entries.filter(entry => deleted.has(entry.id)).map(entry => ({ ...entry, original_path: [] })) });
+    if (path === '/trash') return json({ items: entries.filter(entry => deleted.has(entry.id)).map(entry => ({ ...entry, original_path: [] })), next_cursor: null, has_more: false });
     if (path === '/folders/children' || /^\/folders\/[^/]+\/children$/.test(path)) {
       const isRoot = path === '/folders/children' || path === '/folders/root/children';
       if (isRoot) rootReads++;
@@ -198,7 +198,7 @@ test('an expired session stops the batch before later selected items are sent', 
 });
 
 
-test('refresh reconciles a committed trash operation after its response fails without replaying it', async ({ page }) => {
+test('refresh reconciles committed trash beyond page one after its response fails without replaying it', async ({ page }) => {
   const backend = await installBulkBackend(page);
   backend.failures.set('alpha', { status: 503, code: 'unavailable' });
   backend.appliedFailures.add('alpha');
@@ -206,11 +206,20 @@ test('refresh reconciles a committed trash operation after its response fails wi
   await trashSelected(page);
   await expect(page.getByRole('button', { name: 'Refresh before retry', exact: true })).toBeVisible();
   backend.failures.clear();
+  const trashReads: number[] = [];
+  await page.route('**/trash?*', route => {
+    const offset = Number(new URL(route.request().url()).searchParams.get('cursor') ?? 0);
+    trashReads.push(offset);
+    const padding = Array.from({ length: 100 }, (_, i) => ({ id: `old-${i}`, name: `A${String(i).padStart(3, '0')}`, parent_id: 'root', kind: 'file', size: 1, etag: '1', original_path: [] }));
+    const items = [...padding, ...backend.entries.filter(entry => backend.deleted.has(entry.id)).map(entry => ({ ...entry, original_path: [] }))];
+    return route.fulfill({ json: { items: items.slice(offset, offset + 100), next_cursor: offset ? null : '100', has_more: !offset } });
+  });
   await page.getByRole('button', { name: 'Refresh before retry', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Refresh before retry', exact: true })).toHaveCount(0);
   await expect(page.getByRole('article', { name: 'alpha.bin', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Retry failed items', exact: true })).toHaveCount(0);
   expect(backend.mutations.map(item => item.id)).toEqual(['alpha', 'beta']);
+  expect(trashReads).toEqual([0, 100]);
 });
 
 test('bulk destination picker excludes a selected folder', async ({ page }) => {

@@ -4,12 +4,14 @@ use super::upload::folder_etag;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 pub(super) const MAX_ENTRY_DEPTH: i64 = 128;
+pub const MAX_TRASH_PAGE_SIZE: usize = 200;
 
 #[derive(Debug)]
 pub enum NamespaceError {
     Sql,
     NotFound,
     InvalidName,
+    InvalidLimit,
     Conflict,
     Stale,
     ParentUnavailable,
@@ -488,54 +490,218 @@ pub struct DeletedEntry {
     #[serde(flatten)]
     pub entry: Entry,
     pub original_path: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub needs_reference: bool,
+}
+
+pub struct TrashPosition {
+    pub name: String,
+    pub id: String,
+}
+
+pub struct TrashPage {
+    pub items: Vec<DeletedEntry>,
+    pub has_more: bool,
+}
+
+fn deleted_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
+    let id: String = row.get(0)?;
+    let generation: i64 = row.get(4)?;
+    Ok(Entry {
+        etag: folder_etag(&id, generation as u64),
+        id,
+        parent_id: row.get(1)?,
+        name: row.get(2)?,
+        kind: row.get(3)?,
+        generation,
+    })
 }
 
 pub fn trashed(db: &Connection, owner: &str) -> Result<Vec<DeletedEntry>, NamespaceError> {
     let mut stmt = db.prepare("SELECT entry_id,parent_id,original_name,kind,generation FROM entry WHERE owner_account_id=?1 AND state='deleted' ORDER BY original_name,entry_id").map_err(|_| NamespaceError::Sql)?;
     let rows = stmt
-        .query_map([owner], |r| {
-            let id: String = r.get(0)?;
-            let generation: i64 = r.get(4)?;
-            Ok(Entry {
-                etag: folder_etag(&id, generation as u64),
-                id,
-                parent_id: r.get(1)?,
-                name: r.get(2)?,
-                kind: r.get(3)?,
-                generation,
-            })
-        })
+        .query_map([owner], deleted_entry)
         .map_err(|_| NamespaceError::Sql)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| NamespaceError::Sql)?;
-    let mut result = Vec::with_capacity(rows.len());
-    for entry in rows {
-        let mut path = Vec::new();
-        let mut current = entry.parent_id.clone().ok_or(NamespaceError::Sql)?;
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            if !seen.insert(current.clone()) || seen.len() > (MAX_ENTRY_DEPTH + 1) as usize {
-                return Err(NamespaceError::Sql);
-            }
-            let (parent, name): (Option<String>, String) = db.query_row(
-                "SELECT parent_id,original_name FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder'",
-                params![current, owner], |r| Ok((r.get(0)?, r.get(1)?))
-            ).map_err(|_| NamespaceError::Sql)?;
-            match parent {
-                Some(parent) => {
-                    path.push(name);
-                    current = parent;
+    deleted_paths(db, owner, rows)
+}
+
+/// Page deleted roots before resolving any original paths.
+pub fn trashed_page(
+    db: &Connection,
+    owner: &str,
+    after: Option<&TrashPosition>,
+    limit: usize,
+) -> Result<TrashPage, NamespaceError> {
+    if limit == 0 || limit > MAX_TRASH_PAGE_SIZE {
+        return Err(NamespaceError::InvalidLimit);
+    }
+    let mut stmt = db
+        .prepare(
+            "SELECT entry_id,parent_id,original_name,kind,generation FROM entry
+         WHERE owner_account_id=?1 AND state='deleted'
+         AND (?2 IS NULL OR (original_name,entry_id)>(?2,?3))
+         ORDER BY original_name,entry_id LIMIT ?4",
+        )
+        .map_err(|_| NamespaceError::Sql)?;
+    let mut rows = stmt
+        .query_map(
+            params![
+                owner,
+                after.map(|p| &p.name),
+                after.map(|p| &p.id),
+                (limit + 1) as i64
+            ],
+            deleted_entry,
+        )
+        .map_err(|_| NamespaceError::Sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| NamespaceError::Sql)?;
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let mut items = deleted_paths(db, owner, rows)?;
+    mark_deleted_references(db, owner, &mut items)?;
+    Ok(TrashPage { items, has_more })
+}
+
+/// Include ancestors and hidden entries without retaining the account inventory.
+pub fn trash_fingerprint(db: &Connection, owner: &str) -> Result<String, NamespaceError> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+
+    let mut stmt = db
+        .prepare(
+            "SELECT entry_id,parent_id,original_name,kind,state,generation,current_revision_id
+         FROM entry WHERE owner_account_id=?1 ORDER BY parent_id,state,name_key,entry_id",
+        )
+        .map_err(|_| NamespaceError::Sql)?;
+    let mut rows = stmt.query([owner]).map_err(|_| NamespaceError::Sql)?;
+    let mut digest = Sha256::new();
+    while let Some(row) = rows.next().map_err(|_| NamespaceError::Sql)? {
+        for column in [0, 1, 2, 3, 4, 6] {
+            let value: Option<String> = row.get(column).map_err(|_| NamespaceError::Sql)?;
+            match value {
+                Some(value) => {
+                    digest.update([1]);
+                    digest.update((value.len() as u32).to_be_bytes());
+                    digest.update(value.as_bytes());
                 }
-                None => break,
+                None => digest.update([0]),
             }
         }
-        path.reverse();
+        let generation: i64 = row.get(5).map_err(|_| NamespaceError::Sql)?;
+        digest.update(generation.to_be_bytes());
+    }
+    Ok(URL_SAFE_NO_PAD.encode(digest.finalize()))
+}
+
+type DeletedAncestors = std::collections::HashMap<String, (Option<String>, String)>;
+
+fn deleted_path(
+    db: &Connection,
+    owner: &str,
+    parent_id: Option<&str>,
+    ancestors: &mut DeletedAncestors,
+) -> Result<Vec<String>, NamespaceError> {
+    let mut path = Vec::new();
+    let mut current = parent_id.ok_or(NamespaceError::Sql)?.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(current.clone()) || seen.len() > (MAX_ENTRY_DEPTH + 1) as usize {
+            return Err(NamespaceError::Sql);
+        }
+        if !ancestors.contains_key(&current) {
+            let ancestor: (Option<String>, String) = db.query_row(
+                "SELECT parent_id,original_name FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder'",
+                params![current, owner], |r| Ok((r.get(0)?, r.get(1)?)),
+            ).map_err(|_| NamespaceError::Sql)?;
+            ancestors.insert(current.clone(), ancestor);
+        }
+        let (parent, name) = ancestors.get(&current).expect("loaded ancestor");
+        match parent {
+            Some(parent) => {
+                path.push(name.clone());
+                current = parent.clone();
+            }
+            None => break,
+        }
+    }
+    path.reverse();
+    Ok(path)
+}
+
+fn deleted_paths(
+    db: &Connection,
+    owner: &str,
+    rows: Vec<Entry>,
+) -> Result<Vec<DeletedEntry>, NamespaceError> {
+    let mut ancestors = DeletedAncestors::new();
+    let mut result = Vec::with_capacity(rows.len());
+    let mut counts = std::collections::HashMap::new();
+    for entry in rows {
+        let original_path = deleted_path(db, owner, entry.parent_id.as_deref(), &mut ancestors)?;
+        *counts
+            .entry((entry.name.clone(), original_path.clone()))
+            .or_insert(0) += 1;
         result.push(DeletedEntry {
             entry,
-            original_path: path,
+            original_path,
+            needs_reference: false,
         });
     }
+    for item in &mut result {
+        item.needs_reference = counts[&(item.entry.name.clone(), item.original_path.clone())] > 1;
+    }
     Ok(result)
+}
+
+fn mark_deleted_references(
+    db: &Connection,
+    owner: &str,
+    items: &mut [DeletedEntry],
+) -> Result<(), NamespaceError> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let names = items
+        .iter()
+        .map(|item| item.entry.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let placeholders = vec!["?"; names.len()].join(",");
+    let mut stmt = db
+        .prepare(&format!(
+            "SELECT entry_id,parent_id,original_name FROM entry WHERE owner_account_id=?
+         AND state='deleted' AND original_name IN ({placeholders})"
+        ))
+        .map_err(|_| NamespaceError::Sql)?;
+    let mut rows = stmt
+        .query(rusqlite::params_from_iter(
+            std::iter::once(owner).chain(names.iter().map(String::as_str)),
+        ))
+        .map_err(|_| NamespaceError::Sql)?;
+    while let Some(row) = rows.next().map_err(|_| NamespaceError::Sql)? {
+        let id: String = row.get(0).map_err(|_| NamespaceError::Sql)?;
+        let parent: Option<String> = row.get(1).map_err(|_| NamespaceError::Sql)?;
+        let name: String = row.get(2).map_err(|_| NamespaceError::Sql)?;
+        if !items
+            .iter()
+            .any(|item| !item.needs_reference && item.entry.name == name && item.entry.id != id)
+        {
+            continue;
+        }
+        // Historical parent IDs can differ while the displayed paths coincide.
+        let path = deleted_path(db, owner, parent.as_deref(), &mut DeletedAncestors::new())?;
+        for item in items.iter_mut() {
+            if item.entry.id != id && item.entry.name == name && item.original_path == path {
+                item.needs_reference = true;
+            }
+        }
+        if items.iter().all(|item| item.needs_reference) {
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub fn restore(
