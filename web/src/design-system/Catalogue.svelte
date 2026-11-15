@@ -89,18 +89,27 @@
       <div role="table" aria-label="Sorting examples"><div role="row" class="flex flex-wrap gap-3"><SortHeader label="Name" column="name" sort="name_asc" onclick={() => {}} /><SortHeader label="Modified" column="modified" sort="name_asc" onclick={() => {}} /><SortHeader label="Size" column="size" sort="name_asc" disabled onclick={() => {}} /></div></div>
     </section>
     <section class="catalogue-section" aria-labelledby="type-title">
-      <div class="section-heading"><h2 id="type-title">Typography</h2><p>One font, sized by role. Samples show the actual sizes.</p></div>
+      <div class="section-heading"><h2 id="type-title">Typography</h2><p>Interface text stays sans. File data and column headings use JetBrains Mono.</p></div>
       <div class="type-grid">
         {#each typography as item}
           <div class="type-sample" data-type-sample={item.token}>
             <p class="sample-caption">{item.label}<code>{item.token} · {typeSizes[item.token] ?? ""}</code></p>
-            <p class="type-specimen" style={`font-family: var(--font-ui); font-size: var(${item.token}); font-weight: var(${["--type-page", "--type-page-compact", "--type-section", "--type-brand"].includes(item.token) ? "--weight-heading" : "--weight-body"});`}>{item.sample}</p>
+            <p class="type-specimen" style={`font-family: var(${item.token === '--type-meta' ? '--font-data' : '--font-ui'}); font-size: var(${item.token}); font-weight: var(${["--type-page", "--type-page-compact", "--type-section", "--type-brand"].includes(item.token) ? "--weight-heading" : "--weight-body"});`}>{item.sample}</p>
           </div>
         {/each}
         <div class="type-sample" data-type-sample="--font-code">
           <p class="sample-caption">Code <code>--font-code</code></p>
           <p class="type-specimen code-specimen" style="font-family: var(--font-code);">folder/report.pdf</p>
         </div>
+      </div>
+    </section>
+
+    <section class="catalogue-section" aria-labelledby="data-type-title">
+      <div class="section-heading"><h2 id="data-type-title">Data roles</h2><p>JetBrains Mono 400 marks column headings, dates, sizes, and account roles.</p></div>
+      <div class="data-role-samples">
+        <div><span class="sample-caption">Column headings</span><div class="list-head"><span>Name</span><span>Modified</span><span>Size</span></div></div>
+        <div><span class="sample-caption">File metadata</span><div class="file-row"><span class="file-modified">Jan 1, 2026</span><span class="file-size">1.15 GB</span></div></div>
+        <div><span class="sample-caption">Interface text</span><p>File names, navigation, and descriptions keep the interface sans.</p></div>
       </div>
     </section>
 
@@ -164,10 +173,16 @@
           <span class="file-modified"><time datetime={sampleModified.datetime} title={sampleModified.full}><span aria-hidden="true">{sampleModified.compact}</span><span class="sr-only">Modified {sampleModified.full}</span></time></span><span class="file-size">42 KB</span>
           <div class="options-cell"><Button.Root variant="ghost" size="icon" class="size-11" aria-label="Report actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root></div>
         </article>
+        <article class="file-row selectable-row modified-row">
+          <label class="entry-selection"><input type="checkbox" aria-label="Select quarterly results sample" /></label>
+          <div class="name-cell"><button type="button" class="item-name" title="quarterly-results-export_2026-11-14_final-review-approved.pdf" onclick={() => sampleNotice = 'File action selected.'}><span aria-hidden="true"><FileIcon /></span><span class="item-label"><span class="filename">quarterly-results-export_2026-11-14_final-review-approved.pdf</span><span class="mobile-file-size" aria-hidden="true">1.15 GB · <time datetime={sampleModified.datetime} title={sampleModified.full}>{sampleModified.compact}</time></span></span></button></div>
+          <span class="file-modified"><time datetime={sampleModified.datetime} title={sampleModified.full}><span aria-hidden="true">{sampleModified.compact}</span><span class="sr-only">Modified {sampleModified.full}</span></time></span><span class="file-size">1.15 GB</span>
+          <div class="options-cell"><Button.Root variant="ghost" size="icon" class="size-11" aria-label="Quarterly results file actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root></div>
+        </article>
         <div class="account-row">
           <div class="account-identity"><strong>alex</strong></div><span class="account-role">User</span>
-          <span class="status-label enabled">Active</span>
-          <div class="account-actions"><Button.Root variant="ghost" size="sm" onclick={() => sampleNotice = 'Account action selected.'}>Reset password</Button.Root></div>
+          <span><AccountStatus enabled={true} /></span>
+          <div class="account-actions"><AccountOptions account={{ account_id: 'alex', handle: 'alex', role: 'user', enabled: true }} onaction={() => sampleNotice = 'Account action selected.'} /></div>
         </div>
       </div>
       <p class="sample-notice" role="status" aria-live="polite">{sampleNotice}</p>
@@ -183,6 +198,10 @@
   .wordmark :global(svg) { color: var(--primary); width: var(--icon-file); height: var(--icon-file); }
   .header-copy { flex: 1; min-width: 0; }
   .sample-caption { color: var(--muted-foreground); font-size: var(--type-note); margin: 0 0 3px; }
+  .data-role-samples { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+  .data-role-samples > div { min-width: 0; }
+  .data-role-samples .list-head, .data-role-samples .file-row { display: flex; justify-content: space-between; gap: 12px; min-height: 36px; padding: 8px 0; border-bottom: 1px solid var(--border); color: var(--muted-foreground); font-size: var(--type-meta); }
+  .data-role-samples p { margin: 8px 0 0; font-size: var(--type-ui); }
   .header-copy h1 { font-size: var(--type-brand); letter-spacing: 0; margin: 0; }
   .catalogue-main { width: min(100%, 1120px); margin: 0 auto; padding: 8px clamp(16px, 4vw, 48px) 40px; }
   .catalogue-section { padding: 24px 0; border-bottom: 1px solid var(--border); }
@@ -210,6 +229,7 @@
   .sample-notice { min-height: 1.5em; margin: 8px 0 0; color: var(--muted-foreground); font-size: var(--type-meta); }
   @media (max-width: 680px) {
     .type-sample { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    .data-role-samples { grid-template-columns: 1fr; gap: 12px; }
     .catalogue-header { gap: 12px; padding-inline: 16px; }
     .wordmark span { display: none; }
     .catalogue-main { padding-inline: 16px; }

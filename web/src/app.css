@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn-svelte/tailwind.css";
+@import "@fontsource/jetbrains-mono/latin-400.css";
 @import "./tokens.css";
 
 @custom-variant dark (&:is(.dark *));
@@ -155,6 +156,7 @@ h1:focus, h2:focus { outline: none; }
 .file-row:is(:hover, :focus-within) .filename { white-space: normal; overflow-wrap: anywhere; padding-block: 8px; }
 .file-size { color: var(--muted-foreground); text-align: right; font-size: var(--type-ui); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .list-summary { margin: 17px 0 0 12px; font-size: var(--type-meta); color: var(--muted-foreground); }
+.file-row :is(.file-size, .file-modified, .mobile-file-size), .trash-row :is(.file-size, .file-modified, .trash-metadata), .account-row .account-role, .sidebar-account-role, .search-location, .list-head, .account-head, .account-sort, .trash-sort, .sort-heading { font-family: var(--font-data); }
 .account-content { max-width: 840px; }
 .settings-content { max-width: 680px; }
 .settings-section { padding: 27px 0 32px; border-top: 1px solid var(--border); margin-top: 28px; }

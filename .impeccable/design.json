@@ -1,8 +1,14 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-15T13:55:35Z",
+  "generatedAt": "2026-11-15T18:44:58Z",
   "title": "Design System: Sylux",
   "extensions": {
+    "typographyMeta": {
+      "data": {
+        "displayName": "Data",
+        "purpose": "JetBrains Mono for compact metadata and table headings. Filenames, navigation and prose use the interface sans-serif."
+      }
+    },
     "shadows": [
       {
         "name": "overlay",

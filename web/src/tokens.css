@@ -2,6 +2,7 @@
 :root {
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-code: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --font-data: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   --weight-body: 400;
   --weight-control: 500;
   --weight-heading: 600;
