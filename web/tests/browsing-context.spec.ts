@@ -310,13 +310,15 @@ for (const destination of ['Account', 'Settings', 'Trash']) {
 test('idle account reset dialog and drafts clear on history restoration', async ({ page }) => {
   await backend(page, true); await page.goto('/#account'); await signIn(page);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Reset password', exact: true }).click();
+  await page.getByRole('button', { name: 'Actions for member', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Reset password', exact: true }).click();
   await page.getByLabel('New password', { exact: true }).fill('private draft password');
   await page.goBack();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Account', exact: true })).toBeFocused();
   await page.goForward();
-  await page.getByRole('button', { name: 'Reset password', exact: true }).click();
+  await page.getByRole('button', { name: 'Actions for member', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Reset password', exact: true }).click();
   await expect(page.getByLabel('New password', { exact: true })).toHaveValue('');
 });
 
@@ -328,7 +330,8 @@ test('busy account operation keeps its dialog and failure while Back is deferred
   const pending = new Promise<void>(resolve => { requested = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
   await page.route('**/accounts/member/reset', async route => { requested(); await gate; await route.fulfill({ status: 503 }); });
-  await page.getByRole('button', { name: 'Reset password', exact: true }).click();
+  await page.getByRole('button', { name: 'Actions for member', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Reset password', exact: true }).click();
   await page.getByLabel('New password', { exact: true }).fill('private draft password');
   await page.getByRole('dialog').getByRole('button', { name: 'Reset password', exact: true }).click();
   await pending; await page.goBack();
