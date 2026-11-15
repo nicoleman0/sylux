@@ -18,7 +18,7 @@ function tooLarge(limit: number): Extract<Preview, { kind: 'unsupported' }> {
 
 export function previewUnavailable(entry: FileEntry): string | null {
   const limit = previewLimit(entry);
-  if (entry.size > limit) return tooLarge(limit).message;
+  if (typeof entry.size === 'number' && entry.size > limit) return tooLarge(limit).message;
   const extension = entry.name.split('.').at(-1)?.toLowerCase() ?? '';
   if (extension !== 'pdf' && !TEXT_EXTENSIONS.has(extension) && !IMAGE_EXTENSIONS.has(extension)) return 'Preview is not available for this file type. Download the file to open it.';
   return null;

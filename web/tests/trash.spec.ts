@@ -59,11 +59,11 @@ for (const theme of ['light', 'dark'] as const) {
       const trash = page.getByRole('region', { name: 'Trash', exact: true });
       await expect(trash.getByText('Original folder:', { exact: false })).toHaveCount(0);
       await expect(trash.getByText('Restore a parent folder', { exact: false })).toHaveCount(0);
-      await expect(trash.getByRole('listitem')).toHaveCount(100);
+      await expect(trash.locator('.trash-row')).toHaveCount(100);
       await expect(page.getByRole('button', { name: /Restore notes.txt.*item reference a/ })).toBeVisible();
       await expect(page.getByRole('button', { name: /Restore notes.txt.*item reference b/ })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Restore notes.txt from Files / Home', exact: true })).toBeVisible();
-      const row = trash.getByRole('listitem').filter({ hasText: longName });
+      const row = trash.locator('.trash-row').filter({ hasText: longName });
       await expect(row.locator('svg')).toHaveCount(1);
       await expect(row).toContainText(longPath.join(' / '));
       expect(await row.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
@@ -73,7 +73,7 @@ for (const theme of ['light', 'dark'] as const) {
       await page.screenshot({ path: test.info().outputPath(`trash-${width}-${theme}.png`) });
       await page.getByRole('button', { name: 'Next page', exact: true }).focus();
       await page.keyboard.press('Enter');
-      await expect(trash.getByRole('listitem')).toHaveCount(5);
+      await expect(trash.locator('.trash-row')).toHaveCount(5);
       await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeVisible();
       await page.screenshot({ path: test.info().outputPath(`trash-page-${width}-${theme}.png`) });
       await page.getByRole('button', { name: 'Previous page', exact: true }).click();
@@ -90,7 +90,7 @@ for (const theme of ['light', 'dark'] as const) {
       backend.empty();
       await page.getByRole('button', { name: 'Refresh trash', exact: true }).click();
       await expect(trash.getByText('Trash is empty.', { exact: true })).toBeVisible();
-      await expect(trash.getByRole('listitem')).toHaveCount(0);
+      await expect(trash.locator('.trash-row')).toHaveCount(0);
     });
   }
 }
@@ -312,7 +312,7 @@ test('targeted Trash inspection retains requested IDs beyond page one and proves
   const { api, paths } = inspection([deletedPage(0, 100, 'one'), deletedPage(100, 100, 'two'), deletedPage(200, 1, null)]);
   const result = await api.deletedTargets(['id-150', 'missing'], () => true);
   expect(result.map(item => item.id)).toEqual(['id-150']);
-  expect(paths).toEqual(['/trash?limit=100', '/trash?limit=100&cursor=one', '/trash?limit=100&cursor=two']);
+  expect(paths).toEqual(['/trash?limit=100&sort=name_asc', '/trash?limit=100&sort=name_asc&cursor=one', '/trash?limit=100&sort=name_asc&cursor=two']);
 });
 
 test('targeted Trash inspection stops once all targets are found and skips empty requests', async () => {

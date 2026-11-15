@@ -344,7 +344,7 @@ async function browserMatrix() {
       const names = result.items.map(hit => hit.entry.name);
       await page.waitForFunction(({ query, names }) => {
         const section = document.querySelector('section[aria-label="Search results"]');
-        return document.querySelector('#file-search')?.value === query && section?.getAttribute('aria-busy') === 'false' && JSON.stringify([...section.querySelectorAll('article')].map(row => row.getAttribute('aria-label'))) === JSON.stringify(names);
+        return document.querySelector('#file-search')?.value === query && section?.getAttribute('aria-busy') === 'false' && JSON.stringify([...section.querySelectorAll('.file-row')].map(row => row.getAttribute('aria-label'))) === JSON.stringify(names);
       }, { query: searchQuery, names });
     }
     await page.waitForFunction(() => ![...document.querySelectorAll('[role=status]')].some(e => /^(Loading (files|results|trash)|Searching)/.test(e.textContent ?? '')));

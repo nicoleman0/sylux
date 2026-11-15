@@ -34,7 +34,7 @@ async function installBackend(page: Page, paged = false) {
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password', { exact: true }).fill('password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('article', { name: 'Midnight.txt', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'Midnight.txt', exact: true })).toBeVisible();
   return requests;
 }
 
@@ -47,18 +47,18 @@ for (const [timezoneId, localDate, epochDate, fullTime] of [
     test.use({ timezoneId, locale: 'en-GB' });
     test('dates are local while semantic timestamps retain the API instant', async ({ page }) => {
       await installBackend(page);
-      const midnight = page.getByRole('article', { name: 'Midnight.txt', exact: true }).locator('.file-modified time');
+      const midnight = page.getByRole('row', { name: 'Midnight.txt', exact: true }).locator('.file-modified time');
       await expect(midnight.locator('[aria-hidden="true"]')).toHaveText(localDate);
       await expect(midnight).toHaveAttribute('datetime', '2026-01-01T00:30:00.000Z');
       await expect(midnight).toHaveAttribute('title', new RegExp(fullTime));
       expect(await midnight.ariaSnapshot()).toContain(`Modified `);
       expect(await midnight.ariaSnapshot()).toContain(fullTime);
-      await expect(page.getByRole('article', { name: 'Epoch.txt', exact: true }).locator('.file-modified time [aria-hidden="true"]')).toHaveText(epochDate);
-      const folderDate = page.getByRole('article', { name: 'Projects', exact: true }).locator('.file-modified');
+      await expect(page.getByRole('row', { name: 'Epoch.txt', exact: true }).locator('.file-modified time [aria-hidden="true"]')).toHaveText(epochDate);
+      const folderDate = page.getByRole('row', { name: 'Projects', exact: true }).locator('.file-modified');
       expect(await folderDate.ariaSnapshot()).toContain('Modified date not applicable');
       await expect(folderDate.locator('[title]')).toHaveAttribute('title', 'Modified date not applicable');
       for (const name of ['Legacy.txt', 'Null.txt', 'Invalid.txt']) {
-        const unknown = page.getByRole('article', { name, exact: true }).locator('.file-modified');
+        const unknown = page.getByRole('row', { name, exact: true }).locator('.file-modified');
         await expect(unknown).toContainText('Modified date unknown');
         expect(await unknown.ariaSnapshot()).toContain('Modified date unknown');
         await expect(unknown.locator('time')).toHaveCount(0);
@@ -129,7 +129,7 @@ for (const theme of ['light', 'dark'] as const) {
       await page.keyboard.press('Enter');
       await expect(sort).toHaveValue('modified_desc');
       await expect(sort).toBeFocused();
-      const row = page.getByRole('article', { name: 'Midnight.txt', exact: true });
+      const row = page.getByRole('row', { name: 'Midnight.txt', exact: true });
       await expect(row.locator(width === 375 ? '.mobile-file-size time' : '.file-modified time')).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const filename = await row.locator('.filename').boundingBox();
@@ -170,7 +170,7 @@ test.describe('upload date revalidation', () => {
       items: [{ id: committed ? 'new' : 'old', parent_id: 'root', name: 'same.txt', kind: 'file', size: 3, etag: committed ? '"new:1"' : '"old:1"', modified_at: committed ? timestamp : 0 }], has_more: false, next_cursor: null,
     } }));
     await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
-    const date = () => page.getByRole('article', { name: 'same.txt', exact: true }).locator('.file-modified time [aria-hidden="true"]');
+    const date = () => page.getByRole('row', { name: 'same.txt', exact: true }).locator('.file-modified time [aria-hidden="true"]');
     await expect(date()).toHaveText('1 Jan 1970');
     let replacing = false;
     let sequence = 0;

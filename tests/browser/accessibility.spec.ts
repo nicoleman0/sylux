@@ -86,8 +86,8 @@ test('folder, upload, rename, and logout controls have accessible names', { anno
   await expect(page.getByLabel('Choose files to upload')).toBeAttached();
   await expect(page.getByRole('button', { name: 'Refresh folder' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${fixture.folder}`, exact: true }).click();
-  await page.getByRole('article').filter({ hasText: fixture.nested }).getByRole('button', { name: 'Open' }).click();
-  const item = page.getByRole('article').filter({ hasText: fixture.file });
+  await page.locator('.file-row').filter({ hasText: fixture.nested }).getByRole('button', { name: 'Open' }).click();
+  const item = page.locator('.file-row').filter({ hasText: fixture.file });
   await item.getByRole('button', { name: `Options for ${fixture.file}`, exact: true }).click();
   await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeVisible();
@@ -98,8 +98,8 @@ test('folder, upload, rename, and logout controls have accessible names', { anno
 test('rename dialog supports Escape and restores focus to its invoking control', { annotation: { type: 'harness_case', description: 'accessibility_rename_escape_focus' } }, async () => {
   await signIn();
   await page.getByRole('button', { name: `Open ${fixture.folder}`, exact: true }).click();
-  await page.getByRole('article').filter({ hasText: fixture.nested }).getByRole('button', { name: 'Open' }).click();
-  const rename = page.getByRole('article').filter({ hasText: fixture.file }).getByRole('button', { name: `Options for ${fixture.file}`, exact: true });
+  await page.locator('.file-row').filter({ hasText: fixture.nested }).getByRole('button', { name: 'Open' }).click();
+  const rename = page.locator('.file-row').filter({ hasText: fixture.file }).getByRole('button', { name: `Options for ${fixture.file}`, exact: true });
   await rename.click();
   await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: /rename/i });

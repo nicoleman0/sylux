@@ -2633,3 +2633,301 @@ async fn trash_pages_disambiguate_historical_displayed_paths_across_parent_ids()
     assert_eq!(checked, 3);
     fixture.close().await;
 }
+
+#[derive(Clone, Debug)]
+struct ExpectedResult {
+    id: String,
+    name: String,
+    folder: bool,
+    location: String,
+    size: Option<i64>,
+    modified: Option<i64>,
+}
+
+fn expected_result_order(rows: &[ExpectedResult], sort: &str, search: bool) -> Vec<String> {
+    let mut rows = rows.to_vec();
+    if search {
+        for row in &mut rows {
+            row.name = row.name.to_lowercase();
+            row.location = row.location.to_lowercase();
+        }
+    }
+    rows.sort_by(|a, b| {
+        let names = || a.name.cmp(&b.name);
+        let known_metric = |a: Option<i64>, b: Option<i64>, descending: bool| match (a, b) {
+            (Some(a), Some(b)) if descending => b.cmp(&a),
+            (Some(a), Some(b)) => a.cmp(&b),
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        let order = match sort {
+            "name_asc" => names(),
+            "name_desc" => b.name.cmp(&a.name),
+            "location_asc" => a.location.cmp(&b.location).then_with(names),
+            "location_desc" => b.location.cmp(&a.location).then_with(names),
+            _ => b.folder.cmp(&a.folder).then_with(|| {
+                if a.folder {
+                    return names();
+                }
+                match sort {
+                    "size_asc" => known_metric(a.size, b.size, false),
+                    "size_desc" => known_metric(a.size, b.size, true),
+                    "modified_asc" => known_metric(a.modified, b.modified, false),
+                    "modified_desc" => known_metric(a.modified, b.modified, true),
+                    _ => unreachable!(),
+                }
+                .then_with(names)
+            }),
+        };
+        order
+            .then_with(|| {
+                if search {
+                    a.location.cmp(&b.location)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    rows.into_iter().map(|row| row.id).collect()
+}
+
+#[tokio::test]
+async fn result_sorting_orders_complete_search_and_trash_before_bounded_pages() {
+    let fixture = HttpFixture::new("result-sort-pages", 0).await;
+    let expected = fixture.workers.as_ref().unwrap().transact(|tx| {
+        let mut expected = Vec::new();
+        let mut parents = Vec::new();
+        for name in ["result-A", "result-Z"] {
+            let entry = namespace::create_folder(tx, OWNER, ROOT, name).unwrap();
+            expected.push(ExpectedResult { id: entry.id.clone(), name: name.to_owned(), folder: true, location: String::new(), size: None, modified: None });
+            parents.push(entry.id);
+        }
+        for n in (0..113).rev() {
+            let id = format!("{:032x}", 0xd000+n);
+            let name = format!("result-{n:03}");
+            let size = (n % 5) as i64;
+            let modified = (n % 7) as i64;
+            insert_sized_file_at(tx, &id, &name, size, modified);
+            let location = if n % 3 == 0 {
+                tx.execute("UPDATE entry SET parent_id=?1 WHERE entry_id=?2", params![parents[n % 2],id]).unwrap();
+                if n % 2 == 0 { "result-A" } else { "result-Z" }
+            } else { "" };
+            expected.push(ExpectedResult { id, name, folder: false, location: location.to_owned(), size: Some(size), modified: Some(modified) });
+        }
+        for (n, parent) in parents.iter().enumerate() {
+            let id = format!("{:032x}", 0xe000+n);
+            tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'file','result-unknown',?4,1)", params![id,OWNER,parent,b"result-unknown"]).unwrap();
+            expected.push(ExpectedResult { id, name: "result-unknown".to_owned(), folder: false, location: if n == 0 { "result-A" } else { "result-Z" }.to_owned(), size: None, modified: None });
+        }
+        namespace::create_folder(tx, OTHER, OTHER_ROOT, "result-private").unwrap();
+        Ok(expected)
+    }).await.unwrap();
+    let sorts = [
+        "name_asc",
+        "name_desc",
+        "size_asc",
+        "size_desc",
+        "modified_asc",
+        "modified_desc",
+        "location_asc",
+        "location_desc",
+    ];
+    for search in [true, false] {
+        if !search {
+            let to_trash = expected.clone();
+            fixture
+                .workers
+                .as_ref()
+                .unwrap()
+                .transact(move |tx| {
+                    for row in to_trash
+                        .iter()
+                        .filter(|row| !row.folder)
+                        .chain(to_trash.iter().filter(|row| row.folder))
+                    {
+                        let generation: i64 = tx
+                            .query_row(
+                                "SELECT generation FROM entry WHERE entry_id=?1",
+                                [&row.id],
+                                |r| r.get(0),
+                            )
+                            .unwrap();
+                        namespace::trash(
+                            tx,
+                            OWNER,
+                            &row.id,
+                            &sylux::domain::upload::folder_etag(&row.id, generation as u64),
+                        )
+                        .unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        for sort in sorts {
+            for limit in [7, 100] {
+                let mut cursor = None;
+                let mut ids = Vec::new();
+                loop {
+                    let suffix = cursor
+                        .as_ref()
+                        .map(|value| format!("&cursor={value}"))
+                        .unwrap_or_default();
+                    let path = if search {
+                        format!("/entries/search?q=result&sort={sort}&limit={limit}{suffix}")
+                    } else {
+                        format!("/trash?sort={sort}&limit={limit}{suffix}")
+                    };
+                    let (status, body) = fixture.get_as(&path, SESSION, SECRET).await;
+                    assert_eq!(status, 200, "{path}: {}", String::from_utf8_lossy(&body));
+                    let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let items = page["items"].as_array().unwrap();
+                    assert!(!items.is_empty() && items.len() <= limit);
+                    for item in items {
+                        let entry = if search { &item["entry"] } else { item };
+                        let id = entry["id"].as_str().unwrap();
+                        let row = expected
+                            .iter()
+                            .find(|row| row.id == id)
+                            .expect("owned result");
+                        assert_eq!(entry["size"].as_i64(), row.size);
+                        assert_eq!(entry["modified_at"].as_i64(), row.modified);
+                        ids.push(id.to_owned());
+                    }
+                    cursor = page["next_cursor"].as_str().map(str::to_owned);
+                    assert_eq!(page["has_more"], cursor.is_some());
+                    if cursor.is_none() {
+                        break;
+                    }
+                    assert!(ids.len() < expected.len(), "paging terminates");
+                }
+                assert_eq!(
+                    ids,
+                    expected_result_order(&expected, sort, search),
+                    "search={search} sort={sort} limit={limit}"
+                );
+            }
+        }
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn result_sort_cursors_bind_order_and_revision_metadata() {
+    let fixture = HttpFixture::new("result-sort-cursors", 0).await;
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            for n in 0..3 {
+                insert_sized_file_at(
+                    tx,
+                    &format!("{:032x}", 0xf000 + n),
+                    &format!("result-{n}"),
+                    n as i64,
+                    n as i64,
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let sorts = [
+        "name_asc",
+        "name_desc",
+        "size_asc",
+        "size_desc",
+        "modified_asc",
+        "modified_desc",
+        "location_asc",
+        "location_desc",
+    ];
+    for search in [true, false] {
+        if !search {
+            fixture
+                .workers
+                .as_ref()
+                .unwrap()
+                .transact(|tx| {
+                    for entry in namespace::list(tx, OWNER, ROOT, None, 10).unwrap() {
+                        namespace::trash(tx, OWNER, &entry.id, &entry.etag).unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let base = if search {
+            "/entries/search?q=result&"
+        } else {
+            "/trash?"
+        };
+        for invalid in ["", "NAME_ASC", "modified", "random"] {
+            let (status, body) = fixture
+                .get_as(&format!("{base}sort={invalid}"), SESSION, SECRET)
+                .await;
+            assert_eq!(status, 400);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+                "invalid_sort"
+            );
+        }
+        for sort in sorts {
+            let (_, body) = fixture
+                .get_as(&format!("{base}sort={sort}&limit=1"), SESSION, SECRET)
+                .await;
+            let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let cursor = page["next_cursor"].as_str().unwrap();
+            for other in sorts.into_iter().filter(|other| *other != sort) {
+                let (status, body) = fixture
+                    .get_as(
+                        &format!("{base}sort={other}&cursor={cursor}"),
+                        SESSION,
+                        SECRET,
+                    )
+                    .await;
+                assert_eq!(status, 400, "search={search}: {sort} -> {other}");
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+                    "invalid_cursor"
+                );
+            }
+        }
+        for (index, column) in ["length", "committed_at"].into_iter().enumerate() {
+            let (_, body) = fixture
+                .get_as(
+                    &format!("{base}sort=modified_desc&limit=1"),
+                    SESSION,
+                    SECRET,
+                )
+                .await;
+            let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let cursor = page["next_cursor"].as_str().unwrap();
+            fixture.workers.as_ref().unwrap().transact(move |tx| {
+                let revision = format!("{:032x}", 0xf100 + index + if search { 0 } else { 2 });
+                let length = if column == "length" { "length+1" } else { "length" };
+                let committed = if column == "committed_at" { "committed_at+1" } else { "committed_at" };
+                tx.execute(&format!("INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) SELECT ?1,entry_id,blob_id,{length},sha256,{committed},actor_account_id FROM revision WHERE revision_id=(SELECT current_revision_id FROM entry WHERE entry_id='0000000000000000000000000000f000')"), [&revision]).unwrap();
+                tx.execute("UPDATE entry SET current_revision_id=?1 WHERE entry_id='0000000000000000000000000000f000'", [&revision]).unwrap();
+                Ok(())
+            }).await.unwrap();
+            let (status, body) = fixture
+                .get_as(
+                    &format!("{base}sort=modified_desc&cursor={cursor}"),
+                    SESSION,
+                    SECRET,
+                )
+                .await;
+            assert_eq!(status, 409, "search={search}: {column}");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+                "listing_changed"
+            );
+        }
+    }
+    fixture.close().await;
+}

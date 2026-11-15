@@ -7,6 +7,7 @@
   import * as Button from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
+  import SortHeader from '$lib/SortHeader.svelte';
   import RefreshButton from '$lib/RefreshButton.svelte';
   import { Badge } from '$lib/components/ui/badge/index.js';
 
@@ -79,7 +80,11 @@
   <main class="catalogue-main">
     <section class="catalogue-section" aria-labelledby="refresh-title">
       <h2 id="refresh-title">Refresh</h2>
-      <div class="flex flex-wrap gap-2"><RefreshButton label="Refresh" busy={false} onclick={() => {}} /><RefreshButton label="Refresh" busy={true} onclick={() => {}} /></div>
+      <div class="flex flex-wrap gap-2"><RefreshButton label="Refresh files" busy={false} onclick={() => {}} /><RefreshButton label="Refresh files" busyLabel="Refreshing…" busy={true} onclick={() => {}} /></div>
+    </section>
+    <section class="catalogue-section" aria-labelledby="sorting-title">
+      <h2 id="sorting-title">Sortable headings</h2>
+      <div role="table" aria-label="Sorting examples"><div role="row" class="flex flex-wrap gap-3"><SortHeader label="Name" column="name" sort="name_asc" onclick={() => {}} /><SortHeader label="Modified" column="modified" sort="name_asc" onclick={() => {}} /><SortHeader label="Size" column="size" sort="name_asc" disabled onclick={() => {}} /></div></div>
     </section>
     <section class="catalogue-section" aria-labelledby="type-title">
       <div class="section-heading"><h2 id="type-title">Typography</h2><p>One font, sized by role. Samples show the actual sizes.</p></div>
@@ -147,18 +152,18 @@
         <div class="list-head selectable-head modified-head"><span aria-hidden="true"></span><span>Name</span><span class="file-modified">Modified</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>
         <article class="file-row selectable-row modified-row">
           <label class="entry-selection"><input type="checkbox" aria-label="Select Projects sample" bind:checked={sampleSelected} /></label>
-          <button type="button" class="item-name" onclick={() => sampleNotice = 'Folder action selected.'}><span class="folder-icon" aria-hidden="true"><FolderIcon /></span><span class="item-label"><span class="filename">Projects</span><span class="mobile-file-size" aria-hidden="true">0 B · —</span></span></button>
+          <div class="name-cell"><button type="button" class="item-name" onclick={() => sampleNotice = 'Folder action selected.'}><span class="folder-icon" aria-hidden="true"><FolderIcon /></span><span class="item-label"><span class="filename">Projects</span><span class="mobile-file-size" aria-hidden="true">0 B · —</span></span></button></div>
           <span class="file-modified" title="Modified date not applicable"><span class="sr-only">Modified date not applicable</span><span aria-hidden="true">—</span></span><span class="file-size">0 B</span>
-          <Button.Root variant="ghost" size="icon" class="size-11" aria-label="Project actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root>
+          <div class="options-cell"><Button.Root variant="ghost" size="icon" class="size-11" aria-label="Project actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root></div>
         </article>
         <article class="file-row selectable-row modified-row">
           <label class="entry-selection"><input type="checkbox" aria-label="Select Report.pdf sample" /></label>
-          <button type="button" class="item-name" onclick={() => sampleNotice = 'File action selected.'}><span aria-hidden="true"><FileIcon /></span><span class="item-label"><span class="filename">Report.pdf</span><span class="mobile-file-size" aria-hidden="true">42 KB · <time datetime={sampleModified.datetime} title={sampleModified.full}>{sampleModified.compact}</time></span></span></button>
+          <div class="name-cell"><button type="button" class="item-name" onclick={() => sampleNotice = 'File action selected.'}><span aria-hidden="true"><FileIcon /></span><span class="item-label"><span class="filename">Report.pdf</span><span class="mobile-file-size" aria-hidden="true">42 KB · <time datetime={sampleModified.datetime} title={sampleModified.full}>{sampleModified.compact}</time></span></span></button></div>
           <span class="file-modified"><time datetime={sampleModified.datetime} title={sampleModified.full}><span aria-hidden="true">{sampleModified.compact}</span><span class="sr-only">Modified {sampleModified.full}</span></time></span><span class="file-size">42 KB</span>
-          <Button.Root variant="ghost" size="icon" class="size-11" aria-label="Report actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root>
+          <div class="options-cell"><Button.Root variant="ghost" size="icon" class="size-11" aria-label="Report actions" onclick={() => sampleNotice = 'File actions selected.'}><MoreHorizontalIcon /></Button.Root></div>
         </article>
         <div class="account-row">
-          <div class="account-identity"><strong>alex</strong><span class="account-role">User</span></div>
+          <div class="account-identity"><strong>alex</strong></div><span class="account-role">User</span>
           <span class="status-label enabled">Active</span>
           <div class="account-actions"><Button.Root variant="ghost" size="sm" onclick={() => sampleNotice = 'Account action selected.'}>Reset password</Button.Root></div>
         </div>

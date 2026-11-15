@@ -463,3 +463,35 @@ for (const action of ['Home', 'Files sidebar']) {
     await expect.poll(() => page.evaluate(() => history.state?.sylux?.folder)).toBe('projects');
   });
 }
+
+test('search order survives containing-folder Back and resets at logout', async ({ page }) => {
+  const { requests } = await backend(page);
+  await page.goto('/'); await signIn(page);
+  await page.getByLabel('Search files and folders', { exact: true }).fill('Match');
+  const results = page.getByRole('region', { name: 'Search results', exact: true });
+  await expect(results.getByRole('button', { name: 'Sort by size, ascending', exact: true })).toBeVisible();
+  await results.getByRole('button', { name: 'Sort by size, ascending', exact: true }).click();
+  await expect.poll(() => requests.at(-1)?.searchParams.get('sort')).toBe('size_asc');
+  await results.getByRole('button', { name: 'Open containing folder for Match 0.txt', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(results).toHaveAttribute('aria-busy', 'false');
+  expect(requests.at(-1)?.pathname).toBe('/entries/search');
+  expect(requests.at(-1)?.searchParams.get('sort')).toBe('size_asc');
+  await expect(results.getByRole('columnheader', { name: 'Size', exact: true })).toHaveAttribute('aria-sort', 'ascending');
+  await page.getByRole('button', { name: 'Log out', exact: true }).click();
+  await signIn(page);
+  await page.getByLabel('Search files and folders', { exact: true }).fill('Match');
+  await expect(results).toHaveAttribute('aria-busy', 'false');
+  expect(requests.at(-1)?.searchParams.get('sort')).toBe('name_asc');
+});
+
+test('saved sort choices reject invalid and foreign history state', () => {
+  const location = parseLocation('#trash?searchSort=size_desc&trashSort=location_desc&accountSort=status_asc');
+  expect(location).toMatchObject({ searchSort: 'size_desc', trashSort: 'location_desc', accountSort: 'status_asc' });
+  const state = { ...location, version: 1, owner: 'owner', cursors: [null], page: 0, searchCursors: [null], searchPage: 0, scroll: 0 };
+  expect(savedContext(state, 'owner', location)).toMatchObject({ trashSort: 'location_desc' });
+  expect(savedContext({ ...state, trashSort: 'bogus' }, 'owner', location)).toBeNull();
+  expect(savedContext({ ...state, accountSort: 'size_desc' }, 'owner', location)).toBeNull();
+  expect(savedContext(state, 'different-owner', location)).toBeNull();
+});

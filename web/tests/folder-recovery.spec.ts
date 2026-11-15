@@ -181,8 +181,8 @@ for (const width of [1280, 390]) for (const theme of ['light', 'dark'] as const)
     await navigate(page, 'Files');
     await page.getByRole('button', { name: 'Open Tree', exact: true }).click();
     await page.getByRole('button', { name: 'Open Nested', exact: true }).click();
-    await expect(page.getByRole('article', { name: 'exact.bin', exact: true })).toBeVisible();
-    await expect(page.getByRole('article', { name: 'earlier.bin', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('row', { name: 'exact.bin', exact: true })).toBeVisible();
+    await expect(page.getByRole('row', { name: 'earlier.bin', exact: true })).toHaveCount(0);
   });
 }
 
@@ -223,7 +223,7 @@ test('unknown child restore with a newly hidden ancestor has an explicit recover
   await expect(page.getByRole('button', { name: 'Restore Tree', exact: true })).toHaveCount(0);
   await navigate(page, 'Files');
   await page.getByRole('button', { name: 'Open Tree', exact: true }).click(); await page.getByRole('button', { name: 'Open Nested', exact: true }).click();
-  await expect(page.getByRole('article', { name: 'earlier.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'earlier.bin', exact: true })).toBeVisible();
   expect(store.mutations.map(item => item.id)).toEqual(['earlier', 'tree']);
 });
 
@@ -339,7 +339,7 @@ for (const [status, apply] of [[503, false], [503, true], [-1, false], [-1, true
   expect(store.mutations.map(item => ({ method: item.method, id: item.id }))).toEqual([{ method: 'POST', id: 'earlier' }]);
   if (apply) {
     await navigate(page, 'Files'); await page.getByRole('button', { name: 'Open Tree', exact: true }).click(); await page.getByRole('button', { name: 'Open Nested', exact: true }).click();
-    await expect(page.getByRole('article', { name: 'earlier.bin', exact: true })).toBeVisible();
+    await expect(page.getByRole('row', { name: 'earlier.bin', exact: true })).toBeVisible();
   } else await expect(page.getByRole('button', { name: 'Restore earlier.bin', exact: true })).toBeVisible();
 });
 

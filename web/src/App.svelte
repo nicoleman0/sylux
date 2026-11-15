@@ -17,6 +17,7 @@
   import FolderIcon from '@lucide/svelte/icons/folder';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import CheckIcon from '@lucide/svelte/icons/check';
+  import SortHeader from './lib/SortHeader.svelte';
   import RefreshButton from './lib/RefreshButton.svelte';
   import * as Alert from '$lib/components/ui/alert/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -27,12 +28,12 @@
   import XIcon from '@lucide/svelte/icons/x';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
   import { modifiedTime } from './lib/modified-time';
-  import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort } from './lib/listing';
+  import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort, type ResultSort } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
   import { directoryFilesToUpload, filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
 
-  import { parseLocation, locationHash, savedContext, type BrowsingContext, type Destination } from './lib/browsing-context';
+  import { parseLocation, locationHash, savedContext, type BrowsingContext, type Destination, type AccountSort } from './lib/browsing-context';
 
   import { MockTransport } from './lib/mock-transport';
 
@@ -125,7 +126,7 @@
   function browsingSnapshot(): BrowsingContext {
     return { version: 1, owner: user?.id ?? '',
       destination: settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : 'files',
-      folder: currentFolder.id, query: searchQuery, sort: folderSort,
+      folder: currentFolder.id, query: searchQuery, sort: folderSort, searchSort, trashSort, accountSort,
       cursors: [...pageCursors], page: pageIndex, searchCursors: [...searchPageCursors], searchPage: searchPageIndex, scroll: window.scrollY };
   }
 
@@ -229,6 +230,7 @@
     accountView = location.destination === 'account'; settingsView = location.destination === 'settings' && user.role === 'administrator'; showTrash = location.destination === 'trash';
     entries = []; entriesFolderId = ''; listingError = ''; loading = true;
     folderSort = location.sort;
+    searchSort = location.searchSort ?? 'name_asc'; trashSort = location.trashSort ?? 'name_asc'; accountSort = location.accountSort ?? 'name_asc';
     try {
       if (!accountView && !settingsView && !showTrash) {
         if (!folders[0] && !await refreshRoot()) {
@@ -370,6 +372,33 @@
   let listingError = $state('');
   let listingRequest = $state(0);
   let folderSort = $state<FolderSort>('name_asc');
+  let searchSort = $state<ResultSort>('name_asc');
+  let trashSort = $state<ResultSort>('name_asc');
+  let accountSort = $state<AccountSort>('name_asc');
+  const sortedAccounts = $derived([...accounts].sort((left, right) => {
+    const field = accountSort.split('_')[0];
+    const value = (account: Account) => field === 'role' ? account.role : field === 'status' ? (account.enabled ? 'Active' : 'Disabled') : account.handle;
+    const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+    return compare(value(left), value(right)) * (accountSort.endsWith('_desc') ? -1 : 1) || compare(left.handle, right.handle) || compare(left.account_id, right.account_id);
+  }));
+
+  function nextSort<T extends string>(current: T, column: string): T {
+    return `${column}_${current === `${column}_asc` ? 'desc' : 'asc'}` as T;
+  }
+
+
+  async function setResultSort(surface: 'search' | 'trash', sort: ResultSort): Promise<void> {
+    if (resultSortBlocked) return;
+    clearCompletedFeedback(); clearSelection();
+    if (surface === 'search') { searchSort = sort; searchPageCursors = [null]; searchPageIndex = 0; searchNextCursor = null; searchHasMore = false; await runSearch(); }
+    else { trashSort = sort; deletedItems = []; trashPageCursors = [null]; trashPageIndex = 0; trashNextCursor = null; trashHasMore = false; await loadTrash(); }
+    saveNavigation();
+  }
+
+  function setAccountSort(column: string): void {
+    if (accountBusy || accountsLoading) return;
+    clearCompletedFeedback(); accountSort = nextSort(accountSort, column); saveNavigation();
+  }
   let searchInput = $state('');
   let searchQuery = $state('');
   let searchItems = $state<SearchHit[]>([]);
@@ -414,6 +443,8 @@
   let showTrash = $state(false);
   let trashError = $state('');
   let trashBusy = $state(false);
+  const resultSortBlocked = $derived(bulkBusy || bulkNeedsRefresh || restorationPending || trashBusy);
+
   let restoringId = $state('');
   let restoringName = $state('');
   let namespaceUnknown = $state<{ action: 'trash' | 'restore'; entry: Entry; inspected: boolean; message: string } | null>(null);
@@ -741,7 +772,7 @@
     clearSelection();
     searchLoading = true; searchError = '';
     try {
-      const page = await listing.search(query, cursor, controller.signal);
+      const page = await listing.search(query, cursor, controller.signal, searchSort);
       if (request !== searchRequest || generation !== sessionGeneration || query !== searchQuery || accountView || settingsView || showTrash) return false;
       searchItems = page.items;
       moveNeedsRefresh = false;
@@ -1011,7 +1042,7 @@
     transfers.invalidate(); transfers = new TransferApi(client, mutations);
     transferName = ''; progress = 0; transferPhase = ''; transferBusy = false; uploadCancelable = false;
     uploadId = ''; unresolvedUploadId = ''; unresolvedUploadName = ''; unresolvedCancel = false; notice = '';
-    folderSort = 'name_asc';
+    folderSort = 'name_asc'; searchSort = 'name_asc'; trashSort = 'name_asc'; accountSort = 'name_asc';
     listingRequest++; currentFolder = emptyRoot; folders = []; entries = []; folderPath = [emptyRoot];
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false; loading = false; listingError = '';
     folderName = ''; folderBusy = false; createOpen = false; folderError = ''; previewEntry = null; previewTrigger = null;
@@ -1594,10 +1625,10 @@
     trashError = ''; trashNotice = ''; trashLoading = true;
     let loaded = false;
     try {
-      const result = await listing.deleted(cursor);
+      const result = await listing.deleted(cursor, trashSort);
       if (!isCurrent()) return false;
       if (result.next_cursor && trashPageCursors.slice(0, targetPage + 1).includes(result.next_cursor)) throw new Error('Trash pagination repeated a cursor');
-      if (targetPage > trashPageIndex && deletedItems.length && result.items.length && compareDeleted(deletedItems.at(-1)!, result.items[0]) >= 0) throw new Error('Trash pagination did not advance');
+      if (targetPage > trashPageIndex && deletedItems.length && result.items.length && compareDeleted(deletedItems.at(-1)!, result.items[0], trashSort) >= 0) throw new Error('Trash pagination did not advance');
       deletedItems = result.items;
       trashPageIndex = targetPage;
       trashPageCursors = targetPage === 0 ? [null] : [...trashPageCursors.slice(0, targetPage), cursor];
@@ -2065,6 +2096,13 @@
   }
 </script>
 
+{#snippet resultSortOptions()}
+  <option value="name_asc">Name: A to Z</option><option value="name_desc">Name: Z to A</option>
+  <option value="location_asc">Location: A to Z</option><option value="location_desc">Location: Z to A</option>
+  <option value="modified_asc">Modified: oldest first</option><option value="modified_desc">Modified: newest first</option>
+  <option value="size_asc">Size: smallest first</option><option value="size_desc">Size: largest first</option>
+{/snippet}
+
 {#snippet modifiedDateLabel(entry: Entry)}
   {@const date = modifiedTime(entry)}
   {#if date}<time datetime={date.datetime} title={date.full}><span aria-hidden="true">{date.compact}</span><span class="sr-only">Modified {date.full}</span></time>
@@ -2266,11 +2304,12 @@
             {#if settingsTab === 'accounts'}
               <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files.</p></div><div class="flex flex-wrap gap-2"><RefreshButton label="Refresh" busyLabel="Refreshing…" busy={accountsLoading} disabled={accountBusy} onclick={() => { if (accountsLoading || accountBusy) return; clearCompletedFeedback(); void loadAccounts(); }} /><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
                 {#if accountsLoading}<p role="status">Loading accounts…</p>{:else if accountsError}<p role="alert">{accountsError}</p>{:else if accounts.length === 0}<p>No accounts to show.</p>{/if}
-                <div class="account-list">{#each accounts as account (account.account_id)}
-                  <div class="account-row">
-                    <div class="account-identity"><strong>{account.handle}</strong><span class="account-role">{account.role === 'administrator' ? 'Administrator' : 'User'}</span></div>
-                    <span class:enabled={account.enabled} class="status-label">{account.enabled ? 'Active' : 'Disabled'}</span>
-                    <div class="account-actions">{#if account.account_id !== user?.id}
+                <div role="table" aria-label="Accounts"><div class="account-sort account-head" role="row"><SortHeader label="Name" column="name" sort={accountSort} disabled={accountBusy || accountsLoading} onclick={() => setAccountSort('name')} /><SortHeader label="Role" column="role" sort={accountSort} disabled={accountBusy || accountsLoading} onclick={() => setAccountSort('role')} /><SortHeader label="Status" column="status" sort={accountSort} disabled={accountBusy || accountsLoading} onclick={() => setAccountSort('status')} /><span role="columnheader"><span class="sr-only">Actions</span></span></div>
+                <div role="rowgroup" class="account-list">{#each sortedAccounts as account (account.account_id)}
+                  <div class="account-row" role="row" aria-label={account.handle}>
+                    <div class="account-identity" role="cell"><strong>{account.handle}</strong></div><span role="cell" class="account-role">{account.role === 'administrator' ? 'Administrator' : 'User'}</span>
+                    <span role="cell" class:enabled={account.enabled} class="status-label">{account.enabled ? 'Active' : 'Disabled'}</span>
+                    <div role="cell" class="account-actions">{#if account.account_id !== user?.id}
                       {#if account.enabled}
                         {#if account.role === 'user'}<Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; resetId = account.account_id; resetPassword = ''; }}>Reset password</Button>{/if}
                         <Button variant="ghost" size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; authorityTarget = { account, action: 'role' }; }}>{account.role === 'user' ? 'Make administrator' : 'Make user'}</Button>
@@ -2280,7 +2319,7 @@
                       {/if}
                     {/if}</div>
                   </div>
-                {/each}</div>
+                {/each}</div></div>
               </section>
               {#if accountNotice && !createAccountOpen && !resetId && !disableTarget && !authorityTarget}<p role="status" class="form-notice">{accountNotice}</p>{/if}
             {:else}
@@ -2293,17 +2332,19 @@
               {#if trashNotice}<p role="status">{trashNotice}</p>{/if}
               {#if trashError}<p role="alert">{trashError}</p>{#if trashRetry}<Button id="trash-page-retry" variant="outline" class="justify-self-start" disabled={trashLoading || trashBusy} aria-busy={trashPaging === 'retry' && trashLoading} onclick={() => pageTrash('retry')}>{trashPaging === 'retry' && trashLoading ? 'Retrying…' : 'Try again'}</Button>{/if}{/if}
               {#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}
+                <div class="narrow-sort"><Label for="trash-sort">Sort Trash by</Label><select id="trash-sort" aria-busy={trashLoading} value={trashSort} disabled={resultSortBlocked} onchange={(event) => setResultSort('trash', event.currentTarget.value as ResultSort)}>{@render resultSortOptions()}</select></div><div role="table" aria-label="Trash items"><div class="trash-sort" role="row"><span role="columnheader"><span class="sr-only">Kind</span></span><SortHeader label="Name" column="name" sort={trashSort} busy={trashLoading && trashSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'name'))} /><SortHeader label="Location" column="location" sort={trashSort} busy={trashLoading && trashSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'location'))} /><SortHeader label="Modified" column="modified" sort={trashSort} busy={trashLoading && trashSort.startsWith('modified_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'modified'))} /><SortHeader label="Size" column="size" sort={trashSort} busy={trashLoading && trashSort.startsWith('size_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'size'))} /><span role="columnheader"><span class="sr-only">Actions</span></span></div>
               {#if deletedItems.length > 0}
-                <ul>
+                <ul role="rowgroup">
                   {#each deletedItems as item (item.id)}
-                    <li class="trash-row">
-                      <span class="trash-kind" class:folder-icon={item.kind === 'folder'} aria-hidden="true">{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span>
-                      <span class="trash-item"><span class="trash-name">{item.name}</span><span class="sr-only">{item.kind}</span><span class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}</span>{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span>
-                      <Button variant="outline" size="sm" disabled={trashBusy || trashLoading || !!namespaceUnknown} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button>
+                    <li class="trash-row" role="row" aria-label={item.name}>
+                      <span role="cell" class="trash-kind" class:folder-icon={item.kind === 'folder'} aria-label={item.kind}><span aria-hidden="true">{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span></span>
+                      <span role="cell" class="trash-item"><span class="trash-name">{item.name}</span><span class="trash-metadata" aria-hidden="true">{@render modifiedDateLabel(item)} · {typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span></span><span role="cell" class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span><span role="cell" class="file-modified">{@render modifiedDateLabel(item)}</span><span role="cell" class="file-size">{typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
+                      <div role="cell" class="trash-actions"><Button variant="outline" size="sm" disabled={trashBusy || trashLoading || !!namespaceUnknown} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button></div>
                     </li>
                   {/each}
                 </ul>
               {/if}
+              </div>
               {#if trashPageIndex > 0 || trashHasMore}
                 <nav class="flex flex-wrap gap-2" aria-label="Trash pages">
                   {#if trashPageIndex > 0}<Button variant="outline" size="sm" disabled={trashLoading || trashBusy} aria-label="Previous page" aria-busy={trashLoading && trashPaging === 'previous'} onclick={() => pageTrash('previous')}>{trashLoading && trashPaging === 'previous' ? 'Loading…' : 'Previous page'}</Button>{/if}
@@ -2328,21 +2369,26 @@
             </div>
             {#if searchQuery}
               <section aria-label="Search results" aria-busy={searchLoading} class="search-results">
+                <div class="narrow-sort"><Label for="search-sort">Sort search by</Label><select id="search-sort" aria-busy={searchLoading} value={searchSort} disabled={resultSortBlocked} onchange={(event) => setResultSort('search', event.currentTarget.value as ResultSort)}>{@render resultSortOptions()}</select></div>
                 {#if searchLoading}<p role="status">Searching…</p>
                 {:else if searchInputError}<p role="alert">{searchInputError}</p>
                 {:else if searchError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Search failed</Alert.Title><Alert.Description><p>{searchError}</p><Button id="search-page-retry" variant="outline" size="sm" class="mt-2" onclick={() => runSearch(searchRetryCursor, searchRetryPage)}>Try again</Button></Alert.Description></Alert.Root>
                 {:else if searchItems.length === 0}<p>No matching files or folders.</p>
-                {:else}{@render selectionToolbar()}<div class="file-list"><div class="list-head selectable-head"><span aria-hidden="true"></span><span>Name and location</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>
+                {/if}
+                {@render selectionToolbar()}
+                <div role="table" aria-label="Search matches"><div role="rowgroup" class="file-list"><div role="row" class="list-head selectable-head modified-head search-head"><span role="columnheader"><span class="sr-only">Selection</span></span><SortHeader label="Name" column="name" sort={searchSort} busy={searchLoading && searchSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'name'))} /><SortHeader label="Location" column="location" class="file-location" sort={searchSort} busy={searchLoading && searchSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'location'))} /><SortHeader label="Modified" column="modified" sort={searchSort} busy={searchLoading && searchSort.startsWith('modified_')} class="file-modified" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'modified'))} /><SortHeader label="Size" column="size" sort={searchSort} busy={searchLoading && searchSort.startsWith('size_')} class="file-size" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'size'))} /><span role="columnheader"><span class="sr-only">Options</span></span></div></div>
+                <div role="rowgroup" class="file-list">
+                {#if !searchLoading && !searchInputError && !searchError}
                   {#each searchItems as hit (hit.entry.id)}
-                    <article aria-label={hit.entry.name} class={`file-row search-row selectable-row ${selectedIds.includes(hit.entry.id) ? 'selected-row' : ''}`}>
-                      <label class="entry-selection"><input type="checkbox" aria-label={`Select ${hit.entry.name} in ${searchLocation(hit)}`} checked={selectedIds.includes(hit.entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(hit.entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, hit.entry.id)} /></label>
-                      <div class="search-item-main"><button type="button" class="item-name" disabled={bulkBusy} title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="filename">{hit.entry.name}</span></button>
-                        <div class="search-location"><span>Files{#each hit.location.slice(1) as folder (folder.id)}{' / '}{folder.name}{/each}</span><Button variant="link" size="sm" disabled={bulkBusy} onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
-                      </div><span class="file-size">{hit.entry.kind === 'folder' ? '—' : typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : '—'}</span>
-                      <EntryOptions entry={hit.entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} />
-                    </article>
+                    <div role="row" aria-label={hit.entry.name} class={`file-row search-row selectable-row modified-row ${selectedIds.includes(hit.entry.id) ? 'selected-row' : ''}`}>
+                      <div role="cell" class="entry-selection"><label><input type="checkbox" aria-label={`Select ${hit.entry.name} in ${searchLocation(hit)}`} checked={selectedIds.includes(hit.entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(hit.entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, hit.entry.id)} /></label></div>
+                      <div role="cell" class="search-item-main name-cell"><button type="button" class="item-name" disabled={bulkBusy} title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{hit.entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : 'Size unknown'} · {@render modifiedDateLabel(hit.entry)}</span></span></button></div>
+                        <div role="cell" class="search-location file-location"><span>Files{#each hit.location.slice(1) as folder (folder.id)}{' / '}{folder.name}{/each}</span><Button variant="link" size="sm" disabled={bulkBusy} onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
+                      <span role="cell" class="file-modified">{@render modifiedDateLabel(hit.entry)}</span><span role="cell" class="file-size">{hit.entry.kind === 'folder' ? '—' : typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : '—'}</span>
+                      <div role="cell" class="options-cell"><EntryOptions entry={hit.entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} /></div>
+                    </div>
                   {/each}
-                </div>{/if}
+                {/if}</div></div>
                 {#if searchPageIndex > 0 || searchHasMore}<div class="flex flex-wrap gap-2 mt-3">{#if searchPageIndex > 0}<Button variant="outline" size="sm" onclick={searchPrevious} disabled={searchLoading || bulkBusy}>Previous page</Button>{/if}{#if searchHasMore}<Button variant="outline" size="sm" onclick={searchNext} disabled={searchLoading || bulkBusy}>Next page</Button>{/if}</div>{/if}
                 {#if !searchLoading && !searchError && !searchInputError}<p class="list-summary">{searchItems.length} {searchItems.length === 1 ? 'result' : 'results'}{searchHasMore || searchPageIndex > 0 ? ' on this page' : ''}</p>{/if}
               </section>
@@ -2353,8 +2399,8 @@
                 <input class="sr-only" id="upload-file" type="file" multiple tabindex={-1} aria-label="Choose files to upload" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onchange={chooseUploads} />
                 <Button id="choose-file" variant="outline" type="button" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onclick={() => document.getElementById('upload-file')?.click()}>Choose files</Button>
                 {#if folderChooserSupported}
-                  <input class="sr-only" id="upload-folder" type="file" webkitdirectory multiple tabindex={-1} aria-label="Choose folder to upload" aria-describedby="folder-upload-help" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onchange={chooseFolderUploads} />
-                  <Button id="choose-folder" variant="outline" type="button" aria-describedby="folder-upload-help" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onclick={() => document.getElementById('upload-folder')?.click()}>Choose folder</Button>
+                  <input class="sr-only" id="upload-folder" type="file" webkitdirectory multiple tabindex={-1} aria-label="Choose folder to upload" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onchange={chooseFolderUploads} />
+                  <Button id="choose-folder" variant="outline" type="button" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onclick={() => document.getElementById('upload-folder')?.click()}>Choose folder</Button>
                 {/if}
               </div>
               <RefreshButton size="default" label="Refresh" busyLabel="Refreshing…" busy={loading || searchLoading} disabled={bulkBusy || bulkNeedsRefresh} onclick={() => { if (loading || searchLoading || bulkBusy || bulkNeedsRefresh) return; void refreshWorkspace(); }} aria-label="Refresh folder" />
@@ -2371,19 +2417,19 @@
               </div>
 
             </section>
-            <p id="folder-upload-help" class="text-xs text-muted-foreground mb-3">{folderChooserSupported ? 'Choose folder skips empty folders. Drop a folder to include them.' : 'Folder selection is unavailable in this browser. Choose files or drop a folder instead.'}</p>
+            {#if !folderChooserSupported}<p id="folder-upload-help" class="text-xs text-muted-foreground mb-3">Folder selection is unavailable in this browser. Choose files or drop a folder instead.</p>{/if}
             {@render selectionToolbar()}
-            <section class="file-drop-region" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
-            {#if entries.length && !listingError}<div class="file-list"><div class="list-head selectable-head modified-head"><span aria-hidden="true"></span><span>Name</span><span class="file-modified">Modified</span><span class="file-size">Size</span><span class="sr-only">Options</span></div></div>{/if}
+            <section class="file-drop-region" role="table" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
+            {#if entries.length && !listingError}<div role="rowgroup" class="file-list"><div role="row" class="list-head selectable-head modified-head"><span role="columnheader"><span class="sr-only">Selection</span></span><SortHeader label="Name" column="name" sort={folderSort} busy={loading && folderSort.startsWith('name_')} disabled={bulkBusy || bulkNeedsRefresh || restorationPending} onclick={() => setFolderSort(nextSort(folderSort, 'name'))} /><SortHeader label="Modified" column="modified" sort={folderSort} busy={loading && folderSort.startsWith('modified_')} class="file-modified" disabled={bulkBusy || bulkNeedsRefresh || restorationPending} onclick={() => setFolderSort(nextSort(folderSort, 'modified'))} /><SortHeader label="Size" column="size" sort={folderSort} busy={loading && folderSort.startsWith('size_')} class="file-size" disabled={bulkBusy || bulkNeedsRefresh || restorationPending} onclick={() => setFolderSort(nextSort(folderSort, 'size'))} /><span role="columnheader"><span class="sr-only">Options</span></span></div></div>{/if}
             {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}{#if restorationUnavailable}<Button variant="outline" class="mt-2" onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files'); }}>Open Files</Button>{:else}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy || (restorationPending && !restorationFailed)} class="mt-2" onclick={retryFolder} />{/if}{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
             {:else if loading && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
-            {:else}<div class="file-list">{#each entries as entry (entry.id)}
-              <article aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row modified-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
-                <label class="entry-selection"><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, entry.id)} /></label>
-                <button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'} · {@render modifiedDateLabel(entry)}</span></span></button><span class="file-modified">{@render modifiedDateLabel(entry)}</span><span class="file-size">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span>
-                <EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} />
-              </article>
+            {:else}<div role="rowgroup" class="file-list">{#each entries as entry (entry.id)}
+              <div role="row" tabindex="-1" aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row modified-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
+                <div role="cell" class="entry-selection"><label><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, entry.id)} /></label></div>
+                <div role="cell" class="name-cell"><button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'} · {@render modifiedDateLabel(entry)}</span></span></button></div><span role="cell" class="file-modified">{@render modifiedDateLabel(entry)}</span><span role="cell" class="file-size">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span>
+                <div role="cell" class="options-cell"><EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} /></div>
+              </div>
             {/each}</div>{/if}
             </section>
             {#if dropPending}<p role="status">Moving {dropPending.entry.name} to {dropPending.destination.name}…</p>{/if}
