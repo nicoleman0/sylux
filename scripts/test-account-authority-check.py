@@ -3,6 +3,8 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 
 spec = importlib.util.spec_from_file_location('checker', Path(__file__).with_name('check-account-authority.py'))
@@ -37,6 +39,13 @@ class EvidenceChecks(unittest.TestCase):
         for code, output in [(0, 'Parsing file'), (12, 'Invariant AtLeastOneAdmin is violated.')]:
             with self.subTest(code=code), self.assertRaises(ValueError):
                 checker.check_result('positive', code, output)
+
+    def test_sources_only_needs_neither_java_nor_an_output_directory(self):
+        result = subprocess.run([sys.executable, str(checker.ROOT / 'scripts/check-account-authority.py'),
+                                 '--sources-only', '--java', '/does-not-exist'],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('correspondence matches', result.stdout)
 
     def test_untrusted_jar_is_rejected_before_execution(self):
         with tempfile.TemporaryDirectory() as directory:

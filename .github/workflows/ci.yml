@@ -13,8 +13,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Select checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+      authority: ${{ steps.scope.outputs.authority }}
+      recovery: ${{ steps.scope.outputs.recovery }}
+      rustdoc: ${{ steps.scope.outputs.rustdoc }}
+    steps:
+      - name: Check out source and comparison history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Test change selection
+        run: |
+          python3 scripts/test-ci-changes.py
+          python3 scripts/test-ci-workflow.py
+          python3 scripts/test-ci-comment-structured.py
+          python3 scripts/test-account-authority-check.py
+      - name: Identify required syntax parsers
+        id: preflight
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 scripts/ci-changes.py --base "$BASE" --head "$HEAD"
+      - name: Load syntax parsers
+        uses: ./.github/actions/ci-parsers
+        with:
+          needs-node: ${{ steps.preflight.outputs.needs_node }}
+          needs-shfmt: ${{ steps.preflight.outputs.needs_shfmt }}
+      - name: Select checks for the complete change
+        id: scope
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 scripts/ci-changes.py --base "$BASE" --head "$HEAD"
+      - name: Check optional parser integration
+        if: steps.preflight.outputs.needs_node == 'true'
+        run: node --test scripts/test-ci-comment-syntax.mjs
+      - name: Check installed shell and YAML parsers
+        run: python3 scripts/test-ci-comment-structured.py
+      - name: Check patch whitespace
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            git diff --check "$BASE" "$HEAD"
+          else
+            echo 'No comparison base; full checks remain selected'
+          fi
+      - name: Check authority source correspondence
+        run: python3 scripts/check-account-authority.py --sources-only
+
   account-authority-model:
     name: Account authority model
+    needs: changes
+    if: needs.changes.outputs.authority == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -45,8 +104,10 @@ jobs:
           path: ${{ runner.temp }}/account-authority
           if-no-files-found: ignore
 
-  check:
-    name: Linux x86_64 checks
+  native:
+    name: Rust, storage and dependencies
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -76,6 +137,14 @@ jobs:
         id: runner-image
         run: echo "version=${ImageVersion:?runner image version is missing}" >> "$GITHUB_OUTPUT"
 
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2 snapshot
+        with:
+          prefix-key: ci-host-v1-${{ steps.runner-image.outputs.version }}
+          shared-key: host
+          cache-bin: false
+          cache-workspace-crates: false
+
       - name: Restore cargo-deny
         id: cargo-deny-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -87,6 +156,10 @@ jobs:
         if: steps.cargo-deny-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-deny --version 0.20.2 --locked --root "$RUNNER_TEMP/cargo-deny"
 
+      - name: Load shell parser for its regression tests
+        uses: ./.github/actions/ci-parsers
+        with:
+          needs-shfmt: 'true'
       - name: Run documented checks
         env:
           CARGO_DENY_BIN: ${{ runner.temp }}/cargo-deny/bin/cargo-deny
@@ -95,13 +168,83 @@ jobs:
       - name: Check storage and folder recovery contracts
         run: cargo test --locked --features test-harness --test integration_names_listing --test contract_uploads --test contract_private_storage --test contract_content --test contract_isolation --test integration_poc_journey --test integration_retry_reconcile
 
-      - name: Install pinned browser prerequisites
-        run: npm --prefix web exec -- playwright install --with-deps chromium
-
-      - name: Check real TLS browser journeys
+  web-smoke:
+    name: Browser shard ${{ matrix.shard }}/4
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
         run: |
+          npm install --global npm@11.19.1
+          npm --prefix web ci
+      - name: Install Chromium
+        run: npm --prefix web exec -- playwright install --with-deps chromium
+      - name: Check browser journeys
+        run: npm --prefix web run smoke -- --forbid-only --workers=2 --shard=${{ matrix.shard }}/4
+      - name: Retain browser results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-smoke-${{ matrix.shard }}
+          path: evidence/poc/p6/smoke-results.json
+          if-no-files-found: ignore
+
+  tls-browser:
+    name: Real TLS browser journeys
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master snapshot
+        with:
+          toolchain: 1.99.1
+          targets: x86_64-unknown-linux-gnu
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Identify runner image
+        id: runner-image
+        run: echo "version=${ImageVersion:?runner image version is missing}" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2 snapshot
+        with:
+          prefix-key: ci-host-v1-${{ steps.runner-image.outputs.version }}
+          shared-key: host
+          cache-bin: false
+          cache-workspace-crates: false
+
+      - name: Build embedded assets
+        run: |
+          npm install --global npm@11.19.1
+          npm --prefix web ci
+          npm --prefix web run build
+      - name: Install browser prerequisites
+        run: |
+          npm --prefix web exec -- playwright install --with-deps chromium
           sudo apt-get update
           sudo apt-get install --yes libnss3-tools
+      - name: Check real TLS browser journeys
+        run: |
           export S1_CERTUTIL
           S1_CERTUTIL=$(command -v certutil)
           mkdir -p evidence/ci
@@ -109,19 +252,72 @@ jobs:
           S1_HARNESS_OUTPUT=$(mktemp -d "$PWD/evidence/ci/browser.XXXXXXXX")
           cargo test --locked --features test-harness --test browser_fixture
 
-      - name: Check account authority browser journeys
+  rustdoc:
+    name: Rust documentation examples
+    needs: changes
+    if: needs.changes.outputs.rustdoc == 'true' && needs.changes.outputs.full != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master snapshot
+        with:
+          toolchain: 1.99.1
+          targets: x86_64-unknown-linux-gnu
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Identify runner image
+        id: runner-image
+        run: echo "version=${ImageVersion:?runner image version is missing}" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2 snapshot
+        with:
+          prefix-key: ci-host-v1-${{ steps.runner-image.outputs.version }}
+          shared-key: host
+          cache-bin: false
+          cache-workspace-crates: false
+
+      - name: Build embedded assets
         run: |
-          npm --prefix web run smoke -- --grep 'account authority|account screens'
-          npm --prefix web run smoke -- account-actions.spec.ts
+          npm install --global npm@11.19.1
+          npm --prefix web ci
+          npm --prefix web run build
+      - name: Check documentation examples
+        run: cargo test --locked --doc
 
-      - name: Check live search responsiveness
-        run: npm --prefix web run smoke -- search-responsiveness.spec.ts
-
-      - name: Check action feedback and navigation lifetime
-        run: npm --prefix web run smoke -- bulk-actions.spec.ts desktop-upload.spec.ts moves.spec.ts replacement.spec.ts smoke.spec.ts folder-recovery.spec.ts trash.spec.ts refresh-feedback.spec.ts appearance.spec.ts
-
-      - name: Check PDF reader and failure recovery
-        run: npm --prefix web run smoke -- preview.spec.ts pdf-render.spec.ts pdf-compatibility.spec.ts
-
-      - name: Check listing metadata browser journeys
-        run: npm --prefix web run smoke -- folder-sizes.spec.ts modified-dates.spec.ts sorting.spec.ts column-sorting.spec.ts mock-result-sorting.spec.ts trash-sort-validation.spec.ts browsing-context.spec.ts compact-files.spec.ts design-system.spec.ts typography.spec.ts
+  check:
+    name: Linux x86_64 checks
+    needs: [changes, native, web-smoke, tls-browser, rustdoc, account-authority-model]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every selected check to pass
+        env:
+          SELECTION: ${{ needs.changes.result }}
+          FULL: ${{ needs.changes.outputs.full }}
+          AUTHORITY: ${{ needs.changes.outputs.authority }}
+          RUSTDOC: ${{ needs.changes.outputs.rustdoc }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          WEB_RESULT: ${{ needs.web-smoke.result }}
+          TLS_RESULT: ${{ needs.tls-browser.result }}
+          MODEL_RESULT: ${{ needs.account-authority-model.result }}
+          DOC_RESULT: ${{ needs.rustdoc.result }}
+        run: |
+          [[ "$SELECTION" == success ]] || { echo 'Change selection failed'; exit 1; }
+          if [[ "$FULL" == true ]]; then
+            for result in "$NATIVE_RESULT" "$WEB_RESULT" "$TLS_RESULT"; do
+              [[ "$result" == success ]] || { echo "Required runtime check: $result"; exit 1; }
+            done
+          fi
+          if [[ "$AUTHORITY" == true ]]; then
+            [[ "$MODEL_RESULT" == success ]] || { echo "Required authority model: $MODEL_RESULT"; exit 1; }
+          fi
+          if [[ "$RUSTDOC" == true && "$FULL" != true ]]; then
+            [[ "$DOC_RESULT" == success ]] || { echo "Required documentation examples: $DOC_RESULT"; exit 1; }
+          fi
