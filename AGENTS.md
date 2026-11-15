@@ -36,6 +36,9 @@
   Read `docs/lxc.md` before native deployment work.
 - For storage mutations, read `src/domain/coordinator.rs`,
   `src/persistence/mod.rs` and the affected contract tests.
+- Use `.agents/skills/verify-sylux-storage/SKILL.md` to select real storage
+  journeys. For account authority changes, use
+  `.agents/skills/verify-sylux-authority/SKILL.md` and its source-mapped model.
 
 ## Build and verification
 

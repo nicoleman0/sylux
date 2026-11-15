@@ -13,6 +13,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  account-authority-model:
+    name: Account authority model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Check model runner failure handling
+        run: python3 scripts/test-account-authority-check.py
+
+      - name: Check authority model and negative control
+        env:
+          TLA2TOOLS: ${{ runner.temp }}/tla2tools.jar
+        run: python3 scripts/check-account-authority.py --download --output "$RUNNER_TEMP/account-authority"
+
+      - name: Retain model evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: account-authority-model
+          path: ${{ runner.temp }}/account-authority
+          if-no-files-found: ignore
+
   check:
     name: Linux x86_64 checks
     runs-on: ubuntu-24.04
