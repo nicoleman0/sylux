@@ -23,7 +23,7 @@ async function replacementBackend(page: Page, outcome: 'confirmed' | 'lost-respo
     if (path === '/folders/root/path') return json({ items: [root] });
     if (path === '/folders/children') return json({ root, items: [], has_more: false, next_cursor: null });
     if (path === '/folders/root/children') return json({ items: active, has_more: false, next_cursor: null });
-    if (path === '/trash') return json({ items: deleted.map((entry) => ({ ...entry, original_path: [] })) });
+    if (path === '/trash') return json({ items: deleted.map((entry) => ({ ...entry, original_path: [] })), next_cursor: null, has_more: false });
     if (path === '/mutation-tickets') {
       const body = request.postDataJSON();
       replacement = !!body.replacement;

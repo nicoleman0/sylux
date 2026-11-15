@@ -9,6 +9,8 @@ test('flags reject contradictory and duplicate workloads before a run', () => {
   for (const args of [['--scale=1000', '--scale=10000'], ['--search-only', '--without-search'], ['--search-only', '--transfers-only'], ['--transfers-only', '--without-search'], ['--quick', '--quick'], ['--search-matrix', '--search-only'], ['--search-matrix', '--without-search'], ['--search-matrix', '--transfers-only']]) assert.throws(() => parseArgs(args));
   assert.deepEqual(parseArgs(['--quick']).scales, [1000]);
   assert.equal(parseArgs(['--search-matrix', '--release']).searchMatrix, true);
+  assert.equal(parseArgs(['--trash-only', '--scale=100020']).trashOnly, true);
+  for (const option of ['--search-only', '--transfers-only', '--search-matrix', '--without-search']) assert.throws(() => parseArgs(['--trash-only', option]));
 });
 test('actual failure sanitizer removes credentials and fixture/checkout paths', () => {
   const fixture = { password: 'secret-password', root: '/owned/fixture', ca: '/owned/fixture/tls/ca', leaf: '/owned/fixture/tls/leaf', sessions: [{ cookie: 'session.secret-cookie', csrf: 'secret-csrf' }] };
@@ -24,7 +26,9 @@ test('actual seed validators reject empty/wrong/unsorted/repeated pages and fals
   for (const bad of [{ ...page, items: [] }, { ...page, items: [{ id: 'b' }, { id: 'a' }] }, { ...page, items: [{ id: 'a' }, { id: 'a' }] }, { ...page, has_more: true }, { ...page, next_cursor: 'unexpected' }]) assert.throws(() => validatePage(bad, ['a', 'b'], 2));
   assert.throws(() => validatePage(page, ['a', 'b'], 2, 0, new Set(['a'])));
   assert.throws(() => validateSearch({ ...page, items: [] }, ['a', 'b'], 2));
-  assert.throws(() => validateTrash({ items: [{ id: 'a' }, { id: 'a' }] }, ['a', 'b']));
+  validateTrash({ ...page, items: page.items.map(row => ({ ...row, original_path: [] })) }, ['a', 'b']);
+  assert.throws(() => validateTrash({ ...page, items: [{ id: 'a', original_path: [] }, { id: 'a', original_path: [] }] }, ['a', 'b']));
+  assert.throws(() => validateTrash(page, ['a', 'b']));
   assert.throws(() => validatePath({ items: [{ id: 'b' }, { id: 'a' }] }, ['a', 'b']));
 });
 test('owned child bootstrap failure is bounded and stop is idempotent', async () => {

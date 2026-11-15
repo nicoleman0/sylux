@@ -31,7 +31,7 @@ async function backend(page: Page, fault?: { name: string; outcome: 'failed' | '
     const path = url.pathname;
     const json = (body: unknown, status = 200) => route.fulfill({ json: body, status });
     if (path === '/accounts') return json({ items: [] });
-    if (path === '/trash') return json({ items: [] });
+    if (path === '/trash') return json({ items: [], next_cursor: null, has_more: false });
     if (path === '/entries/search') return json({ items: [], next_cursor: null, has_more: false });
     if (path === '/auth/logout') return route.fulfill({ status: 204 });
     if (path === '/instance') return json({ name: 'Sylux' });

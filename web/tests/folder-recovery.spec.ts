@@ -64,7 +64,7 @@ async function backend(page: Page, large = false) {
         return { ...entry, original_path };
       });
       const next = afterTrashRead; afterTrashRead = null; next?.();
-      return json({ items });
+      return json({ items: items.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : a.id.localeCompare(b.id)), next_cursor: null, has_more: false });
     }
     if (path === '/entries/search') {
       const items = entries.filter(entry => active(entry) && entry.name.includes(url.searchParams.get('q') ?? '')).map(entry => {

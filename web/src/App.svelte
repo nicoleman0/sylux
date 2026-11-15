@@ -27,7 +27,7 @@
   import XIcon from '@lucide/svelte/icons/x';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
   import { modifiedTime } from './lib/modified-time';
-  import { ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort } from './lib/listing';
+  import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
   import { directoryFilesToUpload, filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
@@ -166,7 +166,7 @@
   function recordNavigation(): void {
     restorationPending = false; restorationFailed = false; restorationUnavailable = false;
     deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false;
-    navigationRequest++;
+    navigationRequest++; trashRequest++; trashLoading = false; trashPaging = null;
     historyReady = true;
     const context = browsingSnapshot();
     const previous = parseLocation(window.location.hash);
@@ -183,7 +183,7 @@
     if (record) saveNavigation();
     const generation = sessionGeneration;
     const request = ++navigationRequest;
-    listingRequest++; loading = false;
+    listingRequest++; loading = false; trashRequest++; trashLoading = false; trashPaging = null;
     if (clearFeedback) clearCompletedFeedback();
     clearSelection(); closeBulk();
     if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
@@ -192,11 +192,14 @@
     accountNotice = '';
     if (record) recordNavigation();
     const current = navigationRequest;
+    const trashFocus = showTrash ? watchFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null) : null;
     if (destination === 'files' && (!currentFolder.id || entriesFolderId !== currentFolder.id)) await refresh();
     if (showTrash) await loadTrash();
     if (settingsView) { await loadAccounts(); if (generation === sessionGeneration && current === navigationRequest) await loadInstance(); }
     await tick();
-    if (generation !== sessionGeneration || (record ? current : request) !== navigationRequest) return;
+    const mayFocus = trashFocus?.mayFocus() ?? true;
+    trashFocus?.stop();
+    if (!mayFocus || generation !== sessionGeneration || (record ? current : request) !== navigationRequest) return;
     document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title')?.focus({ preventScroll: true });
   }
 
@@ -215,7 +218,7 @@
     const state = window.history.state?.sylux;
     const location = state?.owner && state.owner !== user.id ? parseLocation('#files') : parseLocation(window.location.hash);
     const context = savedContext(window.history.state?.sylux, user.id, location);
-    listingRequest++; clearSearch(); clearSelection(); clearCompletedFeedback(); closeBulk();
+    listingRequest++; trashRequest++; trashLoading = false; trashPaging = null; clearSearch(); clearSelection(); clearCompletedFeedback(); closeBulk();
     previewEntry = null; previewTrigger = null;
     if (!folderBusy) createOpen = false;
     if (!renameBusy) renameId = '';
@@ -416,6 +419,13 @@
   let namespaceUnknown = $state<{ action: 'trash' | 'restore'; entry: Entry; inspected: boolean; message: string } | null>(null);
   let namespaceInspecting = $state(false);
   let trashLoading = $state(false);
+  let trashPageIndex = $state(0);
+  let trashPageCursors = $state<(string | null)[]>([null]);
+  let trashNextCursor = $state<string | null>(null);
+  let trashHasMore = $state(false);
+  let trashRetry = $state<{ cursor: string | null; page: number } | null>(null);
+  let trashPaging = $state<'next' | 'previous' | 'retry' | null>(null);
+  let trashNotice = $state('');
   let renameId = $state('');
   let renameName = $state('');
   let renameError = $state('');
@@ -1008,7 +1018,7 @@
     draggedEntry = null; dropTarget = ''; dropPending = null; dropError = ''; moveNeedsRefresh = false; knownParents.clear();
     renameId = ''; renameName = ''; renameError = ''; renameBusy = false;
     closeMove(); moveBusy = false;
-    trashRequest++; deletedItems = []; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false; restoringId = ''; restoringName = ''; namespaceUnknown = null; namespaceInspecting = false;
+    trashRequest++; deletedItems = []; trashPageIndex = 0; trashPageCursors = [null]; trashNextCursor = null; trashHasMore = false; trashRetry = null; trashPaging = null; trashNotice = ''; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false; restoringId = ''; restoringName = ''; namespaceUnknown = null; namespaceInspecting = false;
   }
   function clearAccountForms(): void {
     changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null; instanceBusy = false; instanceNotice = '';
@@ -1292,7 +1302,7 @@
       if (generation !== sessionGeneration) return false;
       const destination = report.action === 'move' && report.destination ? await folderEntries(report.destination.id, generation) : [];
       if (generation !== sessionGeneration) return false;
-      const deleted = report.action === 'trash' ? (await listing.deleted()).items : [];
+      const deleted = report.action === 'trash' ? await listing.deletedTargets(report.results.map(result => result.entry.id), () => generation === sessionGeneration) : [];
       if (generation !== sessionGeneration) return false;
       for (const result of report.results) {
         if (result.status === 'succeeded') continue;
@@ -1566,17 +1576,68 @@
     else { trashError = ''; trashTarget = entry; trashTrigger = trigger; }
   }
 
-  async function loadTrash(): Promise<void> {
-    const accountId = user?.id;
-    if (!accountId) return;
+  function watchFocus(trigger: HTMLElement | null): { mayFocus: () => boolean; stop: () => void } {
+    let moved = false;
+    const changed = (event: FocusEvent) => { if (event.target !== trigger && event.target !== document.body) moved = true; };
+    document.addEventListener('focusin', changed);
+    return { mayFocus: () => !moved, stop: () => document.removeEventListener('focusin', changed) };
+  }
+
+  async function loadTrash(cursor: string | null = null, targetPage = 0, focus = false): Promise<boolean> {
+    if (!user || !showTrash) return false;
+    const generation = sessionGeneration;
+    const navigation = navigationRequest;
     const request = ++trashRequest;
-    trashError = ''; trashLoading = true;
+    const isCurrent = () => request === trashRequest && generation === sessionGeneration && navigation === navigationRequest && showTrash;
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const watched = watchFocus(trigger);
+    trashError = ''; trashNotice = ''; trashLoading = true;
+    let loaded = false;
     try {
-      const result = await listing.deleted();
-      if (request === trashRequest && user?.id === accountId && showTrash) deletedItems = result.items;
-    } catch {
-      if (request === trashRequest && user?.id === accountId && showTrash) trashError = 'Could not load trash. Try again.';
-    } finally { if (request === trashRequest && user?.id === accountId) trashLoading = false; }
+      const result = await listing.deleted(cursor);
+      if (!isCurrent()) return false;
+      if (result.next_cursor && trashPageCursors.slice(0, targetPage + 1).includes(result.next_cursor)) throw new Error('Trash pagination repeated a cursor');
+      if (targetPage > trashPageIndex && deletedItems.length && result.items.length && compareDeleted(deletedItems.at(-1)!, result.items[0]) >= 0) throw new Error('Trash pagination did not advance');
+      deletedItems = result.items;
+      trashPageIndex = targetPage;
+      trashPageCursors = targetPage === 0 ? [null] : [...trashPageCursors.slice(0, targetPage), cursor];
+      trashNextCursor = result.next_cursor; trashHasMore = result.has_more; trashRetry = null;
+      loaded = true;
+    } catch (error) {
+      if (!isCurrent()) return false;
+      if (cursor && error instanceof HttpError && (error.status === 400 || error.status === 409)) {
+        deletedItems = []; trashPageIndex = 0; trashPageCursors = [null]; trashNextCursor = null; trashHasMore = false; trashRetry = null;
+        const restarting = loadTrash(null, 0, focus && watched.mayFocus());
+        const restartRequest = trashRequest;
+        const restarted = await restarting;
+        if (restartRequest === trashRequest && generation === sessionGeneration && navigation === navigationRequest && showTrash) {
+          if (restarted) trashNotice = 'Trash changed. The listing has been restarted.';
+          else trashError = 'Trash changed. Could not reload it. Try again.';
+        }
+        return restarted;
+      }
+      trashRetry = { cursor, page: targetPage };
+      trashError = 'Could not load trash. Try again.';
+    } finally {
+      if (isCurrent()) {
+        trashLoading = false; trashPaging = null;
+        await tick();
+        if (focus && watched.mayFocus() && isCurrent()) {
+          (loaded ? document.querySelector<HTMLElement>('.trash-row button:not(:disabled)') ?? document.getElementById('trash-heading') : document.getElementById('trash-page-retry'))?.focus();
+        }
+      }
+      watched.stop();
+    }
+    return loaded;
+  }
+
+  async function pageTrash(direction: 'next' | 'previous' | 'retry'): Promise<void> {
+    if (trashLoading || trashBusy) return;
+    const target = direction === 'retry' ? trashRetry : direction === 'next' && trashHasMore && trashNextCursor ? { cursor: trashNextCursor, page: trashPageIndex + 1 } : direction === 'previous' && trashPageIndex > 0 ? { cursor: trashPageCursors[trashPageIndex - 1], page: trashPageIndex - 1 } : null;
+    if (!target) return;
+    clearCompletedFeedback();
+    trashPaging = direction;
+    await loadTrash(target.cursor, target.page, true);
   }
   async function openTrash(): Promise<void> {
     await navigate('trash');
@@ -1596,7 +1657,7 @@
     let foundLocation: 'Files' | 'Trash' | null = null;
     namespaceInspecting = true;
     try {
-      const deleted = (await listing.deleted()).items;
+      const deleted = await listing.deletedTargets([pending.entry.id], () => generation === sessionGeneration && namespaceUnknown === pending);
       let source: Entry[] = [];
       let parentUnavailable = false;
       try { if (pending.entry.parent_id) source = await folderEntries(pending.entry.parent_id, generation); }
@@ -1669,12 +1730,14 @@
     } finally { if (sessionVersion === sessionGeneration) trashBusy = false; }
   }
   function needsDeletedReference(item: DeletedEntry): boolean {
-    return deletedItems.some((other) => other.id !== item.id && other.name === item.name &&
+    return !!item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name &&
       other.original_path.length === item.original_path.length &&
       other.original_path.every((part, index) => part === item.original_path[index]));
   }
   async function restoreEntry(item: Entry, trigger: HTMLElement): Promise<void> {
-    if (trashBusy || namespaceUnknown) return;
+    if (trashBusy || trashLoading || namespaceUnknown) return;
+    const navigation = navigationRequest;
+    const watched = watchFocus(trigger);
     trashBusy = true; restoringId = item.id; restoringName = item.name; trashError = '';
     const sessionVersion = sessionGeneration;
     let failed = false;
@@ -1682,8 +1745,11 @@
       await listing.restore(item.id, item.etag);
       if (sessionVersion !== sessionGeneration) return;
       clearCompletedFeedback(); actionNotice = 'Restored';
-      await loadTrash();
-      if (sessionVersion === sessionGeneration) { await refresh(); await tick(); if (sessionVersion === sessionGeneration) document.getElementById('trash-heading')?.focus(); }
+      if (showTrash && navigation === navigationRequest) {
+        deletedItems = []; trashPageIndex = 0; trashPageCursors = [null]; trashNextCursor = null; trashHasMore = false; trashRetry = null;
+        await loadTrash();
+      }
+      if (sessionVersion === sessionGeneration) await refresh();
     } catch (error) {
       if (sessionVersion !== sessionGeneration) return;
       failed = true;
@@ -1692,8 +1758,13 @@
     } finally {
       if (sessionVersion === sessionGeneration) {
         trashBusy = false; restoringId = ''; restoringName = '';
-        if (failed) { await tick(); if (sessionVersion === sessionGeneration && showTrash) restoreFocus(trigger, 'trash-heading'); }
+        await tick();
+        if (sessionVersion === sessionGeneration && navigation === navigationRequest && showTrash && watched.mayFocus()) {
+          if (failed) restoreFocus(trigger, 'trash-heading');
+          else (trashError && trashRetry ? document.getElementById('trash-page-retry') : document.querySelector<HTMLElement>('.trash-row button:not(:disabled)') ?? document.getElementById('trash-heading'))?.focus();
+        }
       }
+      watched.stop();
     }
   }
 
@@ -2219,7 +2290,8 @@
         {:else if showTrash}
             <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}>
               <div class="trash-heading-row"><h1 id="trash-heading" tabindex="-1">Trash</h1><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={trashBusy} onclick={refreshWorkspace} /></div>
-              {#if trashError}<p role="alert">{trashError}</p>{/if}
+              {#if trashNotice}<p role="status">{trashNotice}</p>{/if}
+              {#if trashError}<p role="alert">{trashError}</p>{#if trashRetry}<Button id="trash-page-retry" variant="outline" class="justify-self-start" disabled={trashLoading || trashBusy} aria-busy={trashPaging === 'retry' && trashLoading} onclick={() => pageTrash('retry')}>{trashPaging === 'retry' && trashLoading ? 'Retrying…' : 'Try again'}</Button>{/if}{/if}
               {#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}
               {#if deletedItems.length > 0}
                 <ul>
@@ -2227,10 +2299,16 @@
                     <li class="trash-row">
                       <span class="trash-kind" class:folder-icon={item.kind === 'folder'} aria-hidden="true">{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span>
                       <span class="trash-item"><span class="trash-name">{item.name}</span><span class="sr-only">{item.kind}</span><span class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}</span>{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span>
-                      <Button variant="outline" size="sm" disabled={trashBusy || trashLoading || !!namespaceUnknown} aria-busy={trashBusy && restoringId === item.id} aria-label={deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button>
+                      <Button variant="outline" size="sm" disabled={trashBusy || trashLoading || !!namespaceUnknown} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button>
                     </li>
                   {/each}
                 </ul>
+              {/if}
+              {#if trashPageIndex > 0 || trashHasMore}
+                <nav class="flex flex-wrap gap-2" aria-label="Trash pages">
+                  {#if trashPageIndex > 0}<Button variant="outline" size="sm" disabled={trashLoading || trashBusy} aria-label="Previous page" aria-busy={trashLoading && trashPaging === 'previous'} onclick={() => pageTrash('previous')}>{trashLoading && trashPaging === 'previous' ? 'Loading…' : 'Previous page'}</Button>{/if}
+                  {#if trashHasMore}<Button variant="outline" size="sm" disabled={trashLoading || trashBusy} aria-label="Next page" aria-busy={trashLoading && trashPaging === 'next'} onclick={() => pageTrash('next')}>{trashLoading && trashPaging === 'next' ? 'Loading…' : 'Next page'}</Button>{/if}
+                </nav>
               {/if}
             </section>
 

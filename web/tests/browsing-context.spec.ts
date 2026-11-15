@@ -39,7 +39,7 @@ async function backend(page: Page, administrator = false) {
       return json({ items: search ? items.map(entry => ({ entry, location: [root, child] })) : url.pathname.includes('/root/') ? [child, ...items] : items, next_cursor: cursor ? null : 'page-two', has_more: !cursor });
     }
     if (/^\/entries\/[^/]+\/content$/.test(url.pathname)) return route.fulfill({ contentType: 'text/plain', body: 'hello' });
-    if (url.pathname === '/trash') return json({ items: [] });
+    if (url.pathname === '/trash') return json({ items: [], next_cursor: null, has_more: false });
     return route.continue();
   });
   return { requests, stale: (status: 400 | 409) => { stale = status; }, missing: () => { missing = true; } };

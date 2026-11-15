@@ -220,16 +220,49 @@ export class MockTransport implements ApiTransport {
       this.entries = [...this.entries, folder]; this.bump(parentId);
       return folder as T;
     }
-    if (route === '/trash' && method === 'GET') return { items: this.deletedEntries.map((entry) => {
-      const original_path: string[] = [];
-      let parentId = entry.parent_id;
-      while (parentId && parentId !== root.id) {
-        const parent = [...this.entries, ...this.deletedEntries].find((item) => item.id === parentId);
-        if (!parent) throw new Error('Missing parent');
-        original_path.unshift(parent.name); parentId = parent.parent_id;
+    if (route === '/trash' && method === 'GET') {
+      if (!this.user) throw new HttpError(401);
+      const params = new URLSearchParams(path.split('?')[1]);
+      const limit = Number(params.get('limit') ?? '100');
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new HttpError(400);
+      const compare = (a: string, b: string) => {
+        const left = new TextEncoder().encode(a), right = new TextEncoder().encode(b);
+        for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i] - right[i];
+        return left.length - right.length;
+      };
+      const sorted = [...this.deletedEntries].sort((a, b) => compare(a.name, b.name) || compare(a.id, b.id));
+      const metadata = JSON.stringify([this.root, this.entries, this.deletedEntries]);
+      let fingerprint = 2166136261;
+      for (const byte of new TextEncoder().encode(metadata)) fingerprint = Math.imul(fingerprint ^ byte, 16777619) >>> 0;
+      let offset = 0;
+      if (params.has('cursor')) {
+        let cursor: { account: string; offset: number; fingerprint: number };
+        try { cursor = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(params.get('cursor')!), char => char.charCodeAt(0)))); }
+        catch { throw new HttpError(400); }
+        if (!cursor || cursor.account !== this.user.id || !Number.isInteger(cursor.offset) || cursor.offset < 1) throw new HttpError(400);
+        if (cursor.fingerprint !== fingerprint) throw new HttpError(409, { code: 'listing_changed', message: 'Trash changed', request_id: 'mock' });
+        if (cursor.offset >= sorted.length) throw new HttpError(400);
+        offset = cursor.offset;
       }
-      return { ...entry, original_path };
-    }) } as T;
+      const items = sorted.slice(offset, offset + limit).map(entry => {
+        const original_path: string[] = [];
+        const seen = new Set<string>();
+        let parentId = entry.parent_id;
+        while (parentId && parentId !== root.id) {
+          if (seen.has(parentId)) throw new Error('Folder cycle');
+          seen.add(parentId);
+          const parent = [...this.entries, ...this.deletedEntries].find(item => item.id === parentId);
+          if (!parent) throw new Error('Missing parent');
+          original_path.unshift(parent.name); parentId = parent.parent_id;
+        }
+        const needs_reference = sorted.some(other => other.id !== entry.id && other.name === entry.name && other.parent_id === entry.parent_id);
+        return { ...entry, original_path, ...(needs_reference ? { needs_reference: true } : {}) };
+      });
+      const end = offset + items.length;
+      const has_more = end < sorted.length;
+      const next_cursor = has_more ? btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify({ account: this.user.id, offset: end, fingerprint })))) : null;
+      return { items, next_cursor, has_more } as T;
+    }
     if (route.startsWith('/trash/') && route.endsWith('/restore') && method === 'POST') {
       const id = decodeURIComponent(route.split('/')[2]!);
       const item = this.deletedEntries.find((entry) => entry.id === id);
