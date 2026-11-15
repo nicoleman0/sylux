@@ -1440,14 +1440,9 @@
   }
 
   async function freshUploadFolder(folder: Folder): Promise<Folder> {
-    if (!folder.parent_id) return (await listing.roots()).root;
-    let cursor: string | null = null;
-    do {
-      const page = await listing.children(folder.parent_id, cursor);
-      const descriptor = page.items.find((entry): entry is Folder => entry.id === folder.id && entry.kind === 'folder');
-      if (descriptor) return descriptor;
-      cursor = page.next_cursor;
-    } while (cursor);
+    const path = await listing.path(folder.id);
+    const descriptor = path.items.at(-1);
+    if (descriptor?.id === folder.id) return descriptor;
     throw new Error('The upload destination is no longer available.');
   }
 
@@ -1717,9 +1712,9 @@
     progress = 100; transferPhase = 'complete';
     if (uploadBatchBusy) {
       if (batchActive?.kind === 'file') batchActive.status = 'saved';
-      uploadBatchStage = 'Refreshing files';
     }
     uploadNotice = uploadReplacement ? 'Replacement complete. The previous file is in trash. Rename the current file before restoring the previous one.' : '';
+    if (uploadBatchBusy) return;
     try { if (!await refreshRoot()) return; } catch { /* Keep the confirmed commit outcome visible. */ }
     if (generation !== sessionGeneration) return;
     await refresh();
@@ -1775,7 +1770,7 @@
     const uploadController = new AbortController();
     controller = uploadController;
     try {
-      if (!await refreshRoot() || (uploadBatchBusy && uploadBatchCanceled)) return committed;
+      if (uploadBatchBusy ? uploadBatchCanceled : !await refreshRoot()) return committed;
       const targetFolder = folder;
       const admission = await activeTransfers.admit(targetFolder.id, file.name, file.size, targetFolder.etag, (id) => { if (generation === sessionGeneration) uploadId = id; }, replacement);
       if (generation !== sessionGeneration) return committed;

@@ -37,6 +37,12 @@ async function backend(page: Page, fault?: { name: string; outcome: 'failed' | '
     if (path === '/instance') return json({ name: 'Sylux' });
     if (path === '/auth/csrf') return json({ csrf_token: 'csrf' });
     if (path === '/auth/local') return json({ account_id: 'owner', handle: 'owner', role });
+    if (/^\/folders\/[^/]+\/path$/.test(path)) {
+      const items: TestEntry[] = [];
+      let entry: TestEntry | undefined = folder(path.split('/')[2]!);
+      while (entry) { items.unshift(entry); entry = entry.parent_id ? folder(entry.parent_id) : undefined; }
+      return items[0]?.id === root.id ? json({ items }) : json({ code: 'not_found' }, 404);
+    }
     if (path === '/folders/children' && request.method() === 'GET') return json({ root, items: entries.filter(entry => entry.parent_id === 'root'), next_cursor: null, has_more: false });
     if (path === '/folders/children' && request.method() === 'POST') {
       const body = request.postDataJSON() as { parent_id: string; name: string };
@@ -771,7 +777,7 @@ test('all bytes sent never implies completion when the final save outcome is unk
   expect(store.sent).toEqual(['saved.txt', 'unknown.txt']);
 });
 
-test('confirmed save counts update while the post-commit listing refresh is held', async ({ page }) => {
+test('confirmed save counts update while final batch revalidation is held', async ({ page }) => {
   const store = await backend(page);
   const gate = deferred();
   await page.route('**/folders/children*', async route => {
@@ -780,11 +786,11 @@ test('confirmed save counts update while the post-commit listing refresh is held
   });
   await desktopDrop(page, current(page), [{ name: 'confirmed.txt' }, { name: 'after.txt' }]);
   const panel = page.locator('.upload-batch-progress');
-  await expect(panel).toContainText('1 of 2 files saved');
+  await expect(panel).toContainText('2 of 2 files saved');
   await expect(panel).toContainText('Refreshing files:');
-  await expect(panel.locator('.upload-current-path')).toHaveText('confirmed.txt');
-  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toContainText('1 of 2 files saved');
-  expect(store.sent).toEqual(['confirmed.txt']);
+  await expect(panel.locator('.upload-current-path')).toHaveText('after.txt');
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toContainText('2 of 2 files saved');
+  expect(store.sent).toEqual(['confirmed.txt', 'after.txt']);
   gate.resolve();
   await expect(completed(page)).toBeAttached();
 });
@@ -971,7 +977,7 @@ for (const failure of ['unavailable', 'changed-session']) {
     const inspection = deferred();
     const started = deferred();
     let held = false;
-    await page.route('**/folders/children?*', async route => {
+    await page.route('**/folders/root/path', async route => {
       if (!held) { held = true; started.resolve(); await inspection.promise; }
       if (failure === 'unavailable') await route.abort('failed');
       else await route.fallback();
@@ -1014,4 +1020,102 @@ test('a bulk completion replaces the preceding upload acknowledgement', async ({
   await page.getByRole('dialog').getByRole('button', { name: 'Move here', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Move results' }).getByRole('status')).toHaveText('Moved to Destination');
   await expect(completed(page)).toHaveCount(0);
+});
+
+for (const width of [1280, 390]) {
+  test(`batch refreshes listings once and reads fresh destination descriptors at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    if (width === 390) await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' });
+    const store = await backend(page);
+    const requests: string[] = [];
+    page.on('request', request => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === 'GET' && path.startsWith('/folders/')) requests.push(path);
+    });
+    await page.getByLabel('Choose files to upload').setInputFiles(Array.from({ length: 60 }, (_, n) => ({ name: `batch-${n}.txt`, mimeType: 'text/plain', buffer: Buffer.from('contents') })));
+    await expect(completed(page)).toHaveText('60 items uploaded');
+    await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
+    expect(store.sent).toHaveLength(60);
+    expect(requests.filter(path => path === '/folders/root/path')).toHaveLength(60);
+    expect(requests.filter(path => path.endsWith('/children'))).toEqual(['/folders/children', '/folders/root/children']);
+    await expect(page.getByRole('article', { name: 'batch-59.txt', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
+    await expect(completed(page)).toHaveCount(0);
+  });
+}
+
+for (const failure of ['removed', 'expired', 'changed-after-read'] as const) {
+  test(`batch stops before later bytes when destination is ${failure}`, async ({ page }) => {
+    const store = await backend(page);
+    let reads = 0;
+    await page.route('**/folders/root/path', async route => {
+      if (++reads === 1 || failure === 'changed-after-read') return route.fallback();
+      return route.fulfill({ status: failure === 'expired' ? 401 : 404, json: { code: failure === 'expired' ? 'unauthorized' : 'not_found' } });
+    });
+    if (failure === 'changed-after-read') await page.route('**/uploads', route => {
+      return store.sent.length ? route.fulfill({ status: 412, json: { code: 'stale_parent_etag' } }) : route.fallback();
+    });
+    await desktopDrop(page, current(page), [{ name: 'first.txt' }, { name: 'second.txt' }, { name: 'after.txt' }]);
+    if (failure === 'expired') await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+    else {
+      await expect(summary(page)).toContainText('Upload stopped');
+      await expect(page.locator('[data-upload-result="first.txt"]')).toContainText('Saved');
+      await expect(page.locator('[data-upload-result="after.txt"]')).toContainText('Not attempted');
+    }
+    expect(store.sent).toEqual(['first.txt']);
+  });
+}
+
+test('navigation during a held descriptor read preserves destination and final feedback', async ({ page }) => {
+  const store = await backend(page);
+  const gate = deferred();
+  let reads = 0;
+  await page.route('**/folders/destination/path', async route => {
+    if (++reads === 2) await gate.promise;
+    return route.fallback();
+  });
+  await desktopDrop(page, page.getByRole('article', { name: 'Destination', exact: true }), [{ name: 'first.txt' }, { name: 'second.txt' }]);
+  await expect.poll(() => reads).toBe(2);
+  await page.getByRole('button', { name: 'Account', exact: true }).click();
+  await expect(page.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
+  gate.resolve();
+  await expect(completed(page)).toHaveText('2 items uploaded');
+  expect(store.events).toEqual([{ kind: 'file', name: 'first.txt', parent: 'destination' }, { kind: 'file', name: 'second.txt', parent: 'destination' }]);
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await expect(completed(page)).toHaveCount(0);
+});
+
+test('cancel during destination lookup sends no later ticket or bytes', async ({ page }) => {
+  const store = await backend(page);
+  const gate = deferred(); const started = deferred();
+  let reads = 0; let tickets = 0;
+  page.on('request', request => { if (new URL(request.url()).pathname === '/mutation-tickets') tickets++; });
+  await page.route('**/folders/root/path', async route => {
+    if (++reads === 2) { started.resolve(); await gate.promise; }
+    return route.fallback();
+  });
+  await desktopDrop(page, current(page), [{ name: 'first.txt' }, { name: 'second.txt' }, { name: 'after.txt' }]);
+  await started.promise;
+  await page.getByRole('button', { name: 'Cancel upload', exact: true }).click();
+  gate.resolve();
+  await expect(summary(page)).toContainText('Upload stopped');
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
+  expect(tickets).toBe(1);
+  expect(store.sent).toEqual(['first.txt']);
+});
+
+test('a moved nested destination retains its ID and uses its current descriptor', async ({ page }) => {
+  const store = await backend(page);
+  const destination = store.entries.find(entry => entry.id === 'inner')!;
+  let reads = 0;
+  await page.route('**/folders/inner/path', route => {
+    if (++reads === 2) { destination.parent_id = 'root'; destination.etag = '"inner:moved"'; }
+    return route.fallback();
+  });
+  await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await desktopDrop(page, page.getByRole('article', { name: 'Inner', exact: true }), [{ name: 'first.txt' }, { name: 'second.txt' }]);
+  await expect(completed(page)).toHaveText('2 items uploaded');
+  expect(store.events).toEqual([{ kind: 'file', name: 'first.txt', parent: 'inner' }, { kind: 'file', name: 'second.txt', parent: 'inner' }]);
+  expect(reads).toBe(2);
 });
