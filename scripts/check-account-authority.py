@@ -57,12 +57,16 @@ def main():
     parser.add_argument('--jar', default=os.environ.get('TLA2TOOLS'))
     parser.add_argument('--java', default=os.environ.get('JAVA', 'java'))
     parser.add_argument('--download', action='store_true', help='fetch the pinned JAR if missing')
-    parser.add_argument('--output', required=True, type=Path, help='new evidence directory')
+    parser.add_argument('--sources-only', action='store_true', help='verify source correspondence without running TLC')
+    parser.add_argument('--output', type=Path, help='new evidence directory')
     args = parser.parse_args()
-    if not args.jar:
-        parser.error('set TLA2TOOLS or --jar to the TLC JAR path')
     coverage = json.loads((MODEL / 'coverage.json').read_text())
     check_sources(ROOT, coverage)
+    if args.sources_only:
+        print('Authority source correspondence matches reviewed hashes')
+        return
+    if not args.jar or not args.output:
+        parser.error('set --output and TLA2TOOLS or --jar to run TLC')
     pin = json.loads((ROOT / 'verification/tlc.json').read_text())
     jar = Path(args.jar).expanduser().resolve()
     prepare_jar(jar, pin, args.download)

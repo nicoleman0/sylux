@@ -1,0 +1,38 @@
+name: CI syntax parsers
+description: Install only the parsers needed to prove a comment-only change.
+inputs:
+  needs-node:
+    default: 'false'
+    description: Load the locked TypeScript and Svelte parsers.
+  needs-shfmt:
+    default: 'false'
+    description: Load the pinned shell parser.
+runs:
+  using: composite
+  steps:
+    - if: inputs.needs-node == 'true'
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version-file: .nvmrc
+        cache: npm
+        cache-dependency-path: web/package-lock.json
+    - if: inputs.needs-node == 'true'
+      shell: bash
+      run: |
+        npm install --global npm@11.19.1
+        npm --prefix web ci --ignore-scripts
+    - if: inputs.needs-shfmt == 'true'
+      id: shfmt-cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/ci-tools/shfmt
+        key: ci-shfmt-v3.12.0-${{ runner.os }}-${{ runner.arch }}
+    - if: inputs.needs-shfmt == 'true' && steps.shfmt-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GOBIN: ${{ runner.temp }}/ci-tools
+        GOCACHE: ${{ runner.temp }}/ci-go-build
+      run: go install mvdan.cc/sh/v3/cmd/shfmt@v3.12.0
+    - if: inputs.needs-shfmt == 'true'
+      shell: bash
+      run: echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"

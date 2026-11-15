@@ -16,7 +16,12 @@ for tool in cargo npm node python3; do
 done
 
 # build.rs embeds web/dist, so build assets before Cargo checks.
+run python3 scripts/test-ci-changes.py
+run python3 scripts/test-ci-workflow.py
+run python3 scripts/test-ci-comment-structured.py
+run python3 scripts/test-account-authority-check.py
 run npm --prefix web ci
+run node --test scripts/test-ci-comment-syntax.mjs
 run node --test tools/test-browser-screenshot-paths.mjs
 run npm --prefix web run check
 run npm --prefix web run build
@@ -26,7 +31,7 @@ run cargo clippy --locked --all-targets -- -D warnings
 run cargo test --locked --features test-harness --test contract_setup_auth --test integration_revocation
 run cargo test --locked --features test-harness --test performance_fixture -- --list
 run cargo test --locked
-run cargo test --locked --features test-harness --test integration_admin_recovery --test contract_setup_auth --test integration_binding --test integration_local_lifecycle
+run cargo test --locked --features test-harness --test integration_admin_recovery --test integration_binding --test integration_local_lifecycle
 run cargo build --locked
 
 run npm --prefix web run audit:dependencies
