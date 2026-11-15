@@ -174,6 +174,37 @@ match. A held writer lock means the service still needs to stop. If the command
 reports an uncertain commit, restart and test the new credentials before another
 reset; do not retry automatically.
 
+## Verify stored payloads
+
+This checks that every stored payload still matches the length and SHA-256
+recorded for it. Stop Sylux first. The command refuses to run while the service
+holds the root, and it does not write to payloads or metadata.
+
+```sh
+docker compose stop || exit 1
+RUNNING=$(docker compose ps --status running -q) || exit 1
+test -z "$RUNNING" || exit 1
+docker compose run --rm -T sylux admin verify-payloads --root /var/lib/sylux
+```
+
+Use an image built from a release that includes `admin verify-payloads`.
+
+- Exit 0: every payload matched. Output ends with
+  `payload_verification checked=N verified=N damaged=0`.
+- Exit 1: at least one payload is damaged, or the command could not run. Each
+  damaged payload prints `damaged blob=<blob id> reason=<reason>`. Reasons are
+  `missing`, `length_mismatch` (truncated or extended), `digest_mismatch`
+  (same length, different bytes), `not_private_file` and `unreadable`.
+- Output has blob IDs and counts only: no paths, file names or account handles.
+- Run time is one full read of all payloads.
+
+Limits: it reports and never repairs. A pass means the bytes matched at the time
+of the run. It says nothing about later damage, power-loss durability or the
+backup. Restore damaged payloads from a verified archive (step 4). Payload
+files with no metadata row are not checked here; startup reconciliation covers
+them. The command leaves any existing `-wal` unchanged and may create an empty
+`-wal` and a `-shm` in `metadata/`.
+
 ## 5. Upgrade and roll back
 
 Keep the current release archive, `.env`, and local image ID. Stop the service and make a verified pre-upgrade archive as in step 4 **without starting it again**. Download and verify all assets for the new release into a new directory as in step 1, then load and inspect its version tag. Copy the prior `.env` into the new directory, set `SYLUX_IMAGE` to the newly inspected local ID, run `docker compose config -q`, and start there with `docker compose up -d`. Check sign-in and known file downloads.

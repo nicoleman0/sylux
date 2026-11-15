@@ -10,6 +10,7 @@ pub enum CommandKind {
     Init,
     Serve,
     AdminResetPassword,
+    AdminVerifyPayloads,
 }
 
 #[derive(Debug)]
@@ -56,14 +57,11 @@ where
     let command = match arguments.next().as_deref().and_then(|value| value.to_str()) {
         Some("init") => CommandKind::Init,
         Some("serve") => CommandKind::Serve,
-        Some("admin") => {
-            if arguments.next().as_deref().and_then(|value| value.to_str())
-                != Some("reset-password")
-            {
-                return Err(ConfigError::Usage("admin_subcommand_required"));
-            }
-            CommandKind::AdminResetPassword
-        }
+        Some("admin") => match arguments.next().as_deref().and_then(|value| value.to_str()) {
+            Some("reset-password") => CommandKind::AdminResetPassword,
+            Some("verify-payloads") => CommandKind::AdminVerifyPayloads,
+            _ => return Err(ConfigError::Usage("admin_subcommand_required")),
+        },
         _ => return Err(ConfigError::Usage("subcommand_required")),
     };
     let mut admin_handle = None;
@@ -78,9 +76,13 @@ where
         let flag = argument
             .to_str()
             .ok_or(ConfigError::Usage("argument_not_utf8"))?;
-        if command == CommandKind::AdminResetPassword
-            && !matches!(flag, "--root" | "--handle" | "--password-stdin")
-        {
+        // Offline admin commands accept only their own flags.
+        let allowed: Option<&[&str]> = match command {
+            CommandKind::AdminResetPassword => Some(&["--root", "--handle", "--password-stdin"]),
+            CommandKind::AdminVerifyPayloads => Some(&["--root"]),
+            CommandKind::Init | CommandKind::Serve => None,
+        };
+        if allowed.is_some_and(|flags| !flags.contains(&flag)) {
             return Err(ConfigError::Usage("unknown_argument"));
         }
         match flag {
@@ -148,7 +150,7 @@ where
     }
     let listen = listen
         .or_else(|| {
-            (command != CommandKind::AdminResetPassword)
+            matches!(command, CommandKind::Init | CommandKind::Serve)
                 .then(|| env::var("SYLUX_LISTEN").ok())
                 .flatten()
         })
@@ -313,6 +315,29 @@ mod tests {
         ] {
             let mut input = base.to_vec();
             input.extend(extra);
+            assert_eq!(parse(args(&input)).unwrap_err().reason(), reason);
+        }
+    }
+
+    #[test]
+    fn verify_payloads_parser_accepts_only_root() {
+        let parsed = parse(args(&["admin", "verify-payloads", "--root", "/x"])).unwrap();
+        assert_eq!(parsed.command, CommandKind::AdminVerifyPayloads);
+        for (input, reason) in [
+            (vec!["admin", "verify-payloads"], "root_required"),
+            (
+                vec!["admin", "verify-payloads", "--root", "/x", "--handle", "h"],
+                "unknown_argument",
+            ),
+            (
+                vec!["admin", "verify-payloads", "--root", "/x", "--listen", "x"],
+                "unknown_argument",
+            ),
+            (
+                vec!["admin", "verify-payloads", "--root", "/x", "--root", "/y"],
+                "duplicate_root",
+            ),
+        ] {
             assert_eq!(parse(args(&input)).unwrap_err().reason(), reason);
         }
     }
