@@ -1249,7 +1249,7 @@ test('file options toggle, switch rows, and dismiss from outside or Escape', asy
   await options.click({ timeout: 3000 });
   await expect(page.getByRole('menu')).toHaveCount(0);
   await folderOptions.click({ timeout: 3000 });
-  await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible();
   await options.click({ timeout: 3000 });
   await expect(folderOptions).toHaveAttribute('aria-expanded', 'false');
   await expect(options).toHaveAttribute('aria-expanded', 'true');
