@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod archives;
 pub mod assets;
 pub mod auth;
 pub mod content;
@@ -40,6 +41,10 @@ pub struct AuthState {
     pub coordinator: MutationCoordinator,
     pub storage: Option<Arc<UploadStorage>>,
     pub instance_settings: Option<Arc<crate::persistence::instance::InstanceSettings>>,
+    pub archive_tickets: Arc<Mutex<archives::ArchiveTickets>>,
+    /// Held by each live archive body and payload verification; tests count the holders.
+    #[cfg(feature = "test-harness")]
+    pub archive_activity: Arc<()>,
     #[cfg(feature = "test-harness")]
     pub upload_cancel_test_barrier: Option<Arc<uploads::UploadCancelTestBarrier>>,
     #[cfg(feature = "test-harness")]
@@ -66,6 +71,9 @@ impl AuthState {
             coordinator,
             storage: None,
             instance_settings: None,
+            archive_tickets: Arc::default(),
+            #[cfg(feature = "test-harness")]
+            archive_activity: Arc::default(),
             #[cfg(feature = "test-harness")]
             upload_cancel_test_barrier: None,
             #[cfg(feature = "test-harness")]
@@ -150,6 +158,8 @@ pub fn router(state: AuthState) -> Router {
         )
         .route("/uploads/{id}/content", put(uploads::content))
         .route("/uploads/{id}/commit", post(uploads::commit))
+        .route("/archives", post(archives::issue))
+        .route("/archives/{token}", get(archives::download))
         .route(
             "/entries/{id}/content",
             get(content::get).head(content::head),

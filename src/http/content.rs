@@ -116,7 +116,7 @@ fn now() -> i64 {
         .min(i64::MAX as u64) as i64
 }
 
-fn attachment_filename(name: &str) -> String {
+pub(super) fn attachment_filename(name: &str) -> String {
     let mut fallback = name
         .chars()
         .map(|character| {

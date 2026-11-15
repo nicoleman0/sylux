@@ -1,0 +1,9 @@
+# Folder and selection downloads
+
+Select files and folders, or open a folder's Options menu, and choose **Download** to save them as one ZIP. Single files keep their direct download. The archive keeps folder structure and includes empty folders. When a selection contains a folder and an item inside it, the folder covers both.
+
+`POST /archives` takes `{"entry_ids": [...]}` with the session cookie, matching `Origin` and `X-CSRF-Token`. It checks the selection and returns `201` with `url`, `name` and `entry_count`. The `url` is a single-use `GET /archives/{ticket}` link for the same session, valid for 60 seconds. Each account may hold 4 unused tickets; more return `429 archive_busy`. The browser navigates to the link and streams the archive to disk.
+
+Both requests resolve the selection in one database snapshot. The `GET` fixes the member list before streaming. Items must be active and have an active same-owner path to the private root; unknown, foreign, deleted and hidden items, and the private root, all return `404 entry_not_found`. A selection over 10,000 entries (files plus folders, including the selected items) returns `422 archive_entry_limit` with `limit`. Selected items become top-level members by name, so two with the same name from different folders return `409 archive_name_conflict`; nested paths stay unique because sibling names are unique.
+
+Members use the stored method without compression. ZIP64 fields apply where sizes or offsets reach 4 GiB. Each payload passes the same length and SHA-256 verification as direct downloads before its bytes are sent, and CRC-32 is computed while streaming. If a payload is missing or fails verification mid-stream, the response ends without the central directory and the browser reports a failed download. Closing the download drops the stream and stops any payload verification in progress. Downloads cannot resume.

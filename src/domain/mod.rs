@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod authz;
 pub mod coordinator;
 #[cfg(feature = "test-harness")]
@@ -8,3 +9,4 @@ pub mod names;
 pub mod namespace;
 pub mod search;
 pub mod upload;
+pub mod zip;
