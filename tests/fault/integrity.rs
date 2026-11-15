@@ -1,4 +1,4 @@
-//! F07 referenced-payload faults must block reconciliation and startup.
+//! Referenced-payload faults must block reconciliation and startup.
 #[path = "../common/mod.rs"]
 mod common;
 

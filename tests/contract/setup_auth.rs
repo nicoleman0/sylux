@@ -1,9 +1,4 @@
-//! PoC P3 real HTTP + SQLite local-auth contracts.
-//!
-//! The server is the real product router on an ephemeral loopback TCP
-//! listener. The only harness-only operation is direct seeding/mutation of a
-//! disposable product database. The staged-mutation revoke race belongs to P5
-//! and is deliberately not claimed here.
+//! Local-auth contracts over the real product router and SQLite.
 #[path = "../common/mod.rs"]
 mod common;
 

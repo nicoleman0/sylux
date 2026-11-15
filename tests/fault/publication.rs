@@ -1,10 +1,6 @@
-//! Ordered S1 payload publication fault contracts.
-//!
-//! Hook-injected failures below are deterministic seam faults, not kernel or
-//! filesystem failures. The collision test is exercised against the real local
-//! filesystem. Short writes and actual EXDEV/EIO/ENOSPC/unsupported-filesystem
-//! behavior are deferred to T031's bounded disposable quota/VFS qualification:
-//! this hook cannot wrap Write and this test must not consume host disk.
+//! Publication fault contracts. Injected seam faults are not kernel or filesystem faults.
+//! Collision is tested on the local filesystem; short writes and real filesystem
+//! errors require separate disposable quota/VFS qualification.
 #[path = "../common/mod.rs"]
 mod common;
 

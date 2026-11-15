@@ -1,4 +1,3 @@
-//! H0 test primitives. Imported only by explicitly feature-gated integration targets.
 #![cfg(feature = "test-harness")]
 #![allow(dead_code)]
 
@@ -33,10 +32,7 @@ fn identity(file: &File) -> std::io::Result<(u64, u64)> {
     Ok((m.dev(), m.ino()))
 }
 
-/// An owned directory under the configured scratch directory. No implicit Drop deletion.
-/// Open descriptors pin the parent, root and marker identity. Only registered, explicitly
-/// joined workers can release cleanup leases; dropping a lease conservatively retains it.
-/// Like the product failure model, this assumes no hostile same-UID host operator.
+/// Cleanup uses pinned descriptors and requires every worker to join. Drop retains data.
 pub struct FixtureRoot {
     path: PathBuf,
     parent: File,
@@ -445,8 +441,7 @@ pub fn unique_token() -> String {
     hex_bytes(&bytes)
 }
 
-/// Persist only allowlisted metadata. Entire headers/bodies/URLs/errors are discarded,
-/// not regex-scrubbed after a secret-bearing raw trace has already been retained.
+/// Allowlist metadata before recording; never retain raw headers, bodies, URLs or errors.
 #[derive(Serialize)]
 pub struct SanitizedExchange {
     status: u16,

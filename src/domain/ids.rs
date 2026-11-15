@@ -1,4 +1,4 @@
-//! Validated opaque identifiers used by mutation records and signed tickets.
+//! Validated identifiers used by mutation records and tickets.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use getrandom::fill;
@@ -53,8 +53,7 @@ impl PrincipalId {
     }
 }
 
-/// A principal plus its server-random operation ID, matching the durable
-/// mutation uniqueness boundary rather than treating the operation ID as global.
+/// Principal-scoped mutation identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScopedMutationId {
     principal: PrincipalId,
@@ -182,8 +181,7 @@ pub const MAX_TICKET_LENGTH: usize = 512;
 const MAX_PAYLOAD_LENGTH: usize = 187;
 const TICKET_DOMAIN: &[u8] = b"sylux\x00mutation-ticket\x00v1\x00";
 
-/// A protected 256-bit HMAC key. Its ID is public key-routing metadata; the
-/// secret has no `Debug`, Clone or accessor implementation.
+/// Protected HMAC key. The secret has no `Debug`, `Clone` or accessor.
 pub struct TicketSigningKey {
     id: TicketKeyId,
     secret: [u8; 32],
@@ -199,8 +197,7 @@ impl TicketSigningKey {
     }
 }
 
-/// Expected current authority and execution context. Callers still compare the
-/// returned `ScopedMutationId` with any operation ID present in route/storage.
+/// Expected current authority and execution context.
 pub struct TicketExpectation<'a> {
     principal: &'a PrincipalId,
     scope: &'a MutationScope,
@@ -224,10 +221,8 @@ impl<'a> TicketExpectation<'a> {
     }
 }
 
-/// An authenticated, versioned server-issued mutation ticket.
-///
-/// Expiry rejects new execution only. It is not a retention deadline and never
-/// authorizes expiring, evicting or sweeping an unresolved mutation record.
+/// Authenticated, versioned server-issued mutation ticket.
+/// Expiry rejects new execution; it does not expire unresolved records.
 #[derive(PartialEq, Eq)]
 pub struct MutationTicket {
     scoped_id: ScopedMutationId,
@@ -255,8 +250,8 @@ impl std::fmt::Debug for MutationTicket {
 }
 
 impl MutationTicket {
-    /// Issue a fresh server-random operation ID and sign its complete scope.
-    /// `expires_at` is exclusive; no clock skew is accepted at validation.
+    /// Issue a fresh operation ID and sign its complete scope.
+    /// `expires_at` is exclusive.
     pub fn issue(
         principal: PrincipalId,
         scope: MutationScope,
@@ -294,8 +289,7 @@ impl MutationTicket {
         Ok(ticket)
     }
 
-    /// Authenticate the envelope before applying caller scope, epoch or clock
-    /// checks. Unknown keys and every time uncertainty fail closed.
+    /// Authenticate before checking scope, epoch or time. Unknown keys fail closed.
     pub fn validate(
         encoded: &str,
         expectation: &TicketExpectation<'_>,

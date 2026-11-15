@@ -1,7 +1,4 @@
-//! Stable mutation failure classes. Internal driver details stay behind this boundary.
-//!
-//! No class is a retry signal. In particular, an active or unknown transaction
-//! requires durable read-back/recovery, never blind repetition of domain effects.
+//! Uncertain outcomes require read-back or recovery, never blind retries.
 
 use crate::persistence::sqlite::{TransactionError, WorkerError};
 use axum::http::StatusCode;
@@ -27,9 +24,7 @@ impl MutationFailure {
             WorkerError::Transaction(TransactionError::Active(_)) => Self::TransactionActive,
             WorkerError::Transaction(TransactionError::Unknown(_)) => Self::CommitOutcomeUnknown,
             WorkerError::QueueFull | WorkerError::Query(_) => Self::AdmissionUnavailable,
-            // These variants do not prove whether an accepted job ran. Keep the
-            // conservative unknown classification even when closure may have
-            // preceded submission; the worker API does not carry that phase.
+            // The worker API does not identify whether failure preceded execution.
             WorkerError::Closed | WorkerError::Panicked | WorkerError::InvalidResponse => {
                 Self::OperationOutcomeUnknown
             }

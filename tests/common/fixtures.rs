@@ -138,7 +138,6 @@ impl Read for FixtureStream {
 }
 
 /// Declarative identities only, not an alternate DB writer or production seed route.
-/// H1 must later adapt these through reviewed constraints while stopped/owned.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SeedAccount {
     pub account_id: String,

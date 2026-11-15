@@ -1,4 +1,4 @@
-//! T027 compares actual release function symbols for default and test-harness builds.
+//! Compare release function symbols for default and test-harness builds.
 use std::{fs, path::PathBuf, process::Command};
 
 fn project_root() -> PathBuf {

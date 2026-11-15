@@ -1,4 +1,3 @@
-# Linux amd64 beta build; base image indexes are pinned.
 FROM node:24.22.2-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS web-build
 WORKDIR /src
 RUN npm install --global npm@11.19.1
@@ -17,7 +16,6 @@ COPY migrations/ ./migrations/
 COPY tests/ ./tests/
 COPY tools/ ./tools/
 COPY --from=web-build /src/web/dist/ ./web/dist/
-# Cache mounts keep rebuilds incremental; the binary is copied out of the cached target.
 RUN --mount=type=cache,target=/src/target --mount=type=cache,target=/usr/local/cargo/registry \
     cargo fetch --locked --target x86_64-unknown-linux-gnu \
     && cargo build --locked --release --bin sylux && cp target/release/sylux /sylux \

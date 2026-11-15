@@ -1,25 +1,24 @@
-//! Local password and opaque server-side session primitives.
+//! Local password and server-side session primitives.
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
-/// Maximum accepted password length, measured in bytes. Reject rather than truncate.
+/// Maximum accepted password length in bytes.
 pub const MAX_PASSWORD_BYTES: usize = 1024;
 const MIN_PASSWORD_CHARS: usize = 15;
 const MAX_PASSWORD_CHARS: usize = 128;
 
-/// Enforce the local-password input bounds without trimming, normalizing, or
-/// truncating the supplied Unicode string.
+/// Validate password bounds without changing the supplied string.
 pub fn validate_password(password: &str) -> bool {
     let characters = password.chars().count();
     (MIN_PASSWORD_CHARS..=MAX_PASSWORD_CHARS).contains(&characters)
         && password.len() <= MAX_PASSWORD_BYTES
 }
 
-/// Browser session idle lifetime (30 minutes).
+/// Browser session idle lifetime.
 pub const IDLE_SECONDS: i64 = 30 * 60;
-/// Browser session absolute lifetime (12 hours).
+/// Browser session absolute lifetime.
 pub const ABSOLUTE_SECONDS: i64 = 12 * 60 * 60;
 const MAX_PHC_BYTES: usize = 512;
 const MIN_ARGON_MEMORY_KIB: u32 = 19 * 1024;
@@ -28,7 +27,7 @@ const MAX_ARGON_ITERATIONS: u32 = 4;
 const MAX_ARGON_LANES: u32 = 4;
 const MAX_ACTIVE_PASSWORD_CHECKS: usize = 4;
 
-/// Serializes expensive password verification to a small bounded number of workers.
+/// Bounds concurrent password verification work.
 #[derive(Clone)]
 pub struct PasswordLimiter {
     active: Arc<Mutex<usize>>,
@@ -99,8 +98,7 @@ impl PasswordLimiter {
         Argon2::default().verify_password(password, &hash).is_ok()
     }
 
-    /// Verifies the exact supplied bytes against a stored Argon2id PHC verifier.
-    /// PHC resource parameters are rejected before Argon2 can allocate for them.
+    /// Verifies exact password bytes; rejects unsafe PHC parameters before hashing.
     pub fn verify(&self, password: &[u8], encoded: &str) -> bool {
         let Some(_permit) = self.acquire() else {
             return false;
@@ -108,14 +106,12 @@ impl PasswordLimiter {
         self.verify_with_permit(password, encoded)
     }
 
-    /// Runs a real verifier or a dummy verifier for an unknown account through
-    /// the same bounded scheduler. The caller applies the enabled/epoch policy.
+    /// Uses the same bounded path for real and unknown-account verifiers.
     pub fn verify_login(&self, password: &[u8], encoded: Option<&str>) -> bool {
         self.verify(password, encoded.unwrap_or(self.dummy_verifier.as_str()))
     }
 
-    /// Perform expensive password verification on a blocking worker. Admission
-    /// is acquired before enqueueing, so the hashing queue is strictly bounded.
+    /// Run password verification off the async executor with bounded admission.
     pub async fn verify_login_async(&self, password: Vec<u8>, encoded: Option<String>) -> bool {
         let Some(permit) = self.acquire() else {
             return false;
@@ -130,8 +126,7 @@ impl PasswordLimiter {
         .unwrap_or(false)
     }
 
-    /// Hash a supplied password off the async executor under the same global
-    /// bounded Argon2 admission limit used by login verification.
+    /// Hash a password off the async executor under the login admission limit.
     pub async fn hash_password(&self, password: Vec<u8>) -> Option<String> {
         if password.len() > MAX_PASSWORD_BYTES {
             return None;
@@ -150,8 +145,7 @@ impl PasswordLimiter {
     }
 }
 
-/// Validate all live-session invariants from the database. Mutation commit paths
-/// must call this under their serialized commit guard, not rely on an earlier check.
+/// Validate live-session invariants inside the serialized mutation transaction.
 pub fn validate_session(
     connection: &Connection,
     session_id: &str,
@@ -168,8 +162,7 @@ pub fn validate_session(
         .ok()
 }
 
-/// Validate session-bound CSRF material using a constant-time verifier comparison.
-/// Call only after `validate_session` has accepted the same session in this transaction.
+/// Validate session-bound CSRF material after validating that session in this transaction.
 pub fn csrf_matches(connection: &Connection, session_id: &str, csrf: &[u8]) -> bool {
     let stored = connection
         .query_row(

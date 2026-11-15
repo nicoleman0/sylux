@@ -1,5 +1,4 @@
-//! T005/A10/F06 scenario specifications + explicitly labeled H0/kernel controls.
-//! Product coordinator behavior is BLOCKED, not simulated by a test-owned model.
+//! Ownership fault scenarios with explicitly labeled kernel controls.
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -97,8 +96,7 @@ struct ProductReport {
 struct UnsupportedH1H2;
 struct ProductAdapter;
 impl ProductAdapter {
-    /// H1/H2 handoff: replace this with the real coordinator/guard driving H0
-    /// hooks. Unsupported does not trigger faults, return invented events or PASS.
+    /// Unsupported operations do not trigger faults or count as passing evidence.
     fn run(
         scenario: Scenario,
         _faults: &FaultController,

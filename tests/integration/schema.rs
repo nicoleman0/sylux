@@ -1,12 +1,5 @@
-//! PoC P2 (T006/T007 core subset) — root binding support schema checks.
-//!
-//! Everything product-related goes through the product functions
-//! (`sqlite::open_*`, `schema::apply_migrations`, `schema::recovery_checks`);
-//! plain `rusqlite` connections appear only as explicitly labelled HARNESS
-//! negative controls and are never product-policy proof. Full A09/A10/F06
-//! matrices stay with the S1 task cards; this file covers the PoC bar:
-//! constraint enforcement (FK/CHECK/trigger/unique), per-connection PRAGMA
-//! read-back, and migration idempotence.
+//! Root binding schema checks through product functions. Plain `rusqlite`
+//! connections are harness negative controls, not product-policy evidence.
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -103,8 +96,6 @@ fn insert_child(
 fn product_writer_reader_and_reopened_connections_have_verified_pragmas() {
     let (owner, db) = fixture("pragma-readback");
     let writer = sqlite::open_writer(&db, BUSY).expect("product writer connection");
-    // WAL journaling persists in the database file; make it real before
-    // readers verify it.
     assert_eq!(
         schema::apply_migrations(&writer).unwrap(),
         schema::MigrationOutcome::Applied
@@ -117,7 +108,6 @@ fn product_writer_reader_and_reopened_connections_have_verified_pragmas() {
         foreign_keys: sqlite::REQUIRED_FOREIGN_KEYS,
         busy_timeout_ms: 375,
     };
-    // Collect every connection's actual read-back BEFORE comparing policy.
     let actual: Vec<_> = [&writer, &reader_a, &reader_b]
         .into_iter()
         .map(|connection| sqlite::read_back_policy(connection).unwrap())
@@ -232,7 +222,6 @@ fn constraint_parent_must_be_active_same_owner_folder() {
     )
     .unwrap();
 
-    // Cross-owner parent.
     match insert_child(
         &connection,
         &id(23),
@@ -245,7 +234,6 @@ fn constraint_parent_must_be_active_same_owner_folder() {
         Err(error) => assert!(error.to_string().contains("same-owner"), "{error}"),
         Ok(_) => panic!("cross-owner parent accepted"),
     }
-    // Non-folder parent: a file entry cannot receive children.
     insert_child(
         &connection,
         &id(24),
@@ -266,7 +254,6 @@ fn constraint_parent_must_be_active_same_owner_folder() {
         b"inside",
     )
     .unwrap_err();
-    // Missing parent (FK).
     insert_child(&connection, &id(25), &id(10), &id(99), "folder", "x", b"x").unwrap_err();
     // Owner change to a foreign owner is re-validated by trigger.
     connection
@@ -288,14 +275,12 @@ fn constraint_no_ancestry_cycles() {
     insert_child(&connection, &id(22), &id(10), &id(21), "folder", "b", b"b").unwrap();
     insert_child(&connection, &id(23), &id(10), &id(22), "file", "c", b"c").unwrap();
 
-    // Legitimate move stays possible.
     connection
         .execute(
             "UPDATE entry SET parent_id = ?1 WHERE entry_id = ?2",
             params![id(20), id(23)],
         )
         .unwrap();
-    // Moving a folder under its own descendant creates a cycle.
     connection
         .execute(
             "UPDATE entry SET parent_id = ?1 WHERE entry_id = ?2",
@@ -310,7 +295,6 @@ fn constraint_no_ancestry_cycles() {
             params![id(22), id(20)],
         )
         .unwrap_err();
-    // Self-parent on insert.
     insert_child(
         &connection,
         &id(24),
@@ -346,8 +330,6 @@ fn constraint_current_pointer_belongs_to_same_file() {
             params![id(30), id(30)[..2].to_owned(), digest()],
         )
         .unwrap();
-    // Product commit order: file entry (transient null current) -> revision
-    // -> set current, all in one transaction.
     connection.execute("BEGIN IMMEDIATE", []).unwrap();
     insert_child(
         &connection,
@@ -384,15 +366,12 @@ fn constraint_current_pointer_belongs_to_same_file() {
             params![id(32), id(22)],
         )
         .unwrap();
-    // A revision of a different entry cannot become the current pointer.
     connection
         .execute(
             "UPDATE entry SET current_revision_id = ?1 WHERE entry_id = ?2",
             params![id(33), id(22)],
         )
         .unwrap_err();
-    // Inserting an entry that immediately points at a foreign revision is
-    // rejected by the same rule.
     connection
         .execute(
             "INSERT INTO entry (entry_id, owner_account_id, parent_id, kind, original_name, name_key, name_key_version, current_revision_id)
@@ -437,7 +416,6 @@ fn constraint_unique_sibling_keys_across_kinds_and_one_root_per_account() {
         b"A.bin",
     )
     .unwrap();
-    // Case variants coexist across kinds.
     insert_child(
         &connection,
         &id(23),
@@ -448,7 +426,6 @@ fn constraint_unique_sibling_keys_across_kinds_and_one_root_per_account() {
         b"a.bin",
     )
     .unwrap();
-    // Canonically equal keys collide across kinds.
     insert_child(
         &connection,
         &id(24),
@@ -459,7 +436,6 @@ fn constraint_unique_sibling_keys_across_kinds_and_one_root_per_account() {
         b"A.bin",
     )
     .unwrap_err();
-    // A deleted entry frees its name.
     connection
         .execute(
             "UPDATE entry SET state='deleted' WHERE entry_id = ?1",
@@ -476,7 +452,6 @@ fn constraint_unique_sibling_keys_across_kinds_and_one_root_per_account() {
         b"A.bin",
     )
     .unwrap();
-    // Another owner may use the same name under its own root.
     insert_child(
         &connection,
         &id(26),
@@ -487,7 +462,6 @@ fn constraint_unique_sibling_keys_across_kinds_and_one_root_per_account() {
         b"a.bin",
     )
     .unwrap();
-    // Exactly one root per account.
     connection
         .execute(
             "INSERT INTO entry (entry_id, owner_account_id, parent_id, kind, original_name, name_key, name_key_version)
@@ -495,7 +469,6 @@ fn constraint_unique_sibling_keys_across_kinds_and_one_root_per_account() {
             params![id(27), id(10), &b""[..]],
         )
         .unwrap_err();
-    // Roots are unnamed; children cannot have empty names.
     insert_child(&connection, &id(28), &id(10), &id(20), "file", "", b"").unwrap_err();
     drop(connection);
     cleanup(owner);
@@ -507,7 +480,6 @@ fn constraint_checked_columns_reject_invalid_values() {
     insert_account(&connection, &id(10), "owner-a", "user");
     insert_root(&connection, &id(20), &id(10));
 
-    // Handle policy: valid handles pass, invalid ones are rejected.
     for (offset, handle) in ["b", "owner-x", "0123456789._-ab"].into_iter().enumerate() {
         connection
             .execute(
@@ -535,7 +507,6 @@ fn constraint_checked_columns_reject_invalid_values() {
         )
         .unwrap_err();
 
-    // Role, blob lifecycle, entry kind/state, mutation state, event outcome.
     connection
         .execute(
             "INSERT INTO account (account_id, handle, role, enabled, credential_epoch) VALUES (?1, 'x1', 'superuser', 1, 0)",
@@ -589,7 +560,6 @@ fn constraint_checked_columns_reject_invalid_values() {
             params![id(0xabcdef).to_uppercase(), id(10), digest()],
         )
         .unwrap_err();
-    // Expiry before issuance is rejected.
     connection
         .execute(
             "INSERT INTO mutation (mutation_id, principal_account_id, scope, ticket_key_id, ticket_epoch, issued_at, expires_at, admission_fingerprint, state)
@@ -632,9 +602,7 @@ fn constraint_upload_attempt_single_active_writer() {
         )
     };
     insert_attempt(&id(50), 1, 1).unwrap();
-    // A second active stream for the same admission is rejected.
     insert_attempt(&id(51), 2, 1).unwrap_err();
-    // Inactive attempts may coexist; attempt numbers stay unique.
     insert_attempt(&id(52), 2, 0).unwrap();
     connection
         .execute(
@@ -688,7 +656,6 @@ fn foreign_keys_enforced_across_core_tables() {
     let (owner, connection) = product_schema("foreign-keys");
     insert_account(&connection, &id(10), "owner-a", "user");
     insert_root(&connection, &id(20), &id(10));
-    // session -> account
     connection
         .execute(
             "INSERT INTO session (session_id, account_id, credential_epoch, verifier, csrf_verifier, created_at, idle_expires_at, absolute_expires_at)
@@ -696,7 +663,6 @@ fn foreign_keys_enforced_across_core_tables() {
             params![id(60), id(99), digest()],
         )
         .unwrap_err();
-    // mutation -> account
     connection
         .execute(
             "INSERT INTO mutation (mutation_id, principal_account_id, scope, ticket_key_id, ticket_epoch, issued_at, expires_at, admission_fingerprint, state)
@@ -704,7 +670,6 @@ fn foreign_keys_enforced_across_core_tables() {
             params![id(5), id(99), digest()],
         )
         .unwrap_err();
-    // upload_attempt -> mutation
     connection
         .execute(
             "INSERT INTO upload_attempt (attempt_id, mutation_id, attempt_no, staging_path, writer_active)
@@ -712,14 +677,12 @@ fn foreign_keys_enforced_across_core_tables() {
             params![id(50), id(99)],
         )
         .unwrap_err();
-    // event -> account
     connection
         .execute(
             "INSERT INTO event (actor_account_id, action, occurred_at, outcome) VALUES (?1, 'probe', 1, 'ok')",
             params![id(99)],
         )
         .unwrap_err();
-    // revision -> entry / blob / actor
     connection
         .execute(
             "INSERT INTO revision (revision_id, entry_id, blob_id, length, sha256, committed_at, actor_account_id)
@@ -751,7 +714,6 @@ fn foreign_keys_enforced_across_core_tables() {
             params![id(32), id(22), id(30), digest(), id(99)],
         )
         .unwrap_err();
-    // Blob missing entirely.
     connection
         .execute(
             "INSERT INTO revision (revision_id, entry_id, blob_id, length, sha256, committed_at, actor_account_id)
@@ -766,8 +728,6 @@ fn foreign_keys_enforced_across_core_tables() {
 #[test]
 fn valid_seed_passes_product_recovery_checks() {
     let (owner, connection) = product_schema("valid-seed");
-    // A complete, small, valid world through product functions and the same
-    // statements the coordinator will use.
     let identity = sylux::persistence::root::InstallationIdentity {
         installation_id: id(1),
         root_id: id(2),

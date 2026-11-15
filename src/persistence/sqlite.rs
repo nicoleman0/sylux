@@ -1,13 +1,3 @@
-//! Verified SQLite connection policy (s1-design-review §4).
-//!
-//! Every applicable connection — the single dedicated writer and every
-//! bounded reader — is configured with WAL journaling, FULL synchronous
-//! mode, enforced foreign keys and a finite busy timeout, and each setting is
-//! then read back and compared before the connection is returned. SQLite
-//! silently ignores unknown PRAGMAs, so setting alone is not a policy; the
-//! read-back is the verification. A connection whose read-back disagrees is
-//! discarded and no schema change can ever run through it.
-
 use std::{
     any::Any,
     num::NonZeroUsize,
@@ -25,13 +15,9 @@ use tokio::{
     task::JoinHandle,
 };
 
-/// Required persistent journal mode.
 pub const REQUIRED_JOURNAL_MODE: &str = "wal";
-/// `PRAGMA synchronous` read-back value for FULL.
 pub const REQUIRED_SYNCHRONOUS: i64 = 2;
-/// `PRAGMA foreign_keys` read-back value for ON.
 pub const REQUIRED_FOREIGN_KEYS: i64 = 1;
-/// Default finite busy wait (design §7 recommendation: five seconds).
 pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Which product role a connection plays. The writer is opened read-write
@@ -45,7 +31,6 @@ pub enum ConnectionRole {
     Reader,
 }
 
-/// The per-connection policy as SQLite actually reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyReadback {
     pub journal_mode: String,
@@ -90,9 +75,7 @@ fn required_readback(busy_timeout_ms: i64) -> PolicyReadback {
     }
 }
 
-/// Open a connection in the given role and verify its whole policy by
-/// read-back. The database file must already exist: neither role uses
-/// `SQLITE_OPEN_CREATE`.
+/// Open and verify a connection. The database file must already exist.
 pub fn open_connection(
     path: &Path,
     role: ConnectionRole,
@@ -112,12 +95,10 @@ pub fn open_connection(
     Ok(connection)
 }
 
-/// Convenience wrapper for the dedicated writer.
 pub fn open_writer(path: &Path, busy_timeout: Duration) -> Result<Connection, ConnectionError> {
     open_connection(path, ConnectionRole::Writer, busy_timeout)
 }
 
-/// Convenience wrapper for bounded read-only pool connections.
 pub fn open_reader(path: &Path, busy_timeout: Duration) -> Result<Connection, ConnectionError> {
     open_connection(path, ConnectionRole::Reader, busy_timeout)
 }
@@ -134,24 +115,18 @@ fn configure_and_verify(
             "busy timeout must be finite and positive".to_owned(),
         ));
     }
-    // Per-connection settings. `PRAGMA synchronous = FULL` and
-    // `PRAGMA foreign_keys = ON` return no rows.
     connection
         .execute("PRAGMA synchronous = FULL", [])
         .map_err(|error| ConnectionError::Open(error.to_string()))?;
     connection
         .execute("PRAGMA foreign_keys = ON", [])
         .map_err(|error| ConnectionError::Open(error.to_string()))?;
-    // `PRAGMA busy_timeout` returns the new value; the integer is formatted
-    // from a validated i64, never user input.
     connection
         .query_row(&format!("PRAGMA busy_timeout = {busy_ms}"), [], |row| {
             row.get::<_, i64>(0)
         })
         .map_err(|error| ConnectionError::Open(error.to_string()))?;
-    // Journal mode is persistent. The writer enforces WAL (the statement
-    // returns the resulting mode); a reader can only verify that the database
-    // already is in WAL mode.
+    // Journal mode is persistent, so readers verify it without changing it.
     if role == ConnectionRole::Writer {
         connection
             .query_row("PRAGMA journal_mode = WAL", [], |row| {
@@ -159,8 +134,6 @@ fn configure_and_verify(
             })
             .map_err(|error| ConnectionError::Open(error.to_string()))?;
     }
-    // One read-back covers the whole policy; any silent ignore or refused
-    // setting shows up here and fails the connection closed.
     let actual =
         read_back_policy(connection).map_err(|error| ConnectionError::Open(error.to_string()))?;
     if actual != required_readback(busy_ms) {
@@ -169,7 +142,6 @@ fn configure_and_verify(
     Ok(())
 }
 
-/// Read the whole policy back from a connection exactly as SQLite reports it.
 pub fn read_back_policy(connection: &Connection) -> Result<PolicyReadback, rusqlite::Error> {
     Ok(PolicyReadback {
         journal_mode: connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?,
@@ -179,9 +151,7 @@ pub fn read_back_policy(connection: &Connection) -> Result<PolicyReadback, rusql
     })
 }
 
-/// Verify the policy without knowing the configured busy timeout exactly.
-/// The timeout must still be finite and positive. Used as the migration gate:
-/// no schema change may run unless every required setting passes.
+/// Verify static policy when the configured timeout is not available.
 pub fn verify_static_policy(connection: &Connection) -> Result<(), PolicyReadback> {
     let actual = read_back_policy(connection).map_err(|_| PolicyReadback {
         journal_mode: String::new(),
@@ -200,9 +170,7 @@ pub fn verify_static_policy(connection: &Connection) -> Result<(), PolicyReadbac
     }
 }
 
-/// Checkpoint the WAL into the main database and truncate it. Used at the end
-/// of host initialization so the bound state is durable in the main database
-/// file; this is a normal SQLite operation, never a manual WAL deletion.
+/// Checkpoint and truncate the WAL using SQLite.
 pub fn wal_checkpoint_truncate(connection: &Connection) -> Result<(), ConnectionError> {
     let busy: i64 = connection
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
@@ -215,12 +183,8 @@ pub fn wal_checkpoint_truncate(connection: &Connection) -> Result<(), Connection
     Ok(())
 }
 
-/// Default number of waiting jobs admitted to each worker, excluding the job
-/// currently executing. This is a bounded-resource setting, not a throughput
-/// or product-limit promise.
 pub const DEFAULT_WORKER_QUEUE_CAPACITY: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 
-/// Configuration for the two owned connection workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerConfig {
     pub busy_timeout: Duration,
@@ -238,7 +202,6 @@ impl Default for WorkerConfig {
     }
 }
 
-/// The outcome of a transaction that was submitted to the dedicated writer.
 #[derive(Debug)]
 pub enum TransactionError {
     /// No commit occurred and rollback completed (or no transaction began).
@@ -377,11 +340,7 @@ impl WorkerHandle {
     }
 }
 
-/// One dedicated owned writer and one separate reusable read-only reader
-/// (the reviewed size-one bounded reader pool). Connections never escape their
-/// blocking workers. Every result is owned and sent only after its SQL closure
-/// and any transaction have ended, so callers cannot hold a SQL snapshot over
-/// network streaming. Read closures must materialize bounded DTOs/pages.
+/// Connections stay on their workers; read closures must materialize bounded results.
 #[derive(Clone)]
 pub struct SqliteWorkers {
     writer: Arc<WorkerHandle>,
@@ -389,15 +348,11 @@ pub struct SqliteWorkers {
 }
 
 impl SqliteWorkers {
-    /// Open writer first (establishing WAL), then the read-only reader. Neither
-    /// open uses CREATE; the database must already exist and be bound.
     pub fn open(path: &Path, config: WorkerConfig) -> Result<Self, ConnectionError> {
         let writer = open_writer(path, config.busy_timeout)?;
         Self::from_writer(writer, path, config)
     }
 
-    /// Adopt the verified startup writer without opening a second writer, then
-    /// open the sole reader. This is the serving handoff for `BoundDatabase`.
     pub fn from_writer(
         writer: Connection,
         path: &Path,
@@ -411,9 +366,7 @@ impl SqliteWorkers {
         })
     }
 
-    /// Serialize bounded work with authority mutations, without a transaction.
-    /// Callers may publish a small settings file after checking current authority.
-    /// Decode inputs before submission; network I/O must remain outside the worker.
+    /// Serialize bounded work with authority mutations. Keep network I/O outside.
     pub(crate) async fn serialize_writer<T, F>(&self, operation: F) -> Result<T, WorkerError>
     where
         F: FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
@@ -424,9 +377,8 @@ impl SqliteWorkers {
             .await
     }
 
-    /// Submit a short `BEGIN IMMEDIATE` transaction. Final authorization and
-    /// relationship preconditions belong inside this closure, not in a stale
-    /// reader snapshot. No filesystem/network operation may run inside it.
+    /// Submit a `BEGIN IMMEDIATE` transaction. Check final authorization and
+    /// preconditions inside it; keep filesystem and network I/O outside.
     pub async fn transact<T, F>(&self, operation: F) -> Result<T, WorkerError>
     where
         F: for<'connection> FnOnce(&Transaction<'connection>) -> rusqlite::Result<T>
@@ -439,8 +391,7 @@ impl SqliteWorkers {
             .await
     }
 
-    /// Run a writer transaction whose domain rejection must be rolled back
-    /// while remaining distinguishable from SQLite/commit uncertainty.
+    /// Run a writer transaction that distinguishes domain rejection from commit uncertainty.
     pub async fn transact_result<T, E, F>(&self, operation: F) -> Result<Result<T, E>, WorkerError>
     where
         F: for<'connection> FnOnce(&Transaction<'connection>) -> Result<T, E> + Send + 'static,
@@ -452,8 +403,7 @@ impl SqliteWorkers {
             .await
     }
 
-    /// Materialize one bounded owned result on the read-only connection. The
-    /// SQL slot and any snapshot end before the returned future resolves.
+    /// Materialize a bounded result. The read slot and snapshot end before return.
     pub async fn read<T, F>(&self, operation: F) -> Result<T, WorkerError>
     where
         F: FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
@@ -464,8 +414,7 @@ impl SqliteWorkers {
             .await
     }
 
-    /// Read the policy from the actual live connection selected by `role`, not
-    /// from cached startup configuration.
+    /// Read policy from the selected live connection.
     pub async fn policy_readback(
         &self,
         role: ConnectionRole,
@@ -484,9 +433,8 @@ impl SqliteWorkers {
             .await
     }
 
-    /// Stop admission, drain work ordered before each shutdown marker and join
-    /// both blocking workers. The root ownership guard must remain held until
-    /// this completes. There is no implicit reopen or reacquisition.
+    /// Stop admission, drain admitted work and join both workers. Keep the root
+    /// ownership guard until this completes.
     pub async fn shutdown(self) -> Result<(), WorkerError> {
         self.writer.close_admission();
         self.reader.close_admission();

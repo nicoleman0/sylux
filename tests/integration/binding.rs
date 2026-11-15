@@ -1,9 +1,6 @@
-//! T005/A09/A10 process scenarios, adapted to the reviewed T006/T007 product
-//! encoding (PoC P2). The init/binding/second-writer core subset is active;
-//! the remaining A09/A10/F06 matrix rows stay blocked with their S1 cards.
-//! Only allowlisted events are evidence; an unknown CLI/error is NOT a safe
-//! refusal. No request is sent to the scaffold's unexpected plaintext
-//! listener.
+//! Process-level root binding scenarios. Only allowlisted events count as
+//! refusal evidence; unknown errors do not. No request reaches the scaffold's
+//! plaintext listener.
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -28,7 +25,7 @@ use std::{
 const WATCHDOG: Duration = Duration::from_secs(15);
 const FORBIDDEN_ON_REFUSAL: &[&str] = &["migration.start", "recovery.start", "listener.bind"];
 
-// Fixed test-owned names only; do not relax H0's generic component validator.
+// Fixed test-owned names only; keep the generic component validator strict.
 fn private_file(parent: &Path, name: &str) -> File {
     use rustix::fs::{Mode, OFlags, open, openat};
     assert!(matches!(
@@ -69,9 +66,7 @@ impl Case {
         let tls = TlsFiles::generate(&owner, "tls").unwrap();
         Self { owner, store, tls }
     }
-    // Bound state comes from the reviewed product init (T006/T007 encoding),
-    // not from a hand-made fixture: each downstream case still applies its
-    // own mutation to real bound state exactly as before.
+    // Use product initialization so each case mutates real bound state.
     fn bound(&self) {
         let observed = probe(self, "init");
         assert!(
@@ -406,8 +401,6 @@ fn require_valid_root(case: &Case) {
     }
 }
 
-// PoC P2 activates the manifest/DB identity-agreement refusals; T006 qualifies
-// the complete structural, key-shape, alias and interrupted-bootstrap matrix.
 macro_rules! refusal_case {
     ($name:ident, $prepare:expr) => {
         #[test]

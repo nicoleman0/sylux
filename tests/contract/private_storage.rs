@@ -1,4 +1,4 @@
-//! S1 private namespace contracts over the validated loopback-TLS product router.
+//! Private namespace contracts over the validated loopback-TLS product router.
 #[path = "../common/mod.rs"]
 mod common;
 

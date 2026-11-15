@@ -1,25 +1,4 @@
--- Sylux S1 core schema, migration 0001 (schema_version 1).
---
--- Encoding contract (data-model.md / s1-design-review.md §4):
---   * Opaque application IDs are 128-bit server-random values stored as exactly
---     32 lowercase hexadecimal TEXT characters; the product generates them and
---     never accepts user-supplied IDs through this schema.
---   * Integrity digests are raw 32-byte SHA-256 BLOBs (never hex TEXT).
---   * Name sort keys are NFC-normalized UTF-8 bytes stored as BLOB; uniqueness
---     and ordering compare those bytes, never a database collation.
---   * Timestamps are nonnegative INTEGER unix seconds (UTC).
---   * Byte lengths are nonnegative INTEGER.
---
--- Only the S1 core tables exist here (installation, account, session, entry,
--- blob, revision, mutation, upload_attempt, event). No sharing, retention,
--- trash, DAV, GC or future-slice tables. Application-level invariants that
--- SQLite cannot check per row (ancestry depth, NFC normalization itself,
--- manifest agreement) are validated inside the same transaction by the
--- coordinator; the explicit CHECK/FK/UNIQUE/trigger constraints below backstop
--- them.
---
--- The whole migration is one transaction; PRAGMA user_version is transactional
--- and moves with it (verified against SQLite semantics, see evidence/poc/p2).
+-- NFC normalization and ancestry depth are enforced by the coordinator.
 
 BEGIN IMMEDIATE;
 
@@ -45,20 +24,13 @@ CREATE TABLE account (
     account_id        TEXT    NOT NULL PRIMARY KEY CHECK (length(account_id) = 32
                                                         AND account_id NOT GLOB '*[^0-9a-f]*'),
     handle            TEXT    NOT NULL UNIQUE
-                              -- Two-idiom form: in SQLite GLOB a class
-                              -- cannot be repeated with `*` (the star is an
-                              -- independent wildcard after the class), so
-                              -- the first character gets its own pattern and
-                              -- every character is then constrained by the
-                              -- negated-class idiom.
+                              -- GLOB * is a wildcard, not repetition; constrain the first and remaining characters separately.
                               CHECK (handle GLOB '[a-z0-9]*'
                                      AND handle NOT GLOB '*[^a-z0-9._-]*'
                                      AND length(handle) <= 64),
     role              TEXT    NOT NULL CHECK (role IN ('administrator', 'user')),
     enabled           INTEGER NOT NULL CHECK (enabled IN (0, 1)),
     credential_epoch  INTEGER NOT NULL CHECK (credential_epoch >= 0),
-    -- Salted Argon2id PHC string; never a password, hash-of-password shortcut
-    -- or normalized/truncated derivative. Null until the owner sets one.
     password_verifier TEXT    CHECK (password_verifier IS NULL
                                      OR password_verifier GLOB '$argon2id$*')
 );
@@ -68,8 +40,7 @@ CREATE TABLE session (
                                                         AND session_id NOT GLOB '*[^0-9a-f]*'),
     account_id        TEXT    NOT NULL REFERENCES account(account_id),
     credential_epoch  INTEGER NOT NULL CHECK (credential_epoch >= 0),
-    -- SHA-256 of an independent 256-bit random secret; the raw secret is
-    -- returned once and never persisted.
+    -- Only the SHA-256 verifier is persisted; the random secret is returned once.
     verifier          BLOB    NOT NULL CHECK (length(verifier) = 32),
     csrf_verifier     BLOB    NOT NULL CHECK (length(csrf_verifier) = 32),
     created_at        INTEGER NOT NULL CHECK (created_at >= 0),
@@ -82,8 +53,6 @@ CREATE INDEX session_account ON session(account_id);
 CREATE TABLE blob (
     blob_id   TEXT    NOT NULL PRIMARY KEY CHECK (length(blob_id) = 32
                                                 AND blob_id NOT GLOB '*[^0-9a-f]*'),
-    -- Shard is derived from the blob ID (first two hex characters); keeping the
-    -- derivation checked here prevents accidental cross-shard placement.
     shard     TEXT    NOT NULL CHECK (shard = substr(blob_id, 1, 2)),
     length    INTEGER NOT NULL CHECK (length >= 0),
     sha256    BLOB    NOT NULL CHECK (length(sha256) = 32),
@@ -107,15 +76,12 @@ CREATE TABLE entry (
     entry_id        TEXT    NOT NULL PRIMARY KEY CHECK (length(entry_id) = 32
                                                       AND entry_id NOT GLOB '*[^0-9a-f]*'),
     owner_account_id TEXT   NOT NULL REFERENCES account(account_id),
-    -- Null parent is allowed only for the single account root; roots are
-    -- immutable and named by the empty byte string.
     parent_id       TEXT    REFERENCES entry(entry_id),
     kind            TEXT    NOT NULL CHECK (kind IN ('file', 'folder')),
     original_name   TEXT    NOT NULL,
     name_key        BLOB    NOT NULL,
     name_key_version INTEGER NOT NULL CHECK (name_key_version > 0),
-    -- Null for folders, and transiently null for files inside the single
-    -- transaction that creates the entry together with its first revision.
+    -- Files are transiently null while their first revision is created in the same transaction.
     current_revision_id TEXT REFERENCES revision(revision_id),
     state           TEXT    NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'deleted')),
     generation      INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
@@ -128,8 +94,6 @@ CREATE TABLE entry (
             AND length(name_key) BETWEEN 1 AND 255))
 );
 
--- Parent must be an active same-owner folder; enforced on insert and on any
--- parent/owner change. Root rows (null parent) are excluded.
 CREATE TRIGGER entry_insert_parent_active_folder
 BEFORE INSERT ON entry
 BEGIN
@@ -154,10 +118,7 @@ BEGIN
     ) THEN RAISE(ABORT, 'entry parent must be an active same-owner folder') END;
 END;
 
--- No ancestry cycles. A freshly inserted row has no children, so only a
--- self-parent can cycle on INSERT; re-parenting walks the candidate parent's
--- ancestry and refuses if the moved entry would become its own ancestor.
--- UNION (not UNION ALL) keeps the walk terminating even on damaged data.
+-- UNION deduplication terminates the ancestry walk even on damaged data.
 CREATE TRIGGER entry_insert_no_parent_cycle
 BEFORE INSERT ON entry
 BEGIN
@@ -188,7 +149,6 @@ BEGIN
     ) THEN RAISE(ABORT, 'entry parent would create a cycle') END;
 END;
 
--- The current pointer must reference a revision of this very entry.
 CREATE TRIGGER entry_insert_current_same_entry
 BEFORE INSERT ON entry
 BEGIN
@@ -209,9 +169,6 @@ BEGIN
     ) THEN RAISE(ABORT, 'entry current revision must belong to the same entry') END;
 END;
 
--- Revisions are the immutable seam (FR-006): no UPDATE, no DELETE. Retention
--- and restore flows in later slices must extend this schema through a reviewed
--- migration, never by rewriting committed revisions.
 CREATE TRIGGER revision_rows_are_immutable
 BEFORE UPDATE ON revision
 BEGIN
@@ -224,9 +181,7 @@ BEGIN
     SELECT RAISE(ABORT, 'revision rows cannot be deleted');
 END;
 
--- Active sibling names are unique per owner and parent across both kinds;
--- root uniqueness is enforced separately because nullable SQL unique keys
--- do not compare NULL parents.
+-- NULL parents do not collide in unique keys, so roots need a separate index.
 CREATE UNIQUE INDEX entry_active_sibling
     ON entry(owner_account_id, parent_id, name_key)
     WHERE state = 'active' AND parent_id IS NOT NULL;
@@ -276,7 +231,6 @@ CREATE TABLE upload_attempt (
     outcome          TEXT    CHECK (outcome IS NULL OR outcome IN ('canceled', 'rejected')),
     UNIQUE (mutation_id, attempt_no)
 );
--- At most one active body stream per admitted operation.
 CREATE UNIQUE INDEX upload_attempt_one_active
     ON upload_attempt(mutation_id)
     WHERE writer_active = 1;

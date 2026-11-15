@@ -1,6 +1,4 @@
-//! Authenticated owner namespace operations.
 #![allow(clippy::result_large_err)]
-// Axum responses are the request-local control-flow error channel here.
 use crate::{
     domain::{
         authz,

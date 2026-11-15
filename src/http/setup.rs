@@ -1,4 +1,3 @@
-//! Host-authorized one-use creation of the initial owner and private root.
 use crate::{
     domain::{authz, names::NAME_KEY_VERSION},
     http::AuthState,
@@ -185,8 +184,7 @@ pub async fn create(
     let root: String = ids[16..].iter().map(|b| format!("{b:02x}")).collect();
     #[cfg(feature = "test-harness")]
     {
-        // Recheck one-use state before the test seam; the writer transaction
-        // repeats this check atomically with creation and verifier consumption.
+        // The transaction repeats this check atomically with verifier consumption.
         let available: Result<i64, _> = state
             .workers
             .read(|db| {

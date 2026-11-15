@@ -1,5 +1,4 @@
 #![allow(clippy::result_large_err)]
-// See content.rs: request-local helpers return an Axum error response directly.
 
 use super::{
     AuthState,
@@ -414,9 +413,7 @@ pub async fn admit(
             if recovery_epoch(transaction).map_err(|_| rusqlite::Error::InvalidQuery)? != ticket_for_insert.recovery_epoch {
                 return Ok(Err(error(StatusCode::UNAUTHORIZED, "stale_mutation_ticket")));
             }
-            // Admission retries are keyed by the original signed operation. Resolve
-            // durable state before checking mutable namespace preconditions so a
-            // retry remains idempotent after staging or a later namespace change.
+            // Resolve retries before mutable namespace checks to preserve idempotency.
             let existing: Option<(Vec<u8>, String, String)> = transaction.query_row(
                 "SELECT admission_fingerprint,state,scope FROM mutation WHERE mutation_id=?1 AND principal_account_id=?2",
                 params![ticket_for_insert.mutation_id,ticket_for_insert.account_id],

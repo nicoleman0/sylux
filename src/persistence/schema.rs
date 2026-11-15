@@ -1,10 +1,4 @@
-//! Core schema migration and verified startup checks (s1-design-review §4).
-//!
-//! The migration source of truth is `migrations/sqlite/0001_s1.sql`, embedded
-//! here at compile time and applied as the single transaction the file
-//! itself declares (`BEGIN IMMEDIATE` … `COMMIT`, with `PRAGMA user_version`
-//! inside — SQLite rolls the version back with the transaction). No schema
-//! change can run through a connection whose policy has not been verified.
+//! Core schema migration and startup checks.
 
 use rusqlite::{Connection, params};
 
@@ -17,7 +11,7 @@ pub const SUPPORTED_LAYOUT_VERSION: i64 = 1;
 pub const SUPPORTED_NAME_KEY_VERSION: i64 = 1;
 pub const SUPPORTED_KEY_VERSION: i64 = 1;
 
-/// The complete S1 core schema, applied as one transaction (see the file).
+/// Core schema SQL embedded from `migrations/sqlite/0001_s1.sql`.
 pub const MIGRATION_0001_S1: &str = include_str!("../../migrations/sqlite/0001_s1.sql");
 
 const CORE_TABLES: &[&str] = &[
@@ -61,8 +55,7 @@ pub enum MigrationOutcome {
     AlreadyCurrent,
 }
 
-/// Why a schema operation failed. Codes are redacted; SQL messages come from
-/// SQLite itself and carry no user values.
+/// Why a schema operation failed.
 #[derive(Debug)]
 pub enum SchemaError {
     /// The migration tracker disagrees with the schema actually present.
@@ -78,7 +71,6 @@ pub enum SchemaError {
 }
 
 impl SchemaError {
-    /// Redacted machine reason for contract events and diagnostics.
     pub fn reason(&self) -> String {
         match self {
             Self::Inconsistent(code) => format!("schema_inconsistent: {code}"),
@@ -94,12 +86,8 @@ fn sql_error(error: rusqlite::Error) -> SchemaError {
     SchemaError::Sql(error.to_string())
 }
 
-/// Bring the database to the supported schema version, or verify it is
-/// already there. Runs only after the connection policy read-back has been
-/// verified; a database whose tracker disagrees with its contents refuses
-/// instead of being "repaired".
+/// Apply or verify the supported schema version.
 pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, SchemaError> {
-    // Migration gate: no schema change may run through an unverified policy.
     sqlite::verify_static_policy(connection)
         .map_err(|policy| SchemaError::Sql(format!("policy unverified: {policy:?}")))?;
     let version: i64 = connection
@@ -133,9 +121,7 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
     }
 }
 
-/// Inspect `sqlite_schema` and require every core object to exist exactly
-/// once. Schema inspection is part of startup verification, not a format
-/// guess from a table count.
+/// Require every core object to exist exactly once.
 pub fn verify_core_schema(connection: &Connection) -> Result<(), SchemaError> {
     for (kind, names) in [
         ("table", CORE_TABLES),
@@ -158,9 +144,7 @@ pub fn verify_core_schema(connection: &Connection) -> Result<(), SchemaError> {
     Ok(())
 }
 
-/// Fail-closed startup recovery checks: `PRAGMA integrity_check` must report
-/// `ok` and `PRAGMA foreign_key_check` must report no rows. Results are
-/// inspected, never inferred from a command exit code.
+/// Require a clean integrity and foreign-key check.
 pub fn recovery_checks(connection: &Connection) -> Result<(), SchemaError> {
     let integrity: String = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -179,9 +163,7 @@ pub fn recovery_checks(connection: &Connection) -> Result<(), SchemaError> {
     Ok(())
 }
 
-/// Insert the bound installation row during host initialization. Runs in its
-/// own transaction; a crash before it leaves a database with no installation
-/// row, which serving refuses — never a half-bound root.
+/// Insert the installation identity in its own transaction.
 pub fn insert_installation_row(
     connection: &Connection,
     identity: &InstallationIdentity,

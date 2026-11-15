@@ -15,8 +15,7 @@ for tool in cargo npm node python3; do
   command -v "$tool" >/dev/null 2>&1 || { printf 'required tool not found: %s\n' "$tool" >&2; exit 127; }
 done
 
-# Build web assets FIRST: build.rs embeds web/dist into the Rust binary, so
-# cargo test/clippy/build need the compiled static bundle to already exist.
+# build.rs embeds web/dist, so build assets before Cargo checks.
 run npm --prefix web ci
 run node --test tools/test-browser-screenshot-paths.mjs
 run npm --prefix web run check
@@ -44,8 +43,6 @@ else
   artifact_check_pending=1
 fi
 run node tools/npm-native-smoke.mjs
-# Use the reviewed, locally provisioned T002 executable by explicit override or PATH.
-# Never skip advisory/license checks when cargo-deny is unavailable.
 CARGO_DENY_BIN="${CARGO_DENY_BIN:-cargo-deny}"
 if [[ "$CARGO_DENY_BIN" == */* ]]; then
   [[ -x "$CARGO_DENY_BIN" ]] || { printf 'required cargo-deny executable is missing or not executable: %s\n' "$CARGO_DENY_BIN" >&2; exit 127; }

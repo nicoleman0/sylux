@@ -1,4 +1,4 @@
-//! T027 A03 unrelated-identity isolation over the real loopback-TLS router.
+//! Unrelated-identity isolation over the real loopback-TLS router.
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -252,7 +252,7 @@ async fn a03_unrelated_and_admin_route_matrix_denies_owner_private_state() {
         ));
     }
     // Route-level methods/statuses: unrelated and administrator should be indistinguishable on private reads and writes.
-    // Create a real owner-owned upload attempt through the S1 ticket/admission routes.
+    // Create an owner-owned upload attempt through the real ticket/admission routes.
     let owner_headers = [
         ("Origin", "https://127.0.0.1".to_owned()),
         ("X-CSRF-Token", URL_SAFE_NO_PAD.encode(CSRF)),

@@ -1,10 +1,3 @@
-//! Authenticated durable mutation admission and safe outcome reconciliation.
-//!
-//! The signed ticket and operation ID are never credentials. Both handlers pass
-//! the cookie session to the coordinator, which validates the current account
-//! against the requested principal before admitting work or revealing an
-//! outcome. No handler retries a domain effect after an ambiguous result.
-
 use super::middleware::session_cookie;
 use crate::{
     domain::{
@@ -52,9 +45,7 @@ impl MutationHttpState {
     }
 }
 
-/// Register the self-contained mutation routes. The supplied coordinator must
-/// be constructed with `MutationCoordinator::new(SqliteWorkers)`; the legacy
-/// default coordinator deliberately fails durable operations closed.
+/// Requires a coordinator backed by SqliteWorkers; the default refuses durable operations.
 pub fn register(router: Router, state: MutationHttpState) -> Router {
     let routes = Router::new()
         .route("/mutations", post(admit))
@@ -69,8 +60,7 @@ struct AdmissionRequest {
     #[serde(alias = "principal_id")]
     principal: String,
     recovery_epoch: i64,
-    /// Operation-specific fields are flattened into the request envelope. A
-    /// sorted map makes their fingerprint order independent of JSON key order.
+    /// Sorted keys keep fingerprints independent of JSON field order.
     #[serde(flatten)]
     operation: BTreeMap<String, Value>,
 }
@@ -337,9 +327,7 @@ async fn admit(
     };
     let mutation_id = ticket.mutation_id().as_str().to_owned();
 
-    // The principal above is only a validation selector, not authority. This
-    // durable call revalidates the cookie session and requires its current
-    // account to equal the ticket principal before any mutation is admitted.
+    // Only the current cookie session authorizes work; the ticket principal must match it.
     let result = state
         .coordinator
         .admit_durable(
@@ -387,8 +375,6 @@ async fn status(
     let mutation_id_text = mutation_id.as_str().to_owned();
     let operation = ScopedMutationId::new(principal, mutation_id);
 
-    // `status` validates the current session and principal on one SQLite read
-    // snapshot. Possession of the operation ID alone therefore reveals nothing.
     let result = state
         .coordinator
         .status(

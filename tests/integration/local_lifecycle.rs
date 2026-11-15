@@ -1,4 +1,4 @@
-//! T032 local-session lifecycle over the real loopback-TLS router and SQLite.
+//! Local-session lifecycle over the real loopback-TLS router and SQLite.
 #[path = "../common/mod.rs"]
 mod common;
 

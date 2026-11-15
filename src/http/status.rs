@@ -12,13 +12,10 @@ pub async fn health() -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
 
-/// Liveness is process health only; it does not imply storage ownership.
 pub async fn live() -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
 
-/// Readiness is served only after startup ownership/binding/recovery succeeded,
-/// and rechecks the actual owned writer and reader policy on each probe.
 pub async fn ready(State(state): State<AuthState>) -> impl IntoResponse {
     let writer = state.workers.policy_readback(ConnectionRole::Writer).await;
     let reader = state.workers.policy_readback(ConnectionRole::Reader).await;
@@ -54,8 +51,7 @@ fn error(status: StatusCode, code: &'static str) -> Response {
     no_store((status, Json(serde_json::json!({ "code": code }))).into_response())
 }
 
-/// Bounded operational view for an authenticated application administrator.
-/// It does not imply payload integrity, recovery completion or disk capacity.
+/// Does not establish payload integrity or disk capacity.
 pub async fn operator_status(State(state): State<AuthState>, headers: HeaderMap) -> Response {
     let Some(cookie) = super::middleware::session_cookie(&headers) else {
         return error(StatusCode::UNAUTHORIZED, "authentication_required");

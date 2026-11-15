@@ -1,6 +1,4 @@
-//! Restart/unknown-result integration cases (T020; design §5).
-//! Each recovery assertion calls the product reconciliation API over a fresh
-//! SQLite worker. The stub is deliberately RED until T021 supplies recovery.
+//! Restart and unknown-result cases using product reconciliation and fresh SQLite workers.
 
 #[path = "../common/mod.rs"]
 mod common;

@@ -1,8 +1,6 @@
 name: GHCR image
 
-# Pushes a published release's image archive to GHCR unchanged, so registry
-# deployments run the same image the release workflow qualified. `beta` moves
-# to whichever version ran last.
+# Publish the qualified release archive unchanged. The last run sets the beta tag.
 on:
   workflow_call:
     inputs:

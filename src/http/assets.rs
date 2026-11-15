@@ -5,7 +5,6 @@ use axum::{
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
-/// Serve only files captured from `web/dist` at compile time.
 pub async fn serve(request: Request<Body>) -> Response<Body> {
     let path = request.uri().path();
     let key = match path {

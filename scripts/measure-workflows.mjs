@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// Opt-in local benchmark. No credentials or fixture paths enter evidence.
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash, X509Certificate } from 'node:crypto';
@@ -242,7 +241,6 @@ async function searchMatrixSamples() {
     for (let i = 0; i < repetitions; i++) {
       const pairId = `${fixture.dimensions.metadata_entries}:${label}:${i}`;
       const searching = request(`search:${label}`, `/entries/search?q=${query}&limit=100`, { pairId });
-      // Overlap HTTP requests without imposing SQLite admission order.
       const browsing = request(`during_search:${label}:browse`, '/folders/children?sort=name_asc&limit=100', { pairId });
       const [found, listed] = await Promise.all([searching, browsing]);
       validateSearch(found.data, fixture.expectations.search_ids[label], fixture.expectations.search_counts[label]);
@@ -368,7 +366,6 @@ async function browserMatrix() {
   page.on('response', onResponse);
   await page.locator('#upload-file').setInputFiles(uploads);
   await page.waitForFunction(() => window.__uploadProgress.length > 0);
-  // Reading remains available while the real UI transfer runs.
   if (committed === 60) throw new Error('UI upload finished before concurrent browsing');
   await action('browse_during_ui_upload', () => page.getByRole('navigation', { name: 'Files', exact: true }).getByRole('button', { name: 'Files', exact: true }).click(), path => path.endsWith('/children'));
   if (!withoutSearch && committed === 60) throw new Error('UI upload finished before concurrent search');
