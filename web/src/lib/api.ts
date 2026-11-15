@@ -1,4 +1,4 @@
-export type ApiError = { code: string; message: string; request_id: string; existing?: { id: string; name: string; kind: string; etag: string } };
+export type ApiError = { code: string; message: string; request_id: string; existing?: { id: string; name: string; kind: string; etag: string }; limit?: number };
 export class HttpError extends Error {
   constructor(readonly status: number, readonly details?: ApiError) { super(`Request failed (${status})`); this.name = 'HttpError'; }
   get code(): string | undefined { return this.details?.code; }

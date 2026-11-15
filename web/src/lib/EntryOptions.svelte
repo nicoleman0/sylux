@@ -1,15 +1,18 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { DropdownMenu } from 'bits-ui';
+  import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
   import { Button } from '$lib/components/ui/button/index.js';
   import { modifiedTime } from './modified-time';
   import type { Entry } from './listing';
 
-  let { entry, disabled = false, moveDisabled = false, onaction }: {
+  let { entry, disabled = false, moveDisabled = false, downloadDisabled = false, downloading = false, onaction }: {
     entry: Entry;
     disabled?: boolean;
     moveDisabled?: boolean;
+    downloadDisabled?: boolean;
+    downloading?: boolean;
     onaction: (action: 'download' | 'rename' | 'move' | 'delete', trigger: HTMLElement) => void;
   } = $props();
   let trigger = $state<HTMLButtonElement | null>(null);
@@ -28,13 +31,13 @@
 <DropdownMenu.Root bind:open onOpenChange={(value) => { if (value) openingDialog = false; }}>
   <DropdownMenu.Trigger {disabled} bind:ref={trigger}>
     {#snippet child({ props })}
-      <Button {...props} variant="ghost" size="icon" class="size-11" aria-label={`Options for ${entry.name}`}><EllipsisIcon /></Button>
+      <Button {...props} variant="ghost" size="icon" class="size-11" aria-busy={downloading} aria-label={downloading ? `Preparing download for ${entry.name}` : `Options for ${entry.name}`}>{#if downloading}<LoaderCircleIcon class="animate-spin motion-reduce:animate-none" />{:else}<EllipsisIcon />{/if}</Button>
     {/snippet}
   </DropdownMenu.Trigger>
   <DropdownMenu.Portal>
     <DropdownMenu.Content preventScroll={false} sideOffset={4} align="end" class="bg-popover text-popover-foreground z-50 min-w-40 rounded-md border p-1 shadow-md outline-none" onInteractOutside={(event) => { if (event.target instanceof Node && trigger?.contains(event.target)) event.preventDefault(); }} onCloseAutoFocus={(event) => { if (openingDialog) event.preventDefault(); }}>
       {#if modified}<div class="px-3 py-2 text-xs text-muted-foreground max-w-72 border-b mb-1"><span class="block">Modified</span><time datetime={modified.datetime}>{modified.full}</time></div>{/if}
-      {#if entry.kind === 'file'}<DropdownMenu.Item class="menu-item" onSelect={() => select('download')}>Download</DropdownMenu.Item>{/if}
+      <DropdownMenu.Item class="menu-item" disabled={downloadDisabled} onSelect={() => select('download')}>Download</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item" onSelect={() => select('rename')}>Rename</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item" disabled={moveDisabled} onSelect={() => select('move')}>Move</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item text-destructive" onSelect={() => select('delete')}>Delete</DropdownMenu.Item>

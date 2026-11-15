@@ -163,6 +163,15 @@ export class MockTransport implements ApiTransport {
     if (route === '/me/password' && method === 'POST') { this.user = null; return undefined as T; }
     if (route === '/setup' && method === 'GET') return { setupRequired: this.setupRequired, user: this.user, csrfToken: 'mock-csrf-token' } as T;
     if (route === '/auth/csrf' && method === 'GET') return { csrf_token: 'mock-csrf-token' } as T;
+    if (route === '/archives' && method === 'POST') {
+      const ids = new Set((options.body as { entry_ids: string[] }).entry_ids);
+      const notFound = () => new HttpError(404, { code: 'entry_not_found', message: 'entry_not_found', request_id: 'mock' });
+      const selected = [...ids].map((id) => { try { return this.activeEntry(id); } catch { throw notFound(); } });
+      const roots = selected.filter((entry) => !this.folderPath(entry.parent_id!).some((folder) => ids.has(folder.id)));
+      if (new Set(roots.map((entry) => entry.name.normalize('NFC'))).size !== roots.length) throw new HttpError(409, { code: 'archive_name_conflict', message: 'archive_name_conflict', request_id: 'mock' });
+      // Mock mode has no archive bytes; the link 404s like mock file downloads.
+      return { url: `/archives/mock-${++this.sequence}`, name: roots.length === 1 ? `${roots[0]!.name}.zip` : 'download.zip', entry_count: roots.length } as T;
+    }
     if (route === '/mutation-tickets' && method === 'POST') return { mutation_id: `upload-${++this.sequence}`, ticket: `mock-ticket-${this.sequence}`, expires_at: 'mock-only' } as T;
     if (route === '/setup/admin' && method === 'POST') {
       this.setupRequired = false;

@@ -1080,6 +1080,7 @@
   }
   function clearWorkspace(): void {
     clearSearch();
+    archiveBusy = false; archiveTargets = [];
     actionNotice = ''; compactUnresolvedUpload = false;
     workspaceRefreshing = false; workspaceRefreshRequest++; folderRetryBusy = false; moveCloseRefreshBusy = false; entriesFolderId = '';
     bulkAction = null; bulkTargets = []; bulkReport = null; bulkBusy = false; bulkNeedsRefresh = false; bulkError = '';
@@ -1651,7 +1652,7 @@
   }
   function entryAction(action: 'download' | 'rename' | 'move' | 'delete', entry: Entry, trigger: HTMLElement): void {
     if (bulkBusy || ((bulkNeedsRefresh || namespaceUnknown) && action !== 'download')) return;
-    if (action === 'download') void download(entry);
+    if (action === 'download') void (entry.kind === 'folder' ? downloadArchive([entry]) : download(entry));
     else if (action === 'rename') beginRename(entry, trigger);
     else if (action === 'move') void beginMove(entry, trigger);
     else { trashError = ''; trashTarget = entry; trashTrigger = trigger; }
@@ -2125,6 +2126,34 @@
     } catch { notice = 'Download could not be completed.'; }
   }
 
+  let archiveBusy = $state(false);
+  let archiveTargets = $state<string[]>([]);
+  function archiveFailure(error: unknown): string {
+    if (error instanceof HttpError && error.code === 'archive_entry_limit') return `Too many items to download together. The limit is ${(error.details?.limit ?? 10000).toLocaleString()} files and folders, including folder contents. Download smaller groups.`;
+    if (error instanceof HttpError && error.code === 'archive_name_conflict') return 'Two selected items have the same name. Download them separately.';
+    if (error instanceof HttpError && error.status === 404) return 'Some selected items are no longer available. Refresh your files.';
+    return 'Download could not be started.';
+  }
+  async function downloadArchive(targets: Entry[]): Promise<void> {
+    if (archiveBusy || !targets.length) return;
+    if (targets.length === 1 && targets[0].kind === 'file') return download(targets[0]);
+    const generation = sessionGeneration;
+    archiveBusy = true; archiveTargets = targets.map((entry) => entry.id); clearCompletedFeedback();
+    const feedback = feedbackRevision;
+    try {
+      const ticket = await listing.archive(targets.map((entry) => entry.id));
+      if (generation !== sessionGeneration) return;
+      const anchor = document.createElement('a');
+      anchor.href = ticket.url;
+      anchor.rel = 'noopener';
+      anchor.download = ticket.name;
+      anchor.click();
+      if (feedback === feedbackRevision) notice = 'Download requested. Check your browser for progress.';
+    } catch (error) {
+      if (generation === sessionGeneration && feedback === feedbackRevision) notice = archiveFailure(error);
+    } finally { if (generation === sessionGeneration) { archiveBusy = false; archiveTargets = []; } }
+  }
+
   async function openFolder(folder: Folder): Promise<boolean> {
     if (bulkBusy || accountBusy || instanceBusy) return false;
     saveNavigation();
@@ -2173,7 +2202,7 @@
                 {#if searchQuery}<span class="text-xs text-muted-foreground">Current loaded page only</span>{/if}
                 <Button variant="ghost" size="sm" disabled={fileMutationBusy} onclick={() => selectedIds = activeEntries.map((entry) => entry.id)}>Select all loaded items</Button>
                 <Button variant="ghost" size="sm" disabled={!selectedIds.length || bulkBusy} onclick={clearSelectionFromToolbar}>Clear selection</Button>
-                {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
+                {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={archiveBusy || bulkBusy} aria-busy={archiveBusy} onclick={() => downloadArchive(selectedEntries)}>{archiveBusy ? 'Preparing…' : 'Download'}</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
               </div>
             {/if}
 {/snippet}
@@ -2243,6 +2272,7 @@
           </div>
         </header>
         <div id="main-content" class="workspace-main">
+            {#if archiveBusy}<p role="status" class="workspace-feedback">Preparing download…</p>{/if}
             {#if actionNotice}
               {#key feedbackRevision}<div class="action-feedback workspace-feedback">
                 <p role="status"><CheckIcon aria-hidden="true" /><span>{actionNotice}</span></p>
@@ -2437,7 +2467,7 @@
                       <div role="cell" class="search-item-main name-cell"><button type="button" class="item-name" disabled={bulkBusy} title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{hit.entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : 'Size unknown'} · {@render modifiedDateLabel(hit.entry)}</span></span></button></div>
                         <div role="cell" class="search-location file-location"><span>Files{#each hit.location.slice(1) as folder (folder.id)}{' / '}{folder.name}{/each}</span><Button variant="link" size="sm" disabled={bulkBusy} onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
                       <span role="cell" class="file-modified">{@render modifiedDateLabel(hit.entry)}</span><span role="cell" class="file-size">{hit.entry.kind === 'folder' ? '—' : typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : '—'}</span>
-                      <div role="cell" class="options-cell"><EntryOptions entry={hit.entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} /></div>
+                      <div role="cell" class="options-cell"><EntryOptions entry={hit.entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(hit.entry.id)} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} /></div>
                     </div>
                   {/each}
                 {/if}</div></div>
@@ -2480,7 +2510,7 @@
               <div role="row" tabindex="-1" aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row modified-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
                 <div role="cell" class="entry-selection"><label><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, entry.id)} /></label></div>
                 <div role="cell" class="name-cell"><button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'} · {@render modifiedDateLabel(entry)}</span></span></button></div><span role="cell" class="file-modified">{@render modifiedDateLabel(entry)}</span><span role="cell" class="file-size">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span>
-                <div role="cell" class="options-cell"><EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} onaction={(action, trigger) => entryAction(action, entry, trigger)} /></div>
+                <div role="cell" class="options-cell"><EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(entry.id)} onaction={(action, trigger) => entryAction(action, entry, trigger)} /></div>
               </div>
             {/each}</div>{/if}
             </section>

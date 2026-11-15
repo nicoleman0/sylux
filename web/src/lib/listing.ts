@@ -33,6 +33,7 @@ export type Listing<T extends Entry = Entry> = { items: T[]; next_cursor: string
 export type RootListing = { items: Entry[]; root: Folder; next_cursor: string | null; has_more: boolean };
 export type SearchHit = { entry: Entry; location: Folder[] };
 export type SearchListing = { items: SearchHit[]; next_cursor: string | null; has_more: boolean };
+export type ArchiveTicket = { url: string; name: string; entry_count: number };
 
 export class ListingApi {
   constructor(private readonly client: ApiClient) {}
@@ -113,6 +114,10 @@ export class ListingApi {
   }
   restore(entryId: string, etag: string): Promise<void> {
     return this.client.request(`/trash/${encodeURIComponent(entryId)}/restore`, { method: 'POST', headers: { 'If-Match': etag } });
+  }
+  /** Checks a selection and returns a single-use link that streams it as one ZIP. */
+  archive(entryIds: string[]): Promise<ArchiveTicket> {
+    return this.client.request('/archives', { method: 'POST', body: { entry_ids: entryIds } });
   }
   downloadUrl(entryId: string): string {
     return `/entries/${encodeURIComponent(entryId)}/content`;
