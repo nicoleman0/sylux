@@ -132,7 +132,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(button).toBeEnabled();
       await button.focus();
       await expect(button).toBeFocused();
-      await page.screenshot({ path: `/private/tmp/syl57-${width}-${theme}.png` });
+      await page.screenshot({ path: test.info().outputPath(`syl57-${width}-${theme}.png`) });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     });
   }

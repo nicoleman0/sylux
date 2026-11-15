@@ -32,7 +32,7 @@ for (const theme of ['light', 'dark'] as const) {
     const visible = await page.locator('.selectable-row').evaluateAll(rows => rows.filter(row => { const r = row.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }).length);
     expect(visible).toBeGreaterThanOrEqual(12);
     await testInfo.attach('visible-rows', { body: String(visible), contentType: 'text/plain' });
-    await page.screenshot({ path: `/tmp/syl41-desktop-${theme}.png` });
+    await page.screenshot({ path: test.info().outputPath(`syl41-desktop-${theme}.png`) });
     const name = page.getByRole('button', { name: `Preview ${longNames[0]}`, exact: true });
     await name.focus();
     await expect(name).toBeFocused();
@@ -79,7 +79,7 @@ for (const theme of ['light', 'dark'] as const) {
         expect(box?.height).toBeGreaterThanOrEqual(44);
       }
     }
-    await page.screenshot({ path: `/tmp/syl41-mobile-${fixture}-${theme}.png` });
+    await page.screenshot({ path: test.info().outputPath(`syl41-mobile-${fixture}-${theme}.png`) });
     await context.close();
   });
   }
@@ -95,6 +95,6 @@ for (const theme of ['light', 'dark'] as const) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.getByLabel('Sort files by', { exact: true }).focus();
     await expect(page.getByLabel('Sort files by', { exact: true })).toBeFocused();
-    await page.screenshot({ path: `/tmp/syl41-zoom-${theme}.png` });
+    await page.screenshot({ path: test.info().outputPath(`syl41-zoom-${theme}.png`) });
   });
 }

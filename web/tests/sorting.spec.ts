@@ -68,7 +68,7 @@ test('sort resets paging and selection and persists through folders, history and
   await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
   await expect(sort).toHaveValue('size_asc');
   await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
-  await page.screenshot({ path: '/tmp/sylux-sorting-desktop.png', fullPage: true });
+  await page.screenshot({ path: test.info().outputPath('sylux-sorting-desktop.png'), fullPage: true });
   expect(requests.at(-1)?.searchParams.get('sort')).toBe('size_asc');
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
   await expect.poll(() => names(page)).toEqual(['Alpha.txt']);
@@ -189,6 +189,6 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(sort).toHaveValue('size_asc');
     await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: `/tmp/sylux-sorting-${theme}-375.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`sylux-sorting-${theme}-375.png`), fullPage: true });
   });
 }

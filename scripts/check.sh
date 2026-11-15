@@ -18,6 +18,7 @@ done
 # Build web assets FIRST: build.rs embeds web/dist into the Rust binary, so
 # cargo test/clippy/build need the compiled static bundle to already exist.
 run npm --prefix web ci
+run node --test tools/test-browser-screenshot-paths.mjs
 run npm --prefix web run check
 run npm --prefix web run build
 
