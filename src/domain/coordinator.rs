@@ -1,10 +1,4 @@
-//! Durable, serialized mutation admission and result reconciliation.
-//!
-//! All durable transitions use the single bounded SQLite writer. An unresolved
-//! `admitted`/`publishing` row is never expired, deleted, or evicted. An
-//! uncertain COMMIT is surfaced to the caller; this coordinator never retries
-//! the transaction or domain-effect closure. Call `status` to reconcile after
-//! recovery before deciding whether further work is safe.
+//! Durable mutation admission and result reconciliation.
 
 use crate::{
     domain::{
@@ -98,28 +92,24 @@ pub enum CoordinatorError {
     Failure(MutationFailure),
 }
 
-/// Begin-publication result: only a new admitted-to-publishing transition
-/// grants a one-use final-commit permit. Existing unresolved work stays pending
-/// until recovery establishes whether it is safe to resume.
+/// Only a new `admitted` to `publishing` transition grants a final-commit permit.
 pub enum PublicationDecision {
     Ready(PublicationPermit),
     Existing(MutationResult),
 }
 
-/// Non-cloneable authority consumed by the final result transaction.
+/// One-use authority consumed by the final result transaction.
 pub struct PublicationPermit {
     operation: ScopedMutationId,
     scope: MutationScope,
 }
 
-/// Guard retained by existing synchronous request boundaries for serialization
-/// with logout. Durable record transitions are additionally serialized by the
-/// SQLite writer's `BEGIN IMMEDIATE` transaction.
+/// Serializes synchronous request boundaries with logout.
 pub struct AdmissionGuard<'a> {
     _guard: MutexGuard<'a, ()>,
 }
 
-/// Session-bound authorization proof used by existing request handlers.
+/// Session-bound authorization proof.
 #[derive(Clone)]
 pub struct AdmissionTicket {
     session_id: String,
@@ -137,9 +127,7 @@ impl AdmissionTicket {
 }
 
 impl MutationCoordinator {
-    /// Construct the durable coordinator over the integrated bounded SQLite
-    /// workers. A default coordinator remains available for legacy in-memory
-    /// session serialization; durable methods fail closed until workers are set.
+    /// Construct a coordinator over the bounded SQLite workers.
     pub fn new(workers: SqliteWorkers) -> Self {
         Self {
             gate: Arc::default(),
@@ -170,8 +158,7 @@ impl MutationCoordinator {
             .map_err(|_| AdmissionError::Unavailable)
     }
 
-    /// Preserve the synchronous session admission seam used by existing HTTP
-    /// callers. Durable mutation-row admission is `admit_durable` below.
+    /// Admit a synchronous request under the session gate.
     pub fn admit(
         &self,
         _guard: &AdmissionGuard<'_>,
@@ -183,8 +170,6 @@ impl MutationCoordinator {
         self.admit_current(connection, session_id, secret, now)
     }
 
-    /// Authenticate using an owned-worker read closure. The returned proof is
-    /// rechecked inside each final writer transaction before its effect.
     pub fn admit_current(
         &self,
         connection: &Connection,
@@ -226,11 +211,9 @@ impl MutationCoordinator {
             .ok_or(AdmissionError::InvalidSession)
     }
 
-    /// Atomically authenticate and create a durable scoped admission. The
-    /// caller must first validate the signed ticket against current principal,
-    /// scope, epoch and clock. It computes the canonical versioned request
-    /// fingerprint; an exact replay returns stored state, a changed fingerprint
-    /// conflicts. The coordinator does not persist ticket secrets.
+    /// Authenticate and create a scoped admission atomically. The caller must
+    /// validate the signed ticket against current authority and time first.
+    /// Exact replays return stored state; changed fingerprints conflict.
     pub async fn admit_durable(
         &self,
         ticket: &MutationTicket,
@@ -278,10 +261,8 @@ impl MutationCoordinator {
         decision_result(result)
     }
 
-    /// Move an admission to `publishing` once. Only the winning transition gets
-    /// a one-shot permit; seeing an existing `publishing` row returns Pending
-    /// without authorizing another effect. Expired, still-admitted work is
-    /// durably rejected; expiry never touches an unresolved publishing row.
+    /// Move an admission to `publishing` once. Existing publishing work stays
+    /// pending; expired admitted work is rejected.
     pub async fn begin_publication(
         &self,
         ticket: &MutationTicket,
@@ -327,10 +308,8 @@ impl MutationCoordinator {
         }
     }
 
-    /// Commit caller-supplied SQL effects and the immutable revision result in
-    /// one transaction. The one-use permit is consumed by this call; the closure
-    /// must contain SQL effects only (never filesystem/network side effects).
-    /// An uncertain COMMIT is surfaced and never retried by this coordinator.
+    /// Commit SQL effects and the immutable result atomically. The closure must
+    /// contain SQL only. An uncertain COMMIT is surfaced, never retried.
     pub async fn commit<F>(
         &self,
         permit: PublicationPermit,
@@ -398,10 +377,8 @@ impl MutationCoordinator {
         decision_result(decision)
     }
 
-    /// Authenticated read-only reconciliation. Missing/corrupt rows are
-    /// `Unknown`; an admitted or publishing row is `Pending`. The method never
-    /// changes state or triggers domain effects, and deliberately ignores
-    /// ticket expiry because expiry is an execution rule, not record retention.
+    /// Read-only reconciliation. Missing/corrupt rows are `Unknown`; unresolved
+    /// rows are `Pending`. Ticket expiry does not affect result retention.
     pub async fn status(
         &self,
         operation: &ScopedMutationId,
@@ -450,9 +427,7 @@ impl MutationCoordinator {
             .and_then(decision_result)
     }
 
-    /// Definitively reject only work that has not entered publication. A
-    /// publishing record requires recovery and cannot be overwritten by a
-    /// convenient rejection.
+    /// Reject work only before publication; publishing work requires recovery.
     pub async fn reject_admission(
         &self,
         ticket: &MutationTicket,

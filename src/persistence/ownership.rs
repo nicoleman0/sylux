@@ -1,14 +1,5 @@
-//! Lifetime exclusive ownership of a storage root (s1-design-review §3).
-//!
-//! `writer.lock` is opened without truncation and locked `LOCK_EX|LOCK_NB`;
-//! the descriptor is retained in a non-cloneable guard for the whole process
-//! lifetime and is released only when the guard is dropped (after workers and
-//! connections have drained) or when the process dies. Flock is advisory and
-//! bound to the open file description: every supported writer must cooperate,
-//! and a second process therefore fails before opening the database.
-//!
-//! This is local exclusion only. Flock is not distributed fencing, and a
-//! held lock never proves a remote lease will expire.
+//! Exclusive local ownership of a storage root.
+//! Flock is advisory and provides no distributed fencing.
 
 use std::{
     fs::File,
@@ -21,11 +12,8 @@ use rustix::fs::{self, AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, flo
 
 use super::root::LOCK_NAME;
 
-/// Non-cloneable retained ownership of one storage root.
-///
-/// The lock descriptor never leaves this type. There is deliberately no
-/// unlock method: shutdown must close admission, drain workers, and close the
-/// database first — the guard is simply the last thing to drop.
+/// Keep this guard until all root users and database workers have drained.
+// Not Clone: duplicating this guard would duplicate the ownership claim.
 #[derive(Debug)]
 pub struct OwnershipGuard {
     lock: File,
@@ -42,12 +30,7 @@ impl OwnershipGuard {
     }
 }
 
-// No `Clone`/`Copy` on purpose: duplicating the guard would duplicate the
-// ownership claim itself, and exporting the descriptor would let another
-// holder outlive this process's drain discipline.
-
-/// Why exclusive ownership could not be established. Every variant carries a
-/// redacted machine reason code, never a path or raw error.
+/// Why exclusive ownership could not be established.
 #[derive(Debug)]
 pub enum OwnershipError {
     /// The root path is not a usable private directory.
@@ -74,19 +57,14 @@ impl OwnershipError {
     }
 }
 
-/// Acquire the writer lock for serving: the lock file must already exist and
-/// be a private regular file. Nothing is ever created or written on this
-/// path, so a refused process leaves the root byte-identical.
+/// Acquire the existing writer lock for serving without modifying the root.
 pub fn acquire_writer_lock(root: &Path) -> Result<OwnershipGuard, OwnershipError> {
     let root_fd = open_root_directory(root)?;
     let fd = open_existing_lock(&root_fd)?;
     lock_exclusive(fd)
 }
 
-/// Acquire the writer lock for explicit host initialization. The caller must
-/// have verified the root is empty first; this creates `writer.lock` (0600,
-/// exclusive, descriptor-relative) only when it does not yet exist and syncs
-/// the root directory so the new entry is durable.
+/// Create and acquire the writer lock during initialization.
 pub fn acquire_or_create_writer_lock(root: &Path) -> Result<OwnershipGuard, OwnershipError> {
     let root_fd = open_root_directory(root)?;
     let fd = match fs::statat(&root_fd, LOCK_NAME, AtFlags::SYMLINK_NOFOLLOW) {
@@ -111,9 +89,7 @@ pub fn acquire_or_create_writer_lock(root: &Path) -> Result<OwnershipGuard, Owne
     lock_exclusive(fd)
 }
 
-/// The root contains only the stable lock entry (which may legitimately be
-/// absent). Any other entry means this is not an explicitly empty dedicated
-/// root, and initialization must refuse without touching anything.
+/// Check whether only the optional lock entry exists in the root.
 pub fn root_is_empty_apart_from_lock(root_fd: &File) -> Result<bool, OwnershipError> {
     let directory = Dir::read_from(root_fd).map_err(|_| OwnershipError::Io("root_read_failed"))?;
     for entry in directory {
@@ -127,8 +103,7 @@ pub fn root_is_empty_apart_from_lock(root_fd: &File) -> Result<bool, OwnershipEr
     Ok(true)
 }
 
-/// Open the root as a private (0700) directory through a validated
-/// descriptor; the final component must not be a symlink.
+/// Open a private root directory without following symlinks.
 fn open_root_directory(root: &Path) -> Result<File, OwnershipError> {
     let fd = fs::open(
         root,

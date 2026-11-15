@@ -1,15 +1,5 @@
-//! PoC P7: scripted end-to-end personal-storage journey on a fresh root.
-//!
-//! Exercises the real product router and `root::initialize_empty_root` (the
-//! actual host-init path, not a seeded database) end to end: one-use setup →
-//! local login → folder creation → uploads (binary, Unicode, empty, multi-MB)
-//! → listing/rename → exact download with digest verification → logout/login →
-//! process-equivalent restart → acknowledged inventory unchanged. A second
-//! seeded account and an unrelated administrator are then denied read access
-//! to the first account's files by every S1 route.
-//!
-//! This is the PoC bar (docs/poc-milestone.md), not S1 acceptance: no
-//! move/delete, no sharing, no admin content privilege is claimed here.
+//! End-to-end personal-storage journey on a fresh root, including restart and
+//! cross-account read isolation.
 #![cfg(feature = "test-harness")]
 #[path = "../common/mod.rs"]
 mod common;
@@ -638,7 +628,6 @@ fn decode_chunked(mut bytes: &[u8]) -> Vec<u8> {
 async fn full_journey_and_restart_invariance() {
     let mut journey = Journey::new("restart-invariance").await;
 
-    // One-use setup: exactly one admin is created, then setup closes.
     journey.setup_admin().await;
     let setup_status = journey
         .request(
@@ -651,7 +640,6 @@ async fn full_journey_and_restart_invariance() {
         .await;
     assert_eq!(setup_status.status, 404, "setup closes after consumption");
 
-    // Local login.
     let owner = journey.login(OWNER_HANDLE, OWNER_PASSWORD).await;
     let root = journey.list_root(&owner).await;
     let root_id = root["root"]["id"].as_str().unwrap().to_owned();
@@ -663,7 +651,6 @@ async fn full_journey_and_restart_invariance() {
         "empty root listing"
     );
 
-    // Upload the full fixture matrix to the root.
     let binary: Vec<u8> = (0..=255u8).cycle().take(256 * 1024 + 17).collect();
     let unicode: Vec<u8> = "Snowman ☃ — café 雪\n".repeat(4096).into_bytes();
     let empty: Vec<u8> = Vec::new();
@@ -691,7 +678,6 @@ async fn full_journey_and_restart_invariance() {
         ));
     }
 
-    // A folder plus a name-only rename of the first uploaded file.
     let folder = journey.create_folder(&owner, &root_id, "docs").await;
     assert_eq!(folder["kind"].as_str().unwrap(), "folder");
 
@@ -711,7 +697,6 @@ async fn full_journey_and_restart_invariance() {
         .await;
     assert_eq!(renamed["name"].as_str().unwrap(), "binary-renamed.bin");
 
-    // Exact download with digest verification for every uploaded file.
     for (name, id) in &uploaded {
         let response = journey.download(&owner, id).await;
         assert_eq!(
@@ -728,12 +713,10 @@ async fn full_journey_and_restart_invariance() {
         );
     }
 
-    // Acknowledged inventory before restart (after the rename).
     let listing = journey.list_root(&owner).await;
     let before = inventory(listing["items"].as_array().unwrap());
     assert_eq!(before.len(), 5, "4 files + 1 folder");
 
-    // Logout revokes the session, then a fresh login works.
     let logout = journey
         .request(
             "POST",
@@ -752,7 +735,6 @@ async fn full_journey_and_restart_invariance() {
         .await;
     assert_eq!(me.status, 401, "logout revokes the session");
 
-    // Restart (close DB + rebuild router), then compare acknowledged inventory.
     journey.restart().await;
     let owner_after = journey.login(OWNER_HANDLE, OWNER_PASSWORD).await;
     let listing = journey.list_root(&owner_after).await;
@@ -762,7 +744,6 @@ async fn full_journey_and_restart_invariance() {
         "acknowledged inventory unchanged after restart"
     );
 
-    // The renamed file still round-trips exactly after restart.
     let response = journey.download(&owner_after, binary_id).await;
     assert_eq!(response.body.as_ref(), binary.as_slice());
 
@@ -785,7 +766,6 @@ async fn isolation_second_account_and_admin_denied() {
     let folder = journey.create_folder(&owner, &root_id, "private").await;
     let folder_id = folder["id"].as_str().unwrap().to_owned();
 
-    // Stop, seed a second account and an unrelated administrator, restart.
     journey.stop().await;
     let connection = sqlite::open_writer(&journey.db_path, BUSY).unwrap();
     seed_account(
@@ -812,7 +792,6 @@ async fn isolation_second_account_and_admin_denied() {
     ] {
         let actor = journey.login(handle, password).await;
 
-        // Own root is empty and contains none of the owner's entries.
         let own_root = journey.list_root(&actor).await;
         assert_eq!(
             own_root["items"].as_array().unwrap().len(),
@@ -820,7 +799,6 @@ async fn isolation_second_account_and_admin_denied() {
             "{handle} sees an empty private root"
         );
 
-        // The owner's file bytes are undiscoverable via content GET/HEAD.
         for method in ["GET", "HEAD"] {
             let response = journey
                 .request(
@@ -834,7 +812,6 @@ async fn isolation_second_account_and_admin_denied() {
             assert_eq!(response.status, 404, "{handle} {method} owner file");
         }
 
-        // The owner's folder is undiscoverable via the folder-children route.
         let response = journey
             .request(
                 "GET",
@@ -846,7 +823,6 @@ async fn isolation_second_account_and_admin_denied() {
             .await;
         assert_eq!(response.status, 404, "{handle} list owner folder");
 
-        // The owner's root is undiscoverable by explicit ID.
         let response = journey
             .request(
                 "GET",
@@ -859,7 +835,6 @@ async fn isolation_second_account_and_admin_denied() {
         assert_eq!(response.status, 404, "{handle} list owner root");
     }
 
-    // The owner still reads their own bytes after the isolation seeding.
     let response = journey.download(&owner, &secret_id).await;
     assert_eq!(response.body.as_ref(), secret.as_slice());
 

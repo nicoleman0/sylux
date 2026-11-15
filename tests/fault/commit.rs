@@ -1,5 +1,4 @@
-//! Deterministic commit-boundary fault observations using real SQLite workers.
-//! Product recovery assertions intentionally remain RED against the T021 stub.
+//! Commit-boundary fault observations using real SQLite workers.
 
 #[path = "../common/mod.rs"]
 mod common;

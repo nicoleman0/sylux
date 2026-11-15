@@ -1,24 +1,3 @@
-//! Sylux entry point.
-//!
-//! `sylux init` / `sylux serve` implement the reviewed root-binding,
-//! ownership and startup flow (s1-design-review §3):
-//!
-//! ```text
-//! ownership.lock_acquire -> ownership.acquired -> (manifest)
-//! -> database.open -> binding.verified -> migration.start
-//! -> recovery.start -> listener.bind
-//! ```
-//!
-//! Every refusal is fail-closed: a refused process exits nonzero, never
-//! reaches migration/recovery/listener, and leaves the root byte-identical
-//! (refused database connections are closed cleanly so SQLite's WAL siblings
-//! are checkpointed away, not left behind or deleted manually).
-//!
-//! Running the binary with no subcommand retains the H0 static-asset
-//! scaffold surface pinned by scripts/test-s1-runner.py (DEFAULT_SURFACE
-//! row). That path binds no storage root, owns no product route, and is
-//! replaced by the qualified product surface in later S1 tasks.
-
 use std::{env, ffi::OsString, net::SocketAddr, process::ExitCode, time::Duration};
 
 use axum::{Router, routing::get};
@@ -74,9 +53,6 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Explicit host initialization: creates the bound state on an empty
-/// dedicated root and exits. It never binds a listener, and an existing
-/// installation is refused rather than reset.
 fn run_init(configuration: &CliConfig) -> ExitCode {
     match root::initialize_empty_root(&configuration.root, DEFAULT_BUSY_TIMEOUT) {
         Ok(_) => {
@@ -84,8 +60,7 @@ fn run_init(configuration: &CliConfig) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            // A held lock already emitted ownership.refused inside the
-            // ownership flow; classify everything else as an init refusal.
+            // Lock contention already emitted ownership.refused.
             if !matches!(
                 error,
                 root::InitError::Ownership(ownership::OwnershipError::LockHeld)
@@ -97,10 +72,7 @@ fn run_init(configuration: &CliConfig) -> ExitCode {
     }
 }
 
-/// Serve the bound installation. Ownership first, then binding, then
-/// migration, recovery, and only then the listener.
 async fn run_serve(configuration: CliConfig) -> ExitCode {
-    // 1. Lifetime exclusion before anything touches the root.
     contract_event("ownership.lock_acquire");
     let guard = match ownership::acquire_writer_lock(&configuration.root) {
         Ok(guard) => guard,
@@ -109,9 +81,6 @@ async fn run_serve(configuration: CliConfig) -> ExitCode {
                 ownership::OwnershipError::LockHeld => {
                     contract_event_reason("ownership.refused", error.reason())
                 }
-                // A root or lock file that is missing, aliased or not private
-                // is not a bound installation: refuse like any other binding
-                // failure, before the database is ever opened.
                 _ => contract_event_reason("binding.refused", error.reason()),
             }
             return ExitCode::FAILURE;
@@ -119,7 +88,6 @@ async fn run_serve(configuration: CliConfig) -> ExitCode {
     };
     contract_event("ownership.acquired");
 
-    // 2. Manifest.
     let manifest = match root::read_manifest(&configuration.root) {
         Ok(manifest) => manifest,
         Err(error) => {
@@ -128,14 +96,12 @@ async fn run_serve(configuration: CliConfig) -> ExitCode {
         }
     };
 
-    // 3. Protected material precedes SQLite: an early refusal must not create
-    // WAL/SHM siblings in an otherwise unchanged rejected installation.
+    // Validate before SQLite can create WAL/SHM files in a rejected installation.
     if let Err(error) = root::verify_protected_material(&configuration.root) {
         contract_event_reason("binding.refused", error.reason());
         return ExitCode::FAILURE;
     }
 
-    // 4. Bound database under the verified connection policy.
     contract_event("database.open");
     let bound = match root::open_bound_database(&configuration.root, DEFAULT_BUSY_TIMEOUT) {
         Ok(bound) => bound,
@@ -145,16 +111,13 @@ async fn run_serve(configuration: CliConfig) -> ExitCode {
         }
     };
     if let Err(error) = root::verify_binding(&bound, &configuration.root, &manifest) {
-        // Close cleanly before announcing the refusal: the checkpointing
-        // close leaves bound state byte-identical (WAL siblings are removed
-        // by SQLite itself, never by us).
+        // Let SQLite checkpoint and remove its WAL files before reporting refusal.
         drop(bound);
         contract_event_reason("binding.refused", error.reason());
         return ExitCode::FAILURE;
     }
     contract_event("binding.verified");
 
-    // 5. Migration (no-op at the supported version, verified by inspection).
     contract_event("migration.start");
     if let Err(error) = schema::apply_migrations(&bound.connection) {
         drop(bound);
@@ -162,7 +125,6 @@ async fn run_serve(configuration: CliConfig) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // 6. Fail-closed recovery checks before readiness.
     contract_event("recovery.start");
     if let Err(error) = schema::recovery_checks(&bound.connection) {
         drop(bound);
@@ -170,7 +132,6 @@ async fn run_serve(configuration: CliConfig) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // 7. Reconciliation and listener setup retain ownership throughout.
     match serve_listener(configuration, guard, bound).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(reason) => {
@@ -180,10 +141,6 @@ async fn run_serve(configuration: CliConfig) -> ExitCode {
     }
 }
 
-/// Bind the TLS listener and serve until terminated. On shutdown, admission
-/// closes first, the outer server task is joined, the local database handle is
-/// closed, and the ownership descriptor remains locked until process teardown
-/// has dropped all per-connection workers and their database handles.
 async fn serve_listener(
     configuration: CliConfig,
     guard: ownership::OwnershipGuard,
@@ -248,8 +205,7 @@ async fn serve_listener(
     let app = http::router(auth)
         .route("/healthz", get(|| async { "ok" }))
         .fallback(http::assets::serve);
-    // Install signal handling before spawning anything that owns root/DB
-    // state. An early error can then drop everything without detaching work.
+    // Signal setup must succeed before spawning tasks that could outlive an error.
     let mut terminate = signal(SignalKind::terminate()).map_err(|_| "signal_setup_failed")?;
     let handle = axum_server::Handle::new();
     let server_handle = handle.clone();
@@ -260,7 +216,6 @@ async fn serve_listener(
             .serve(app.into_make_service())
             .await
     });
-    // Confirm the listener is actually serving before announcing readiness.
     let listening = tokio::time::timeout(Duration::from_secs(5), handle.listening()).await;
     if !matches!(listening, Ok(Some(_))) {
         let _ = task.await;
@@ -270,8 +225,6 @@ async fn serve_listener(
     }
     contract_event("listener.bind");
 
-    // Wait for termination (or the server ending on its own), then drain in
-    // order: graceful shutdown, join, close database, process-lifetime lock.
     let server_joined = tokio::select! {
         _ = tokio::signal::ctrl_c() => false,
         _ = terminate.recv() => false,
@@ -281,9 +234,7 @@ async fn serve_listener(
         }
     };
     if server_joined {
-        // The select already consumed the JoinHandle output; do not poll the
-        // completed handle again. Connection workers are dropped by runtime
-        // teardown while the forgotten descriptor still owns the lock.
+        // The select consumed this JoinHandle; polling it again would panic.
         let _ = workers.shutdown().await;
         drop(bound);
         retain_guard_until_process_exit(guard);
@@ -294,9 +245,6 @@ async fn serve_listener(
     Ok(())
 }
 
-/// Join the outer server before closing the local database handle. Retain
-/// ownership until process teardown because axum-server's independently
-/// spawned connection workers can outlive its outer serve future.
 async fn drain_server_task(
     mut task: tokio::task::JoinHandle<std::io::Result<()>>,
     bound: root::BoundDatabase,
@@ -305,8 +253,7 @@ async fn drain_server_task(
     join_timeout: Duration,
 ) {
     if tokio::time::timeout(join_timeout, &mut task).await.is_err() {
-        // Dropping a timed-out JoinHandle would detach the server and could
-        // unlock the root while its database/root users were still running.
+        // Dropping the handle would detach a task that still uses the root.
         task.abort();
         let _ = task.await;
     }
@@ -317,15 +264,12 @@ async fn drain_server_task(
     retain_guard_until_process_exit(guard);
 }
 
-/// Keep the lock descriptor open until the process runtime has dropped every
-/// spawned connection worker and its AuthState/database handle. Process exit
-/// then closes the descriptor; there is no manual early-unlock or reacquire.
+// Connection workers can outlive the server future; keep ownership until process exit.
 fn retain_guard_until_process_exit(guard: ownership::OwnershipGuard) {
     std::mem::forget(guard);
 }
 
-/// The retained H0 scaffold surface (see the module documentation). Not a
-/// product serve path: no root is bound and no product route exists.
+/// Static-only loopback server; no storage root or product routes.
 async fn scaffold_only() -> ExitCode {
     let address: SocketAddr = match env::var("SYLUX_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:3000".to_owned())

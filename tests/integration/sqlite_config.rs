@@ -1,5 +1,5 @@
-//! T005/T007 connection-policy scenarios through the product SQLite workers.
-//! Raw SQLite controls below are HARNESS ONLY, never product-policy RED/PASS.
+//! Connection-policy scenarios through the product SQLite workers.
+//! Raw SQLite controls below are harness-only, not product-policy evidence.
 #[path = "../common/mod.rs"]
 mod common;
 

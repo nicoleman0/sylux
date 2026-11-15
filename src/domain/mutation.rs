@@ -1,5 +1,4 @@
-//! Durable mutation outcome DTOs. Results are the immutable revision identity;
-//! the completed body digest is deliberately not used as result identity.
+//! Durable mutation outcome types.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedResult {
@@ -20,8 +19,7 @@ pub enum MutationResult {
 
 use std::sync::{Arc, Mutex, Weak};
 
-/// Process-local admission gate. Durable mutation state remains authoritative;
-/// this gate only serializes the current execution owner and shutdown/loss.
+/// Process-local gate for the current execution owner and shutdown/loss.
 #[derive(Clone, Default)]
 pub struct OwnershipGate(Arc<Mutex<GateState>>);
 
@@ -32,14 +30,14 @@ struct GateState {
     stopped: bool,
 }
 
-/// Non-cloneable ownership authority; loss or shutdown invalidates it.
+/// Ownership authority invalidated by loss or shutdown.
 pub struct OwnershipPermit {
     gate: Weak<Mutex<GateState>>,
     generation: u64,
     owner: String,
 }
 
-/// One-use authority to cross the final execution boundary.
+/// One-use authority for the final execution boundary.
 pub struct ExecutionPermit {
     _ownership: OwnershipPermit,
 }
@@ -52,8 +50,6 @@ pub enum OwnershipError {
 }
 
 impl OwnershipGate {
-    /// Acquire exclusive ownership. A repeated acquisition by the same owner
-    /// returns the existing valid authority only after its previous permit drops.
     pub fn acquire(&self, owner: impl Into<String>) -> Result<OwnershipPermit, OwnershipError> {
         let owner = owner.into();
         let mut state = self.0.lock().map_err(|_| OwnershipError::Unavailable)?;

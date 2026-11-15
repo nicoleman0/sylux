@@ -1,10 +1,10 @@
 {
-  "sync_commit": "uncommitted changes based on 5a56f38f7dfaa14598a5e4b38216195bd4649a6f",
+  "sync_commit": "26ac8c4783a9c8745e31045929eb6a2becaf0fad",
   "files": {
     "src/http/accounts.rs": "87ac3cd0815b75585c222ff4c4b022f3b70e9d40d332c985ee867dc71401ae50",
-    "src/domain/authz.rs": "d9c56de2c4a3d293d1948f174b8f8d3dd04711b76c2e1144c7087ec2fafafdff",
-    "src/persistence/sqlite.rs": "0c16f750a86ec81ba626771780c5f3ad1e6b88dc1b07d95988cf4c9a14c4acfb",
-    "tests/contract/setup_auth.rs": "5fd89be11db63ee30e6bd802c9f4242f5feb3e0a8eaac9db0dc520bc0d8a8c14"
+    "src/domain/authz.rs": "27575baa2bcff68c319ea2f4482a7e0438572222883e57a51d0cc14600c3a664",
+    "src/persistence/sqlite.rs": "86f290e5c29488f72504b5b05ba21d9f3b49bce56188d507b5f724e3bc62beb5",
+    "tests/contract/setup_auth.rs": "aeaf2f744a1dc8d21bbac32acfa2026de4e54e07eb1c89497435aef8eb5fa52c"
   },
   "review_policy": "A changed source hash requires protocol and model review; never refresh hashes without review.",
   "contract": "concurrent_account_authority_changes_preserve_an_enabled_admin_and_reject_revoked_actor",

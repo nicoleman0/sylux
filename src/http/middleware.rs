@@ -1,7 +1,7 @@
 use axum::http::{HeaderMap, header::COOKIE};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-/// Parsed authenticated cookie; deliberately not `Debug` because of the bearer secret.
+// No Debug: this contains a bearer secret.
 pub struct SessionCookie {
     pub session_id: String,
     pub secret: [u8; 32],
@@ -65,11 +65,7 @@ pub fn origin_matches(headers: &HeaderMap, expected: &str) -> bool {
     origins.next().is_none() && origin.to_str().ok() == Some(expected)
 }
 
-/// Origin gate for safe (GET) bootstrap endpoints such as `GET /auth/csrf` and
-/// `GET /setup`. Browsers omit `Origin` on same-origin GET requests, so an
-/// absent Origin is treated as same-origin; a present-but-mismatched Origin is
-/// still rejected. State-changing handlers must keep using the strict
-/// `origin_matches` (their CSRF/setup token is the primary defense).
+/// Browsers may omit Origin on same-origin GETs. Mutations must use origin_matches.
 pub fn origin_absent_or_matches(headers: &HeaderMap, expected: &str) -> bool {
     let mut origins = headers.get_all(axum::http::header::ORIGIN).iter();
     let Some(origin) = origins.next() else {

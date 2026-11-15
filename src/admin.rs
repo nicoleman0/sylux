@@ -1,4 +1,3 @@
-//! Offline administrator recovery under the installation writer lock.
 use std::{
     io::{self, IsTerminal, Read},
     path::Path,
@@ -12,8 +11,6 @@ use crate::{
     persistence::{ownership, root, schema, sqlite::DEFAULT_BUSY_TIMEOUT},
 };
 
-/// Recover one existing administrator. No listener, migrations or payload I/O.
-/// Errors are fixed redacted diagnostics, including uncertain commit outcomes.
 pub async fn reset_password_from_stdin(root_path: &Path, handle: &str) -> Result<(), &'static str> {
     verify_recovery_owner(root_path, rustix::process::geteuid().as_raw())?;
     let _guard = ownership::acquire_writer_lock(root_path).map_err(|error| match error {

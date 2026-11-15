@@ -10,8 +10,6 @@ fi
 mkdir -p -- "$DESTINATION"
 DESTINATION="$(cd -- "$DESTINATION" && pwd)"
 
-# Missing required build products are explicit blockers. Browser binaries belong
-# to T004 and are recorded as pending here until that harness exists.
 missing=0
 {
   printf '# Sanitized S1 environment capture\n'

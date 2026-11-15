@@ -1,4 +1,4 @@
-//! S1 A07/A08 real-route content contracts over validated loopback TLS.
+//! Real-route content contracts over validated loopback TLS.
 #[path = "../common/mod.rs"]
 mod common;
 

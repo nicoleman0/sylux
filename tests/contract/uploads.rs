@@ -1,4 +1,4 @@
-//! PoC P5 real HTTP + SQLite upload/publication/content contracts.
+//! HTTP and SQLite upload, publication and content contracts.
 #[path = "../common/mod.rs"]
 mod common;
 

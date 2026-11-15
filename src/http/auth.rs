@@ -182,8 +182,7 @@ pub async fn login(
         return fail(StatusCode::FORBIDDEN);
     };
 
-    // Consume the one-time pre-session before password work, preventing two
-    // concurrent requests from promoting the same anonymous credential.
+    // Consume before password work so concurrent requests cannot reuse the credential.
     let expected = {
         let Ok(mut anonymous) = state.anonymous.lock() else {
             return fail(StatusCode::INTERNAL_SERVER_ERROR);
@@ -239,8 +238,7 @@ pub async fn login(
     let session_verifier = crate::domain::authz::verifier(&secret_raw);
     let csrf_verifier = crate::domain::authz::verifier(&csrf_raw);
 
-    // Recheck and insert under one database lock: a disable/reset during or
-    // after Argon2 cannot issue a session from the stale credential snapshot.
+    // Recheck after Argon2 under the insertion lock so disable/reset cannot race issuance.
     let account_id = account.account_id.clone();
     let expected_epoch = account.credential_epoch;
     let expected_verifier = account.password_verifier.clone();

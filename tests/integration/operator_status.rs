@@ -1,4 +1,4 @@
-//! T029/T030 redacted operator status API checks over real HTTP and SQLite.
+//! Redacted operator status API checks over real HTTP and SQLite.
 #[path = "../common/mod.rs"]
 mod common;
 

@@ -120,9 +120,7 @@ pub struct TlsFiles {
     pub leaf_key: PathBuf,
 }
 impl TlsFiles {
-    /// Generates fresh public CA + leaf and private keys only beneath the owned root.
-    /// No secret is passed on argv, stdout, or persisted evidence. OpenSSL is existing
-    /// tooling; this helper never provisions packages or changes host trust.
+    /// Generate keys beneath the owned root without changing host trust or exposing secrets.
     pub fn generate(root: &FixtureRoot, directory: &str) -> io::Result<Self> {
         Self::generate_with_san(root, directory, "DNS:localhost,IP:127.0.0.1")
     }
@@ -344,11 +342,7 @@ pub fn cert_file_permissions_are_private(path: &Path) -> io::Result<bool> {
         && metadata.permissions().mode() & 0o077 == 0)
 }
 
-/// Loopback-TLS product-router harness: serves the real product router
-/// (`sylux::http::router`) over a synthetic-CA loopback TLS listener so contract
-/// tests exercise the actual route stack with strict certificate validation.
-/// Reuses the reviewed `TlsFiles` identity and `axum_server` TLS acceptor; no new
-/// trust surface, no host trust change, no secrets on argv/stdout/evidence.
+/// Real product router over loopback TLS with strict certificate validation.
 pub struct TlsApiServer {
     address: SocketAddr,
     handle: Handle<SocketAddr>,
@@ -366,9 +360,7 @@ impl TlsApiServer {
         Self::start_with_origin(root, tls, shutdown_timeout, |_| app).await
     }
 
-    /// Bind an ephemeral loopback TLS listener, then build a real application using
-    /// its exact public origin. Browser fixtures use this to make the router's
-    /// Origin policy and trusted certificate hostname agree with the bound port.
+    /// Use the bound port in the app origin so Origin checks match the TLS fixture.
     pub async fn start_with_origin<F>(
         root: &FixtureRoot,
         tls: &TlsFiles,
@@ -450,10 +442,7 @@ impl Drop for TlsApiServer {
     }
 }
 
-/// Establish an async client TLS connection validated against the synthetic CA,
-/// returning an `AsyncRead + AsyncWrite` stream the caller drives with raw HTTP
-/// (the same shape the plaintext `tokio::net::TcpStream` contract fixtures use).
-/// `ca_der` is the DER CA bytes (e.g. `std::fs::read(&tls.ca_der)`).
+/// Connect with the fixture CA and return a stream for raw HTTP requests.
 pub async fn tls_connect(
     address: SocketAddr,
     ca_der: &[u8],

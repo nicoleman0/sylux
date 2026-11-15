@@ -21,7 +21,6 @@ path = "src/lib.rs"
 default = []
 test-harness = []
 
-# Register each nested test only alongside its real source file.
 [[test]]
 name = "harness_self"
 path = "tests/harness_self.rs"

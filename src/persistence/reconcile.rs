@@ -1,8 +1,4 @@
-//! Fail-closed restart reconciliation (s1-design-review §5).
-//!
-//! The caller must retain the root ownership guard and perform manifest/key/
-//! database binding before calling this module. Reconciliation runs before
-//! readiness; this module never adopts an orphan or deletes any payload.
+//! Fail-closed restart reconciliation.
 
 use std::{
     fs::{self, File},
@@ -41,14 +37,12 @@ pub enum RecoveryDisposition {
     ExpiredRejected,
 }
 
-/// Summary of restart reconciliation outcomes.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReconcileReport {
     pub dispositions: Vec<RecoveryDisposition>,
     pub ready: bool,
 }
 
-/// Failure to perform restart reconciliation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileError {
     Unavailable,
@@ -82,13 +76,7 @@ struct Candidate {
     final_file: bool,
 }
 
-/// Scan persisted upload state and payload candidates before serving traffic.
-///
-/// Reads are paginated and payloads are hashed one at a time using a fixed
-/// buffer. SQLite owns WAL recovery: this function never unlinks or edits WAL
-/// files. Result/status replay remains subject to current authentication in the
-/// coordinator; a no-result final is merely re-synced here and cannot be
-/// continued until the request path rechecks authorization and preconditions.
+/// Requires root ownership and runs before readiness.
 pub async fn reconcile(
     workers: &SqliteWorkers,
     root_path: &Path,
@@ -282,10 +270,7 @@ async fn read_attempts(
     workers: &SqliteWorkers,
     mutation_id: &str,
 ) -> Result<Vec<AttemptRow>, ReconcileError> {
-    // Bound total memory per mutation by retaining only a bounded page at once;
-    // the caller processes this collection page-wise in later slices if the
-    // attempt count grows. For S1, attempt rows are capped by the admission
-    // limits and the page cap below fails closed instead of truncating evidence.
+    // Fail closed if the page cap is exceeded; never truncate evidence.
     let id = mutation_id.to_owned();
     workers
         .read(move |db| {

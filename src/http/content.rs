@@ -1,6 +1,4 @@
 #![allow(clippy::result_large_err)]
-// Axum responses are the deliberate non-allocating control-flow error channel
-// for these request-local database/validation helpers.
 
 use super::{AuthState, middleware::session_cookie};
 use crate::domain::{
@@ -163,9 +161,7 @@ fn parse_range(value: &str, length: u64) -> ByteRange {
     let Some(specification) = value.strip_prefix("bytes=") else {
         return ByteRange::Invalid;
     };
-    // A syntactically valid, satisfiable multi-range request may be answered
-    // with the complete entity. Unsatisfiable members do not invalidate a set
-    // that contains another satisfiable member; malformed members do.
+    // Valid multi-range sets may return the whole entity; only one member must be satisfiable.
     if specification.contains(',') {
         let members = specification
             .split(',')

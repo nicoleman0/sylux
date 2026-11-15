@@ -1,10 +1,4 @@
-//! Durable, create-only payload publication.
-//!
-//! Staging and final shards live beneath the same validated storage root.
-//! Every staging file is exclusive and server-named. Publication performs a
-//! checked write, SHA-256 verification, file sync, staging-directory sync,
-//! `RENAME_NOREPLACE`, and final-directory/created-ancestry sync. No failure
-//! path deletes candidate bytes or falls back to an overwriting rename/copy.
+//! Create-only payload publication. Candidate bytes are never deleted or overwritten.
 
 use rustix::fs::{self, FileType, Mode, OFlags, RenameFlags};
 use sha2::{Digest, Sha256};
@@ -50,7 +44,7 @@ pub struct VerifiedPayload {
     pub length: u64,
 }
 
-/// Validated directory descriptors for one installation's payload storage.
+/// Validated payload directory descriptors.
 pub struct PayloadStore {
     staging: File,
     payloads: File,
@@ -86,7 +80,7 @@ impl PayloadStore {
         self.publish_fault_hook = hook;
     }
 
-    /// Exclusively create a staging file named `<attempt-id>-<blob-id>`.
+    /// Exclusively create a server-named staging file.
     pub fn start(
         &self,
         staging_name: &str,
@@ -123,8 +117,7 @@ impl PayloadStore {
         })
     }
 
-    /// Open a referenced blob without following links and verify its complete
-    /// length and SHA-256 before exposing a stream to an authorized reader.
+    /// Verify a referenced blob without following links before exposing it.
     pub fn open_verified(
         &self,
         blob_id: &str,
@@ -217,9 +210,7 @@ impl StagingPayload {
         Ok(())
     }
 
-    /// Durably publish this completed body. The expected digest is supplied by
-    /// the admission layer only after its own streaming hash has been checked;
-    /// the independently computed value here must still match exactly.
+    /// Publish the body after checking its length and independently recomputed digest.
     pub fn publish(self, expected_sha256: [u8; 32]) -> Result<PublishedPayload, PayloadError> {
         if self.written != self.declared_length {
             return Err(PayloadError::LengthMismatch);

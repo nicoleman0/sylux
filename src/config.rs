@@ -1,11 +1,3 @@
-//! Strict process configuration (s1-design-review §8 source layout).
-//!
-//! No CLI-framework dependency: the accepted surface is exactly the reviewed
-//! flags below and anything else refuses startup. Secret values are never
-//! accepted as arguments or environment variables. The PoC boundary
-//! (docs/poc-milestone.md) keeps loopback the default and allows non-loopback
-//! binds only through an explicit flag, and only onto private addresses.
-
 use std::{
     env,
     ffi::OsString,
@@ -15,15 +7,11 @@ use std::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
-    /// Explicit one-time host initialization of an empty dedicated root.
     Init,
-    /// Serve the bound installation (never initializes anything).
     Serve,
-    /// Reset an existing administrator password while the service is stopped.
     AdminResetPassword,
 }
 
-/// Parsed process configuration.
 #[derive(Debug)]
 pub struct CliConfig {
     pub command: CommandKind,
@@ -33,15 +21,12 @@ pub struct CliConfig {
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub allow_non_loopback: bool,
-    /// Optional externally visible HTTPS origin used for CSRF checks.
     pub public_origin: Option<String>,
-    /// Compiled static assets directory (environment override only).
     pub assets: PathBuf,
     pub admin_handle: Option<String>,
 }
 
-/// Why the configuration was refused. Redacted codes only: never echo
-/// argument values back.
+/// Redacted codes only; never echo argument values.
 #[derive(Debug)]
 pub enum ConfigError {
     Usage(&'static str),
@@ -63,9 +48,6 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// Parse subcommand arguments (excluding the program name). Environment
-/// fallbacks: `SYLUX_LISTEN` (listen address) and `SYLUX_ASSETS` (static
-/// assets), matching the H0 scaffold surface.
 pub fn parse<I>(arguments: I) -> Result<CliConfig, ConfigError>
 where
     I: IntoIterator<Item = OsString>,
@@ -237,9 +219,6 @@ fn set_once<T>(slot: &mut Option<T>, value: T, code: &'static str) -> Result<(),
     Ok(())
 }
 
-/// PoC bind policy: loopback is always allowed; anything else requires the
-/// explicit flag and must be a private (LAN/VLAN) address. Public, unspecified
-/// and multicast addresses are always refused.
 pub fn validate_bind_address(
     address: SocketAddr,
     allow_non_loopback: bool,

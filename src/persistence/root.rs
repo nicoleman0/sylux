@@ -1,21 +1,4 @@
-//! Root binding, manifest/DB identity agreement and explicit host
-//! initialization (s1-design-review §3).
-//!
-//! Exactly one authoritative metadata store/root pairing exists. The manifest
-//! (`installation.json`) and the singleton `installation` row both carry the
-//! installation/root/database IDs and format versions; serving compares them
-//! — plus the protected mutation key — before any migration, recovery or
-//! listener. Mismatches refuse startup; nothing is auto-imported, rebound or
-//! cloned. Identity is the persisted IDs, never a pathname, device/inode or
-//! PRAGMA alone (device/inode is only used to detect replacement of the
-//! database file between validation and open).
-//!
-//! Bootstrap across manifest and database cannot be one atomic transaction.
-//! Initialization therefore: takes exclusion, checks the root is explicitly
-//! empty, writes the protected secrets, publishes the manifest through an
-//! exclusive temporary file plus a no-replace rename, then creates and binds
-//! the database. Every new directory entry is synced before the next step;
-//! any interruption leaves a closed incomplete root that serving refuses.
+//! Bind a private storage root to its manifest and database identity.
 
 use std::{
     fs::File,
@@ -44,16 +27,15 @@ pub const DB_NAME: &str = "sylux.sqlite3";
 pub const KEY_NAME: &str = "mutation.key";
 pub const SETUP_AUTHORIZATION_NAME: &str = "setup.authorization";
 
-/// Mutation signing key length in bytes (256-bit).
+/// Mutation signing key length in bytes.
 pub const KEY_LENGTH: usize = 32;
-/// Hex-encoded application ID length (128-bit IDs).
+/// Hex-encoded application ID length.
 pub const ID_LENGTH: usize = 32;
-/// Manifest JSON size bound; the real manifest is a few hundred bytes.
+/// Maximum manifest JSON size.
 const MANIFEST_MAX_BYTES: usize = 4096;
 
-/// The installation identity shared by the manifest and the database row.
-/// Field names are the on-disk contract; changing them is a format-version
-/// change, not an edit.
+/// Installation identity shared by the manifest and database row.
+/// Field names are part of the on-disk format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallationIdentity {
@@ -91,8 +73,7 @@ impl InstallationIdentity {
     }
 }
 
-/// Why binding failed. All reasons are redacted codes; identity mismatch
-/// reasons name the column, never the value.
+/// Binding failure. Reasons are redacted codes.
 #[derive(Debug)]
 pub enum BindingError {
     ManifestMissing,
@@ -152,8 +133,7 @@ impl BindingError {
     }
 }
 
-/// An opened, policy-verified writer connection to the bound database plus
-/// the pinned metadata directory descriptor it was opened through.
+/// Verified writer connection and pinned metadata directory descriptor.
 pub struct BoundDatabase {
     pub connection: Connection,
     _metadata: File,
@@ -165,7 +145,7 @@ pub struct InitializedRoot {
     pub identity: InstallationIdentity,
 }
 
-/// Why explicit host initialization refused or failed.
+/// Why host initialization refused or failed.
 #[derive(Debug)]
 pub enum InitError {
     /// The root is not an explicitly empty private directory.
@@ -188,9 +168,7 @@ impl InitError {
     }
 }
 
-/// Read and validate the manifest. The manifest must be a private regular
-/// file (no symlink or hardlink alias), bounded in size, and structurally a
-/// valid identity.
+/// Read a bounded private manifest without following aliases.
 pub fn read_manifest(root: &Path) -> Result<InstallationIdentity, BindingError> {
     let root_fd = open_root_directory(root)?;
     let stat = match fs::statat(&root_fd, MANIFEST_NAME, AtFlags::SYMLINK_NOFOLLOW) {
@@ -233,11 +211,8 @@ pub fn read_manifest(root: &Path) -> Result<InstallationIdentity, BindingError> 
     Ok(identity)
 }
 
-/// Open the bound database through validated descriptors: the metadata
-/// directory must be a private directory and the database a private regular
-/// file. The connection is opened under the product policy (WAL/FULL/foreign
-/// keys/busy, all read back), and the path is re-statted after the open to
-/// confirm it still references the validated inode.
+/// Open the bound database through validated descriptors and verify its
+/// connection policy. Re-stat after open to detect path replacement.
 pub fn open_bound_database(
     root: &Path,
     busy_timeout: Duration,
@@ -286,16 +261,14 @@ fn connection_open_code(error: ConnectionError) -> &'static str {
     }
 }
 
-/// Verify the protected root material before SQLite is opened. A missing or
-/// aliased key must refuse without creating WAL/SHM siblings as a side effect.
+/// Verify the protected key before opening SQLite, avoiding WAL/SHM side effects.
 pub fn verify_protected_material(root: &Path) -> Result<(), BindingError> {
     let root_fd = open_root_directory(root)?;
     verify_mutation_key(&root_fd)
 }
 
-/// Verify the full binding: the protected mutation key exists with the
-/// required shape, and manifest and database row agree on every identity
-/// field and on exactly the versions this build supports.
+/// Verify the protected key and agreement between manifest, database row and
+/// supported versions.
 pub fn verify_binding(
     bound: &BoundDatabase,
     root: &Path,
@@ -351,26 +324,17 @@ pub fn verify_binding(
     Ok(())
 }
 
-/// Explicit host initialization of an empty dedicated root
-/// (s1-design-review §3). Emits the ownership contract events. On success the
-/// root contains the stable lock, protected secrets (mutation key and the raw
-/// one-use setup authorization), the published manifest, and a bound database
-/// whose installation row agrees with the manifest. Re-running init against
-/// any existing installation refuses instead of resetting identity.
+/// Initialize an explicitly empty root. Existing installations are never reset.
 pub fn initialize_empty_root(
     root: &Path,
     busy_timeout: Duration,
 ) -> Result<InitializedRoot, InitError> {
-    // 1. The root must already be a private directory that is empty apart
-    //    from (at most) the stable lock, checked before anything is created
-    //    so a refusal never modifies the root.
     let root_fd =
         open_root_directory(root).map_err(|error| InitError::RootInvalid(error.reason()))?;
     if !ownership::root_is_empty_apart_from_lock(&root_fd).map_err(InitError::Ownership)? {
         return Err(InitError::NotExplicitlyEmpty);
     }
 
-    // 2. Exclusion before any state is created.
     super::contract_event("ownership.lock_acquire");
     let guard = ownership::acquire_or_create_writer_lock(root).map_err(|error| {
         if matches!(error, OwnershipError::LockHeld) {
@@ -380,10 +344,7 @@ pub fn initialize_empty_root(
     })?;
     super::contract_event("ownership.acquired");
 
-    // 3. Identity material. IDs are 128-bit; the mutation key and setup
-    //    authorization are 256-bit. Only the raw setup authorization is ever
-    //    written to a file, and only here; the database stores its SHA-256
-    //    verifier. Nothing is printed, logged or accepted from argv.
+    // Persist only the setup verifier in SQLite; the raw authorization stays protected.
     let installation_id = random_id()?;
     let root_id = random_id()?;
     let db_id = random_id()?;
@@ -402,7 +363,6 @@ pub fn initialize_empty_root(
         initialized: true,
     };
 
-    // 4. Protected secrets under a private directory.
     create_private_directory(&root_fd, SECRETS_DIR)?;
     let secrets_fd =
         open_subdirectory(&root_fd, SECRETS_DIR).map_err(|error| InitError::Io(error.reason()))?;
@@ -414,9 +374,6 @@ pub fn initialize_empty_root(
     )?;
     sync_fd(&secrets_fd, "secrets_sync_failed")?;
 
-    // 5. Manifest: exclusive temporary file, then durable no-replace
-    //    publication. An interrupted init leaves at most the temporary file,
-    //    and serving refuses a root without a published manifest.
     let manifest_bytes =
         serde_json::to_vec(&identity).map_err(|_| InitError::Io("manifest_encode_failed"))?;
     write_exclusive(&root_fd, MANIFEST_TMP_NAME, &manifest_bytes)?;
@@ -430,7 +387,6 @@ pub fn initialize_empty_root(
     .map_err(|_| InitError::Io("manifest_publish_failed"))?;
     sync_fd(&root_fd, "root_sync_failed")?;
 
-    // 6. Metadata directory and the bound database file.
     create_private_directory(&root_fd, METADATA_DIR)?;
     let metadata_fd =
         open_subdirectory(&root_fd, METADATA_DIR).map_err(|error| InitError::Io(error.reason()))?;
@@ -446,10 +402,6 @@ pub fn initialize_empty_root(
     sync_fd(&db_file, "database_sync_failed")?;
     sync_fd(&metadata_fd, "metadata_sync_failed")?;
 
-    // 7. Schema and the bound installation row, through the verified product
-    //    connection policy. A crash anywhere above leaves a database that
-    //    serving refuses (missing row or missing schema), never a served
-    //    partial bootstrap.
     let db_path = root.join(METADATA_DIR).join(DB_NAME);
     let connection = sqlite::open_writer(&db_path, busy_timeout)
         .map_err(|_| InitError::Io("database_open_failed"))?;
@@ -460,16 +412,11 @@ pub fn initialize_empty_root(
     }
     schema::insert_installation_row(&connection, &identity, setup_verifier)
         .map_err(|_| InitError::Io("installation_row_failed"))?;
-    // Checkpoint so the bound state is durable in the main database file,
-    // then close cleanly (SQLite removes the emptied WAL siblings itself;
-    // they are never deleted manually).
     sqlite::wal_checkpoint_truncate(&connection).map_err(|_| InitError::Io("checkpoint_failed"))?;
     sync_fd(&db_file, "database_sync_failed")?;
     drop(connection);
     sync_fd(&metadata_fd, "metadata_sync_failed")?;
 
-    // Drain order on the success path too: database closed before the lock
-    // guard drops.
     drop(guard);
     Ok(InitializedRoot { identity })
 }
