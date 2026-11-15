@@ -114,6 +114,11 @@ path = "tests/contract/content.rs"
 required-features = ["test-harness"]
 
 [[test]]
+name = "contract_archives"
+path = "tests/contract/archives.rs"
+required-features = ["test-harness"]
+
+[[test]]
 name = "integration_poc_journey"
 path = "tests/integration/poc_journey.rs"
 required-features = ["test-harness"]
@@ -179,6 +184,8 @@ axum-server = { version = "=0.9.0", default-features = false, features = ["tls-r
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 tower-http = { version = "=0.7.1", default-features = false, features = ["fs"] }
 http-body-util = { version = "=0.1.5", default-features = false }
+futures-util = { version = "=0.3.34", default-features = false }
+crc32fast = { version = "=1.5.5", default-features = false }
 tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["std", "fmt", "json"] }
 # Security-critical transitives: do not rely on a compatible but vulnerable floor.

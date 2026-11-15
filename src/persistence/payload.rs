@@ -6,6 +6,7 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 #[cfg(feature = "test-harness")]
@@ -29,6 +30,7 @@ pub enum PayloadError {
     Collision,
     Missing,
     Integrity,
+    Cancelled,
     Io(&'static str),
 }
 
@@ -124,15 +126,36 @@ impl PayloadStore {
         expected_length: u64,
         expected_sha256: [u8; 32],
     ) -> Result<VerifiedPayload, PayloadError> {
-        let mut file = check_payload(&self.payloads, blob_id, expected_length, expected_sha256)
-            .map_err(|fault| match fault {
-                PayloadFault::InvalidId => PayloadError::InvalidId,
-                PayloadFault::Missing => PayloadError::Missing,
-                PayloadFault::Io(code) => PayloadError::Io(code),
-                PayloadFault::NotPrivateFile
-                | PayloadFault::LengthMismatch
-                | PayloadFault::DigestMismatch => PayloadError::Integrity,
-            })?;
+        self.open_verified_unless(
+            blob_id,
+            expected_length,
+            expected_sha256,
+            &AtomicBool::new(false),
+        )
+    }
+
+    /// `open_verified` that stops between reads once `cancelled` is set.
+    pub fn open_verified_unless(
+        &self,
+        blob_id: &str,
+        expected_length: u64,
+        expected_sha256: [u8; 32],
+        cancelled: &AtomicBool,
+    ) -> Result<VerifiedPayload, PayloadError> {
+        let mut file = check_payload(
+            &self.payloads,
+            blob_id,
+            expected_length,
+            expected_sha256,
+            || {
+                if cancelled.load(Ordering::Relaxed) {
+                    Err(PayloadError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+
         file.seek(SeekFrom::Start(0))
             .map_err(|_| PayloadError::Io("payload_seek_failed"))?;
         Ok(VerifiedPayload {
@@ -152,6 +175,19 @@ pub enum PayloadFault {
     LengthMismatch,
     DigestMismatch,
     Io(&'static str),
+}
+
+impl From<PayloadFault> for PayloadError {
+    fn from(fault: PayloadFault) -> Self {
+        match fault {
+            PayloadFault::InvalidId => Self::InvalidId,
+            PayloadFault::Missing => Self::Missing,
+            PayloadFault::Io(code) => Self::Io(code),
+            PayloadFault::NotPrivateFile
+            | PayloadFault::LengthMismatch
+            | PayloadFault::DigestMismatch => Self::Integrity,
+        }
+    }
 }
 
 /// Read-only access to the payload directory for offline verification.
@@ -179,18 +215,26 @@ impl PayloadVerifier {
         expected_length: u64,
         expected_sha256: [u8; 32],
     ) -> Result<(), PayloadFault> {
-        check_payload(&self.payloads, blob_id, expected_length, expected_sha256).map(|_| ())
+        check_payload(
+            &self.payloads,
+            blob_id,
+            expected_length,
+            expected_sha256,
+            || Ok(()),
+        )
+        .map(|_| ())
     }
 }
 
 /// The one rule for a valid stored payload: private regular file, recorded
 /// length, recorded SHA-256. Hashing streams through a fixed buffer.
-fn check_payload(
+fn check_payload<E: From<PayloadFault>>(
     payloads: &File,
     blob_id: &str,
     expected_length: u64,
     expected_sha256: [u8; 32],
-) -> Result<File, PayloadFault> {
+    mut check_cancelled: impl FnMut() -> Result<(), E>,
+) -> Result<File, E> {
     validate_id(blob_id).map_err(|_| PayloadFault::InvalidId)?;
     let shard = open_directory(payloads, &blob_id[..2]).map_err(fault_from_error)?;
     let fd = fs::openat(
@@ -210,14 +254,15 @@ fn check_payload(
         || stat.st_mode & 0o777 != 0o600
         || stat.st_size < 0
     {
-        return Err(PayloadFault::NotPrivateFile);
+        return Err(PayloadFault::NotPrivateFile.into());
     }
     if stat.st_size as u64 != expected_length {
-        return Err(PayloadFault::LengthMismatch);
+        return Err(PayloadFault::LengthMismatch.into());
     }
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
+        check_cancelled()?;
         let read = file
             .read(&mut buffer)
             .map_err(|_| PayloadFault::Io("payload_read_failed"))?;
@@ -228,7 +273,7 @@ fn check_payload(
     }
     let actual: [u8; 32] = hasher.finalize().into();
     if actual != expected_sha256 {
-        return Err(PayloadFault::DigestMismatch);
+        return Err(PayloadFault::DigestMismatch.into());
     }
     Ok(file)
 }
@@ -408,8 +453,9 @@ fn validate_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::{PayloadStore, PublishedPayload};
+    use super::{PayloadError, PayloadStore, PublishedPayload};
     use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::{fs, io::Read, os::unix::fs::DirBuilderExt, path::PathBuf};
 
     fn root() -> PathBuf {
@@ -492,6 +538,48 @@ mod tests {
         let mut wrong = store.start(&retry_name, 1).unwrap();
         wrong.write_chunk(b"x").unwrap();
         assert!(wrong.publish(empty_digest).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verification_checks_cancellation_before_and_between_reads() {
+        let root = root();
+        let store = PayloadStore::open(&root).unwrap();
+        let blob = "10000000000000000000000000000006";
+        let bytes = b"payload".repeat(100_000);
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let mut staging = store
+            .start(
+                &format!("00000000000000000000000000000006-{blob}"),
+                bytes.len() as u64,
+            )
+            .unwrap();
+        staging.write_chunk(&bytes).unwrap();
+        staging.publish(digest).unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert!(matches!(
+            store.open_verified_unless(blob, bytes.len() as u64, digest, &cancelled),
+            Err(PayloadError::Cancelled)
+        ));
+        let mut checks = 0;
+        assert!(matches!(
+            super::check_payload(&store.payloads, blob, bytes.len() as u64, digest, || {
+                checks += 1;
+                if checks == 2 {
+                    Err(PayloadError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(PayloadError::Cancelled)
+        ));
+        assert_eq!(checks, 2);
+        cancelled.store(false, Ordering::Relaxed);
+        assert!(
+            store
+                .open_verified_unless(blob, bytes.len() as u64, digest, &cancelled)
+                .is_ok()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

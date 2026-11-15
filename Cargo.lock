@@ -1030,6 +1030,8 @@ dependencies = [
  "axum-server",
  "base64",
  "cookie",
+ "crc32fast",
+ "futures-util",
  "getrandom 0.4.3",
  "hmac",
  "http-body-util",

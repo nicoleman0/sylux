@@ -16,6 +16,7 @@ public sharing links and WebDAV are not included. Text, image and
 [PDF previews](docs/pdf-preview.md) are available in the browser.
 
 [Folder listings](docs/folder-listings.md) support name and file-size sorting.
+Folders and selections [download as one ZIP](docs/archives.md).
 
 Keep independent copies of important files. Functional tests do not establish
 physical power-loss durability or schema upgrade/downgrade support.
