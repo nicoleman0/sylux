@@ -134,7 +134,7 @@ for (const theme of ['light', 'dark'] as const) {
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const filename = await row.locator('.filename').boundingBox();
       expect(filename?.width).toBeGreaterThan(60);
-      await page.screenshot({ path: `/tmp/sylux-modified-${theme}-${width}.png`, fullPage: true });
+      await page.screenshot({ path: test.info().outputPath(`sylux-modified-${theme}-${width}.png`), fullPage: true });
     });
   }
 }
@@ -154,7 +154,7 @@ for (const touch of [false, true]) {
       await expect(menu.locator('time')).toHaveText('Thursday, 1 January 2026 at 00:30:00 UTC');
       await expect(menu.locator('time')).toHaveAttribute('datetime', '2026-01-01T00:30:00.000Z');
       expect(await menu.ariaSnapshot()).toContain('Thursday, 1 January 2026 at 00:30:00 UTC');
-      await page.screenshot({ path: `/tmp/sylux-modified-menu-${touch ? 'touch' : 'keyboard'}.png`, fullPage: true });
+      await page.screenshot({ path: test.info().outputPath(`sylux-modified-menu-${touch ? 'touch' : 'keyboard'}.png`), fullPage: true });
       await page.keyboard.press('Escape');
       if (!touch) await expect(options).toBeFocused();
     });

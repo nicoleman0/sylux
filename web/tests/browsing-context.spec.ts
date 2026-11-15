@@ -79,7 +79,7 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByRole('button', { name: 'Preview Match 100.txt', exact: true })).toBeVisible();
       await expect(page.getByRole('group', { name: 'Selected items', exact: true })).toHaveCount(0);
       await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(1400);
-      await page.screenshot({ path: `/tmp/sylux-context-${width}-${theme}.png`, fullPage: false });
+      await page.screenshot({ path: test.info().outputPath(`sylux-context-${width}-${theme}.png`), fullPage: false });
       await page.goForward();
       await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
       await expect(page.getByLabel('Sort files by', { exact: true })).toHaveValue('size_desc');

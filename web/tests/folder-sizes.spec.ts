@@ -61,7 +61,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(options).toBeFocused();
       await expect(options).toBeInViewport();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `/tmp/syl40-${width}-${theme}.png`, fullPage: true });
+      await page.screenshot({ path: test.info().outputPath(`syl40-${width}-${theme}.png`), fullPage: true });
       backend.changeAndPause();
       await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
       await expect(page.getByRole('button', { name: 'Refresh folder', exact: true })).toHaveAttribute('aria-busy', 'true');

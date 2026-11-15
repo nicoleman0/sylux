@@ -5,10 +5,10 @@ test('catalogue uses shared tokens and switches theme', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Design system', exact: true })).toBeVisible();
   const primary = page.locator('[data-color-token="--primary"] code');
   await expect(primary).toHaveText('#146c60');
-  await page.screenshot({ path: '/tmp/sylux-modified-catalogue-light.png', fullPage: true });
+  await page.screenshot({ path: test.info().outputPath('sylux-modified-catalogue-light.png'), fullPage: true });
   await page.getByRole('button', { name: 'Use dark theme' }).click();
   await expect(primary).toHaveText('#8bd0bb');
-  await page.screenshot({ path: '/tmp/sylux-modified-catalogue-dark.png', fullPage: true });
+  await page.screenshot({ path: test.info().outputPath('sylux-modified-catalogue-dark.png'), fullPage: true });
   await expect(page.getByRole('button', { name: 'Unavailable' })).toBeDisabled();
   await expect(page.getByLabel('Disabled field')).toBeDisabled();
   await page.evaluate(() => document.documentElement.style.setProperty('--type-ui', '15px'));
