@@ -6,8 +6,9 @@ import http from 'node:http';
 import { parseArgs, redactFailure, validatePage, validateSearch, validateTrash, validatePath, observeChild, stopChild } from './workflow-measurement-helpers.mjs';
 
 test('flags reject contradictory and duplicate workloads before a run', () => {
-  for (const args of [['--scale=1000', '--scale=10000'], ['--search-only', '--without-search'], ['--search-only', '--transfers-only'], ['--transfers-only', '--without-search'], ['--quick', '--quick']]) assert.throws(() => parseArgs(args));
+  for (const args of [['--scale=1000', '--scale=10000'], ['--search-only', '--without-search'], ['--search-only', '--transfers-only'], ['--transfers-only', '--without-search'], ['--quick', '--quick'], ['--search-matrix', '--search-only'], ['--search-matrix', '--without-search'], ['--search-matrix', '--transfers-only']]) assert.throws(() => parseArgs(args));
   assert.deepEqual(parseArgs(['--quick']).scales, [1000]);
+  assert.equal(parseArgs(['--search-matrix', '--release']).searchMatrix, true);
 });
 test('actual failure sanitizer removes credentials and fixture/checkout paths', () => {
   const fixture = { password: 'secret-password', root: '/owned/fixture', ca: '/owned/fixture/tls/ca', leaf: '/owned/fixture/tls/leaf', sessions: [{ cookie: 'session.secret-cookie', csrf: 'secret-csrf' }] };

@@ -240,9 +240,9 @@ fn seed(db: &mut Connection, count: usize, password_hash: &str) -> io::Result<Va
 fn search_plan(db: &Connection) -> io::Result<Vec<String>> {
     let source = include_str!("../src/domain/search.rs");
     let literal = source
-        .split("let mut stmt = db.prepare(")
+        .split("const LIVE_SQL: &str =")
         .nth(1)
-        .and_then(|part| part.split(").map_err").next())
+        .and_then(|part| part.split("\";").next())
         .ok_or_else(|| fail("search SQL source changed"))?;
     let sql = literal
         .trim()
