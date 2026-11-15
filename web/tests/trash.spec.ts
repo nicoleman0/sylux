@@ -70,12 +70,12 @@ for (const theme of ['light', 'dark'] as const) {
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const restore = page.getByRole('button', { name: 'Restore Projects', exact: true });
       await restore.focus();
-      await page.screenshot({ path: `/private/tmp/syl59-${width}-${theme}.png` });
+      await page.screenshot({ path: test.info().outputPath(`trash-${width}-${theme}.png`) });
       await page.getByRole('button', { name: 'Next page', exact: true }).focus();
       await page.keyboard.press('Enter');
       await expect(trash.getByRole('listitem')).toHaveCount(5);
       await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeVisible();
-      await page.screenshot({ path: `/private/tmp/syl59-page-${width}-${theme}.png` });
+      await page.screenshot({ path: test.info().outputPath(`trash-page-${width}-${theme}.png`) });
       await page.getByRole('button', { name: 'Previous page', exact: true }).click();
       await restore.focus();
       await page.keyboard.press('Enter');
