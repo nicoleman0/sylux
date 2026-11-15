@@ -19,7 +19,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{Path, State},
     http::{
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, Method, StatusCode,
         header::{
             CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, REFERRER_POLICY,
             X_CONTENT_TYPE_OPTIONS,
@@ -199,8 +199,16 @@ pub async fn issue(
 pub async fn download(
     State(state): State<AuthState>,
     Path(token): Path<String>,
+    method: Method,
     headers: HeaderMap,
 ) -> Response {
+    if method != Method::GET {
+        let mut response = error(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
+        response
+            .headers_mut()
+            .insert(axum::http::header::ALLOW, HeaderValue::from_static("GET"));
+        return response;
+    }
     let Some(cookie) = session_cookie(&headers) else {
         return error(StatusCode::UNAUTHORIZED, "authentication_required");
     };

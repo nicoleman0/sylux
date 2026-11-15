@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os
+import re
+import tomllib
 from pathlib import Path
 import subprocess
 import unittest
@@ -21,6 +23,16 @@ class RequiredChecks(unittest.TestCase):
         env.update(overrides)
         return subprocess.run(['bash', '-e', '-c', gate_script()], env=env,
                               capture_output=True, text=True)
+
+    def test_contract_targets_are_in_required_native_checks(self):
+        manifest = tomllib.loads((ROOT / 'Cargo.toml').read_text())
+        native = (ROOT / '.github/workflows/ci.yml').read_text().split('\n  native:\n', 1)[1].split('\n  web-smoke:', 1)[0]
+        commands = native + (ROOT / 'scripts/check.sh').read_text()
+        selected = set(re.findall(r'--test\s+(contract_[a-z_]+)', commands))
+        required = {target['name'] for target in manifest.get('test', [])
+                    if target['name'].startswith('contract_')}
+        self.assertFalse(required - selected,
+                         f'Add contract targets to required native CI checks: {sorted(required - selected)}')
 
     def test_full_change_requires_all_selected_results(self):
         self.assertEqual(self.run_gate().returncode, 0)

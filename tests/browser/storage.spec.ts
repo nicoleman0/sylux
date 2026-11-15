@@ -234,6 +234,40 @@ test('Unicode, zero-byte, and binary files round-trip through real upload and do
     for await (const chunk of stream!) chunks.push(Buffer.from(chunk));
     expect(Buffer.concat(chunks)).toEqual(Buffer.from(item.bytes));
   }
+  const folderRow = page.locator('.file-row').filter({ has: page.getByText(fixtures.folder, { exact: true }) });
+  const folderDownload = page.waitForEvent('download');
+  await folderRow.getByRole('button', { name: `Options for ${fixtures.folder}`, exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Download', exact: true }).click();
+  const folderZip = await folderDownload;
+  expect(folderZip.suggestedFilename()).toBe(`${fixtures.folder}.zip`);
+  expect(await folderZip.failure()).toBeNull();
+  const archivePath = await folderZip.path();
+  const checked = JSON.parse(execFileSync('python3', ['-c', `
+import hashlib, json, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    assert archive.testzip() is None
+    print(json.dumps({name: hashlib.sha256(archive.read(name)).hexdigest() for name in archive.namelist() if not name.endswith('/')}))
+`, archivePath!], { encoding: 'utf8' }));
+  expect(checked[`${fixtures.folder}/${fixtures.nested}/${fixtures.file}`]).toBe(fixtures.sha256);
+
+  for (const name of [fixtures.folder, cases[0]!.name, cases[1]!.name]) {
+    await page.getByRole('checkbox', { name: `Select ${name}`, exact: true }).check();
+  }
+  const selectionDownload = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Download', exact: true }).click();
+  const selectionZip = await selectionDownload;
+  expect(selectionZip.suggestedFilename()).toBe('download.zip');
+  expect(await selectionZip.failure()).toBeNull();
+  const selectionPath = await selectionZip.path();
+  const selectedNames = JSON.parse(execFileSync('python3', ['-c', `
+import json, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    assert archive.testzip() is None
+    print(json.dumps(archive.namelist()))
+`, selectionPath!], { encoding: 'utf8' }));
+  expect(selectedNames).toContain(`${fixtures.folder}/${fixtures.nested}/${fixtures.file}`);
+  expect(selectedNames).toContain(cases[0]!.name);
+  expect(selectedNames).toContain(cases[1]!.name);
   expect(await page.evaluate(() => (window as unknown as { __s1LargeBlobReads: number }).__s1LargeBlobReads))
     .toBe(0);
 });

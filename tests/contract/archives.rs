@@ -520,6 +520,30 @@ async fn folder_and_files_extract_to_the_same_names_structure_and_bytes() {
         ("two.txt".to_owned(), Member::File(Vec::new())),
     ]);
     assert_eq!(members, expected);
+    // A standard reader catches format mistakes shared by our writer and test parser.
+    let archive_path = f.root.path().join("selection.zip");
+    fs::write(&archive_path, &reply.body).unwrap();
+    let reader = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    assert archive.testzip() is None
+    assert len(archive.infolist()) == 7
+    assert archive.read('Docs/a.txt') == b'alpha\n'
+    assert archive.read('two.txt') == b''
+    assert archive.getinfo('Docs/Empty/').is_dir()
+    assert len(archive.read('Docs/Nested ü/b.bin')) == 200000
+"#,
+        )
+        .arg(&archive_path)
+        .output()
+        .expect("python3 is required for the independent ZIP reader check");
+    assert!(
+        reader.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reader.stderr)
+    );
 
     let again = f.get(&url, &OWNER_ACTOR).await;
     assert_eq!(again.status, 404, "tickets are single use");
@@ -739,3 +763,64 @@ async fn cancelled_download_drops_the_archive_stream() {
     }
     f.close().await;
 }
+
+#[tokio::test]
+async fn tickets_are_capped_consumed_and_revalidate_session_and_selection() {
+    let f = Fixture::new("ticket-authority", tree).await;
+    let mut urls = Vec::new();
+    for _ in 0..4 {
+        let ticket = f.issue(&[ONE], &OWNER_ACTOR).await;
+        assert_eq!(ticket.status, 201);
+        urls.push(ticket.json()["url"].as_str().unwrap().to_owned());
+    }
+    let capped = f.issue(&[ONE], &OWNER_ACTOR).await;
+    assert_eq!(capped.status, 429);
+    assert_eq!(capped.json()["code"], "archive_busy");
+    let mut head = f.head("HEAD", &urls[0], Some(&OWNER_ACTOR));
+    head.push_str("\r\n");
+    assert_eq!(
+        f.send(head, &[]).await.status,
+        405,
+        "HEAD must not consume a ticket"
+    );
+    assert_eq!(f.get(&urls[0], &OWNER_ACTOR).await.status, 200);
+    assert_eq!(f.get(&urls[0], &OWNER_ACTOR).await.status, 404);
+    assert_eq!(f.issue(&[ONE], &OWNER_ACTOR).await.status, 201);
+
+    f.workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            tx.execute("UPDATE entry SET state='deleted' WHERE entry_id=?1", [ONE])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        f.get(&urls[1], &OWNER_ACTOR).await.status,
+        404,
+        "GET must revalidate selection changes after ticket issuance"
+    );
+
+    f.workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            tx.execute(
+                "UPDATE session SET revoked=1 WHERE session_id=?1",
+                [SESSION],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        f.get(&urls[2], &OWNER_ACTOR).await.status,
+        401,
+        "a ticket must not bypass session revocation"
+    );
+    f.close().await;
+}
+
+#[path = "archive_large.rs"]
+mod large;
