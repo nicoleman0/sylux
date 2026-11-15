@@ -1,10 +1,10 @@
 {
-  "sync_commit": "f0f644142dce434ea4a5343dbb604a9c1e033be3",
+  "sync_commit": "uncommitted changes based on 5a56f38f7dfaa14598a5e4b38216195bd4649a6f",
   "files": {
     "src/http/accounts.rs": "87ac3cd0815b75585c222ff4c4b022f3b70e9d40d332c985ee867dc71401ae50",
     "src/domain/authz.rs": "d9c56de2c4a3d293d1948f174b8f8d3dd04711b76c2e1144c7087ec2fafafdff",
-    "src/persistence/sqlite.rs": "940535712ca07cabdd5dabe84c84034f7124f25545ad4062dd45e0b5e71e047f",
-    "tests/contract/setup_auth.rs": "e55ea3ab47171ea025a902daffd99f8835087e1e2dbc6aece63852541589a0bc"
+    "src/persistence/sqlite.rs": "0c16f750a86ec81ba626771780c5f3ad1e6b88dc1b07d95988cf4c9a14c4acfb",
+    "tests/contract/setup_auth.rs": "5fd89be11db63ee30e6bd802c9f4242f5feb3e0a8eaac9db0dc520bc0d8a8c14"
   },
   "review_policy": "A changed source hash requires protocol and model review; never refresh hashes without review.",
   "contract": "concurrent_account_authority_changes_preserve_an_enabled_admin_and_reject_revoked_actor",

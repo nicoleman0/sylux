@@ -411,6 +411,19 @@ impl SqliteWorkers {
         })
     }
 
+    /// Serialize bounded work with authority mutations, without a transaction.
+    /// Callers may publish a small settings file after checking current authority.
+    /// Decode inputs before submission; network I/O must remain outside the worker.
+    pub(crate) async fn serialize_writer<T, F>(&self, operation: F) -> Result<T, WorkerError>
+    where
+        F: FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.writer
+            .submit(move |connection| (operation(connection).map_err(WorkerError::Query), false))
+            .await
+    }
+
     /// Submit a short `BEGIN IMMEDIATE` transaction. Final authorization and
     /// relationship preconditions belong inside this closure, not in a stale
     /// reader snapshot. No filesystem/network operation may run inside it.
@@ -722,6 +735,76 @@ mod tests {
             "migration must reject a connection without finite busy handling"
         );
         drop(connection);
+        directory.cleanup();
+    }
+
+    #[tokio::test]
+    async fn instance_publication_serializes_current_authority_without_a_sql_transaction() {
+        let (directory, database) = TestDirectory::create("instance-publication-authority");
+        let workers = SqliteWorkers::open(&database, WorkerConfig::default()).unwrap();
+        workers.transact(|transaction| {
+            transaction.execute("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES('00000000000000000000000000000001','owner','administrator',1,0)", [])?;
+            Ok(())
+        }).await.unwrap();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let saving_workers = workers.clone();
+        let saving_order = order.clone();
+        let save = tokio::spawn(async move {
+            saving_workers
+                .serialize_writer(move |connection| {
+                    assert!(
+                        connection.is_autocommit(),
+                        "filesystem publication must not hold a SQL transaction"
+                    );
+                    let role: String =
+                        connection.query_row("SELECT role FROM account", [], |row| row.get(0))?;
+                    assert_eq!(role, "administrator");
+                    saving_order.lock().unwrap().push("authorized");
+                    entered.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    saving_order.lock().unwrap().push("published");
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        waiting.await.unwrap();
+        let changing_workers = workers.clone();
+        let changing_order = order.clone();
+        let demotion = tokio::spawn(async move {
+            changing_workers
+                .transact(move |transaction| {
+                    transaction.execute("UPDATE account SET role='user'", [])?;
+                    changing_order.lock().unwrap().push("demoted");
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        release.send(()).unwrap();
+        save.await.unwrap();
+        demotion.await.unwrap();
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["authorized", "published", "demoted"]
+        );
+        let authorized = workers
+            .serialize_writer(|connection| {
+                connection.query_row(
+                    "SELECT role='administrator' AND enabled=1 FROM account",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(
+            !authorized,
+            "a later save must observe the completed authority change"
+        );
+        workers.shutdown().await.unwrap();
         directory.cleanup();
     }
 

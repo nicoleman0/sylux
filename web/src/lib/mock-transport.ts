@@ -1,3 +1,4 @@
+import { defaultAppearance, type Appearance, type AppearanceUpdate } from './appearance';
 import { HttpError, type ApiTransport, type RequestOptions } from './api';
 import type { User, Account } from './session';
 import type { Entry, Folder, ResultSort, SearchHit } from './listing';
@@ -66,6 +67,7 @@ export class MockTransport implements ApiTransport {
   private setupRequired = true;
   private user: User | null = null;
   private instanceName = 'Sylux';
+  private appearance: Appearance = { ...defaultAppearance };
   private accounts: Account[] = [{ account_id: 'mock-user', handle: 'owner', role: 'administrator', enabled: true }];
   private root = { ...root };
   private entries = seed.map((entry) => ({ ...entry }));
@@ -115,6 +117,15 @@ export class MockTransport implements ApiTransport {
     const method = options.method ?? 'GET';
     const route = path.split('?')[0]!;
     if (options.signal?.aborted) throw new DOMException('Canceled', 'AbortError');
+    if (route === '/instance/appearance' && method === 'GET') return { ...this.appearance } as T;
+    if (route === '/instance/appearance' && method === 'PUT') {
+      if (this.user?.role !== 'administrator') throw new HttpError(403);
+      const value = options.body as AppearanceUpdate;
+      // Asset delivery needs the real server; this fixture models color-only changes.
+      if ((value.logo && 'data' in value.logo) || (value.loginImage && 'data' in value.loginImage)) throw new HttpError(400);
+      this.appearance = { ...this.appearance, accentColor: value.accentColor, loginBackgroundColor: value.loginBackgroundColor };
+      return { ...this.appearance } as T;
+    }
     if (route === '/instance' && method === 'GET') return { name: this.instanceName } as T;
     if (route === '/instance' && method === 'PATCH') {
       if (this.user?.role !== 'administrator') throw new HttpError(403);

@@ -26,6 +26,7 @@ multiple-versions = "deny"
 wildcards = "deny"
 skip = [
     { crate = "getrandom@0.2.17", reason = "ring 0.17.14 uses 0.2; application uses reviewed 0.4.3. Both audited." },
+    { crate = "miniz_oxide@0.8.9", reason = "png 0.18.1 requires 0.8; its flate2 1.1.11 dependency requires 0.9. Both are pure Rust image-codec dependencies." },
 ]
 deny = ["openssl", "openssl-sys", "aws-lc-rs", "aws-lc-sys", "sqlx", "sqlx-core"]
 

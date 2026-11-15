@@ -332,3 +332,6 @@ h1:focus, h2:focus { outline: none; }
 }
 
 .entry-selection > label { display: grid; place-items: center; min-width: 44px; min-height: var(--control-height-touch); cursor: pointer; }
+
+.branded-signin { background-size: cover; background-position: center; }
+.branded-signin .signin-form { box-sizing: content-box; padding: 28px; background: var(--background); color: var(--foreground); border-radius: var(--radius); max-width: calc(100% - 56px); }

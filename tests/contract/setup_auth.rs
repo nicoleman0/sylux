@@ -178,7 +178,7 @@ impl TestFixture {
         if let Some(csrf) = csrf {
             request.push_str(&format!("X-CSRF-Token: {csrf}\r\n"));
         }
-        if method == "POST" || method == "PATCH" {
+        if matches!(method, "POST" | "PATCH" | "PUT") {
             request.push_str("Content-Type: application/json\r\n");
         }
         request.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
@@ -1586,5 +1586,374 @@ async fn account_authority_maximum_epoch_conflicts_without_mutation_or_audit() {
     assert_eq!(fixture.me(&otheradmin.cookie).await.status, 200);
     let fresh = fixture.sign_in("second").await;
     assert_eq!(fixture.me(&fresh.cookie).await.status, 200);
+    fixture.close().await;
+}
+
+fn appearance_image(pixel: [u8; 4]) -> (Value, Vec<u8>) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let image = image::RgbaImage::from_pixel(2, 2, image::Rgba(pixel));
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let bytes = encoded.into_inner();
+    (
+        serde_json::json!({"mediaType":"image/png", "data": STANDARD.encode(&bytes)}),
+        bytes,
+    )
+}
+
+fn default_appearance() -> Value {
+    serde_json::json!({"accentColor":null,"loginBackgroundColor":null,"logoUrl":null,"loginImageUrl":null})
+}
+
+async fn save_appearance(
+    fixture: &TestFixture,
+    auth: &Authenticated,
+    value: &Value,
+) -> TestResponse {
+    fixture
+        .request(
+            "PUT",
+            "/instance/appearance",
+            Some(&auth.cookie),
+            Some(&fixture.origin),
+            Some(&auth.csrf),
+            Some(value.to_string()),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn instance_appearance_is_public_atomic_and_survives_restart() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = TestFixture::new("instance-appearance").await;
+    let initial = fixture
+        .request("GET", "/instance/appearance", None, None, None, None)
+        .await;
+    assert_eq!(initial.status, 200);
+    assert_eq!(initial.header("cache-control"), Some("no-store"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&initial.body).unwrap(),
+        default_appearance()
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "GET",
+                "/instance/appearance",
+                None,
+                Some("https://untrusted.test"),
+                None,
+                None
+            )
+            .await
+            .status,
+        403
+    );
+    let auth = fixture.authenticated().await;
+    let (logo, logo_bytes) = appearance_image([16, 32, 64, 255]);
+    let (login_image, login_bytes) = appearance_image([128, 64, 32, 255]);
+    let body = serde_json::json!({"accentColor":"#aA12ff","loginBackgroundColor":"#101020","logo":logo,"loginImage":login_image});
+    assert_eq!(
+        fixture
+            .request(
+                "PUT",
+                "/instance/appearance",
+                None,
+                Some(&fixture.origin),
+                None,
+                Some(body.to_string())
+            )
+            .await
+            .status,
+        401
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "PUT",
+                "/instance/appearance",
+                Some(&auth.cookie),
+                Some(&fixture.origin),
+                None,
+                Some(body.to_string())
+            )
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "PUT",
+                "/instance/appearance",
+                Some(&auth.cookie),
+                Some("https://untrusted.test"),
+                Some(&auth.csrf),
+                Some(body.to_string())
+            )
+            .await
+            .status,
+        403
+    );
+    fixture.seed_account(SECOND_ACCOUNT, "member", "user", true);
+    let member = fixture.sign_in("member").await;
+    assert_eq!(save_appearance(&fixture, &member, &body).await.status, 403);
+    assert!(
+        !fixture
+            .owner
+            .path()
+            .join("product/metadata/appearance.json")
+            .exists()
+    );
+
+    let response = save_appearance(&fixture, &auth, &body).await;
+    assert_eq!(
+        response.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let saved: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(
+        saved.as_object().unwrap().len(),
+        4,
+        "public response must stay allowlisted"
+    );
+    assert_eq!(saved["accentColor"], "#AA12FF");
+    assert_eq!(saved["loginBackgroundColor"], "#101020");
+    let logo_url = saved["logoUrl"].as_str().unwrap().to_owned();
+    let login_url = saved["loginImageUrl"].as_str().unwrap().to_owned();
+    for (url, expected) in [(&logo_url, &logo_bytes), (&login_url, &login_bytes)] {
+        let asset = fixture.request("GET", url, None, None, None, None).await;
+        assert_eq!(asset.status, 200);
+        assert_eq!(&asset.body, expected);
+        assert_eq!(asset.header("content-type"), Some("image/png"));
+        assert_eq!(asset.header("x-content-type-options"), Some("nosniff"));
+        assert_eq!(
+            asset.header("cache-control"),
+            Some("public, max-age=31536000, immutable")
+        );
+        assert!(asset.header("etag").unwrap().starts_with('"'));
+    }
+    let persisted = fixture
+        .owner
+        .path()
+        .join("product/metadata/appearance.json");
+    assert_eq!(
+        fs::metadata(&persisted).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let before = fs::read(&persisted).unwrap();
+    let mut invalid = body.clone();
+    invalid["loginImage"]["data"] = Value::String("bm90IGFuIGltYWdl".to_owned());
+    invalid["accentColor"] = Value::String("#FFFFFF".to_owned());
+    assert_eq!(save_appearance(&fixture, &auth, &invalid).await.status, 400);
+    assert_eq!(
+        fs::read(&persisted).unwrap(),
+        before,
+        "failed saves cannot publish partial colors or images"
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "PATCH",
+                "/instance",
+                Some(&auth.cookie),
+                Some(&fixture.origin),
+                Some(&auth.csrf),
+                Some(serde_json::json!({"name":"Files"}).to_string())
+            )
+            .await
+            .status,
+        200
+    );
+
+    fixture.restart_with_storage().await;
+    let reopened = fixture
+        .request("GET", "/instance/appearance", None, None, None, None)
+        .await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reopened.body).unwrap(),
+        saved
+    );
+    assert_eq!(
+        fixture
+            .request("GET", &logo_url, None, None, None, None)
+            .await
+            .body,
+        logo_bytes
+    );
+    let auth = fixture.authenticated().await;
+    let keep = serde_json::json!({"accentColor":"#223344","loginBackgroundColor":null,"logo":{"keep":true},"loginImage":null});
+    let kept = save_appearance(&fixture, &auth, &keep).await;
+    assert_eq!(kept.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&kept.body).unwrap()["logoUrl"],
+        logo_url
+    );
+    assert_eq!(
+        fixture
+            .request("GET", &login_url, None, None, None, None)
+            .await
+            .status,
+        404
+    );
+    let (replacement, _) = appearance_image([255, 255, 0, 255]);
+    let replace = serde_json::json!({"accentColor":null,"loginBackgroundColor":null,"logo":replacement,"loginImage":null});
+    let replaced = save_appearance(&fixture, &auth, &replace).await;
+    assert_eq!(replaced.status, 200);
+    let replacement_url = serde_json::from_slice::<Value>(&replaced.body).unwrap()["logoUrl"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(logo_url, replacement_url);
+    assert_eq!(
+        fixture
+            .request("GET", &logo_url, None, None, None, None)
+            .await
+            .status,
+        404
+    );
+    let stored: Value = serde_json::from_slice(&fs::read(&persisted).unwrap()).unwrap();
+    assert_ne!(stored["logo"]["data"], body["logo"]["data"]);
+    assert_eq!(stored["loginImage"], Value::Null);
+    let reset = serde_json::json!({"accentColor":null,"loginBackgroundColor":null,"logo":null,"loginImage":null});
+    let reset_response = save_appearance(&fixture, &auth, &reset).await;
+    assert_eq!(reset_response.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reset_response.body).unwrap(),
+        default_appearance()
+    );
+    assert_eq!(
+        fixture
+            .request("GET", &replacement_url, None, None, None, None)
+            .await
+            .status,
+        404
+    );
+    fixture.restart_with_storage().await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &fixture
+                .request("GET", "/instance/appearance", None, None, None, None)
+                .await
+                .body
+        )
+        .unwrap(),
+        default_appearance()
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &fixture
+                .request("GET", "/instance", None, None, None, None)
+                .await
+                .body
+        )
+        .unwrap(),
+        serde_json::json!({"name":"Files"})
+    );
+    fs::remove_file(&persisted).unwrap();
+    fixture.restart_with_storage().await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &fixture
+                .request("GET", "/instance/appearance", None, None, None, None)
+                .await
+                .body
+        )
+        .unwrap(),
+        default_appearance()
+    );
+    let unknown = fixture
+        .request(
+            "GET",
+            &format!("/instance/appearance/assets/{}", "0".repeat(64)),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, 404);
+    assert_eq!(unknown.header("cache-control"), Some("no-store"));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn instance_appearance_rejects_invalid_and_oversized_inputs() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let fixture = TestFixture::new("instance-appearance-validation").await;
+    let auth = fixture.authenticated().await;
+    let (image, _) = appearance_image([0, 0, 0, 255]);
+    let base = serde_json::json!({"accentColor":null,"loginBackgroundColor":null,"logo":null,"loginImage":null});
+    let mut invalid = Vec::new();
+    for color in [
+        "red",
+        "#FFF",
+        "#000000;display:none",
+        "#GG0000",
+        " #112233",
+        "#12345678",
+    ] {
+        let mut value = base.clone();
+        value["accentColor"] = Value::String(color.to_owned());
+        invalid.push(value);
+    }
+    for asset in [
+        serde_json::json!({"mediaType":"image/svg+xml","data":STANDARD.encode(b"<svg/>")}),
+        serde_json::json!({"mediaType":"image/png","data":"not base64"}),
+        serde_json::json!({"mediaType":"image/png","data":STANDARD.encode(b"not an image")}),
+        serde_json::json!({"mediaType":"image/png","data":STANDARD.encode([0; 512 * 1024 + 1])}),
+        serde_json::json!({"keep":false}),
+    ] {
+        let mut value = base.clone();
+        value["logo"] = asset;
+        invalid.push(value);
+    }
+    let mut mismatch = base.clone();
+    mismatch["logo"] = image;
+    mismatch["logo"]["mediaType"] = Value::String("image/jpeg".to_owned());
+    invalid.push(mismatch);
+    let mut login_too_large = base.clone();
+    login_too_large["loginImage"] = serde_json::json!({"mediaType":"image/png","data":STANDARD.encode(vec![0; 2 * 1024 * 1024 + 1])});
+    invalid.push(login_too_large);
+    for value in invalid {
+        let response = save_appearance(&fixture, &auth, &value).await;
+        assert_eq!(
+            response.status,
+            400,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({"accentColor":null,"loginBackgroundColor":null,"logo":null,"loginImage":null,"private":"forbidden"}),
+    ] {
+        assert_eq!(save_appearance(&fixture, &auth, &value).await.status, 422);
+    }
+    assert_eq!(
+        fixture
+            .request(
+                "PUT",
+                "/instance/appearance",
+                Some(&auth.cookie),
+                Some(&fixture.origin),
+                Some(&auth.csrf),
+                Some(" ".repeat(4 * 1024 * 1024 + 1))
+            )
+            .await
+            .status,
+        413
+    );
+    assert!(
+        !fixture
+            .owner
+            .path()
+            .join("product/metadata/appearance.json")
+            .exists()
+    );
     fixture.close().await;
 }

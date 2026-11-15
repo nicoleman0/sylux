@@ -1,12 +1,13 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import FolderOpenIcon from '@lucide/svelte/icons/folder-open';
+  import BrandLogo from '$lib/BrandLogo.svelte';
   import XIcon from '@lucide/svelte/icons/x';
   import * as Sidebar from '$lib/components/ui/sidebar/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
 
-  let { instanceName, onhome, navigation, account }: {
+  let { instanceName, logoUrl, onhome, navigation, account }: {
     instanceName: string;
+    logoUrl: string | null;
     onhome: (event: MouseEvent) => void;
     navigation: Snippet<[() => void]>;
     account: Snippet<[() => void]>;
@@ -20,7 +21,7 @@
     <Sidebar.Menu><Sidebar.MenuItem>
       <Sidebar.MenuButton size="lg" tooltipContent={instanceName} aria-label={instanceName}>
         {#snippet child({ props })}
-          <a {...props} href="#files" onclick={(event) => { onhome(event); close(); }}><FolderOpenIcon /><span class="sidebar-brand group-data-[collapsible=icon]:hidden">{instanceName}</span></a>
+          <a {...props} href="#files" onclick={(event) => { onhome(event); close(); }}><BrandLogo url={logoUrl} /><span class="sidebar-brand group-data-[collapsible=icon]:hidden">{instanceName}</span></a>
         {/snippet}
       </Sidebar.MenuButton>
     </Sidebar.MenuItem></Sidebar.Menu>

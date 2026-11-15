@@ -18,6 +18,7 @@ async function installBackend(page: import('@playwright/test').Page): Promise<vo
     const path = new URL(request.url()).pathname;
     const method = request.method();
     const json = (value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
+    if (path === '/instance/appearance') return json({ accentColor: null, loginBackgroundColor: null, logoUrl: null, loginImageUrl: null });
     if (path === '/instance') {
       if (method === 'PATCH') instanceName = (request.postDataJSON() as { name: string }).name.trim();
       return json({ name: instanceName });
