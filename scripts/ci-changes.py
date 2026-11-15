@@ -34,6 +34,8 @@ def opaque(value):
 
 def canonical(source, language):
     """Return code and Rust docs, or None when the small lexer cannot prove safety."""
+    if language in {'html', 'svelte'}:
+        return None
     if '\0' in source or any(ord(c) < 32 and c not in '\n\r\t' for c in source):
         return None
     if language == 'docker':
@@ -57,6 +59,8 @@ def canonical(source, language):
         return None
     if language == 'css' and (re.search(r'url\s*\(', source, re.I) or '\\' in source):
         return None
+    if language == 'sql' and re.search(r"\\['\"]", source):
+        return None
     out, docs = [], []
     in_tag = False
     i = 0
@@ -78,7 +82,7 @@ def canonical(source, language):
         if language == 'python' and re.match(r'(?i)(?:f|fr|rf)[\'\"]', tail):
             return None
         quote = source[i]
-        if language == 'sql' and quote in '[`$':
+        if language == 'sql' and (quote in '[`$' or re.match(r"(?i)(?:n?q)'", tail)):
             return None
         if quote in '\'"':
             if language == 'rust' and quote == "'":
@@ -263,6 +267,8 @@ def classify(base, head):
                 reasons.append('documentation changed')
                 continue
             language = LANGUAGES.get(Path(path).suffix.lower())
+            if language == 'sql' and not path.startswith('migrations/sqlite/'):
+                language = None
             if Path(path).name == 'Dockerfile':
                 language = 'docker'
             if status == 'M' and language:

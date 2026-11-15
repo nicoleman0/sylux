@@ -40,7 +40,6 @@ class LexerTests(unittest.TestCase):
             ('shell', 'echo "# literal" # old', 'echo "# literal" # new'),
             ('yaml', 'key: "# literal" # old', 'key: "# literal" # new'),
             ('toml', 'key = "# literal" # old', 'key = "# literal" # new'),
-            ('svelte', '<!-- old -->\n<p>Hello</p>', '<!-- new -->\n<p>Hello</p>'),
         ]:
             with self.subTest(language=language, before=before):
                 self.same(language, before, after)
@@ -73,6 +72,18 @@ class LexerTests(unittest.TestCase):
         ]:
             with self.subTest(language=language):
                 self.different(language, source, source.replace('old', 'new'))
+
+    def test_sql_dialect_escapes_cannot_hide_changed_data(self):
+        before = "SELECT E'it\\'s -- old';"
+        self.different('sql', before, before.replace('old', 'new'))
+        before = "SELECT q'{it's -- old}';"
+        self.different('sql', before, before.replace('old', 'new'))
+
+    def test_markup_whitespace_needs_a_real_parser(self):
+        before = '<pre>\n\n<!-- old -->\ntext</pre>'
+        after = '<pre>\n<!-- new -->\ntext</pre>'
+        self.different('html', before, after)
+        self.different('svelte', before, after)
 
     def test_literal_whitespace_is_preserved(self):
         self.different('python', 'x = """a\n \n"""', 'x = """a\n\n"""')
@@ -204,6 +215,14 @@ class RepositoryTests(unittest.TestCase):
 
     def test_executable_change(self):
         self.flags(self.classify({'src/main.rs': 'fn main() { panic!("changed"); }\n'}),
+                   full=True, authority=True, recovery=True)
+
+    def test_sql_fast_path_is_limited_to_the_owned_sqlite_dialect(self):
+        self.write('external/query.sql', "SELECT q'{it's -- old}';")
+        self.git('add', '.')
+        self.git('commit', '-qm', 'unknown SQL dialect')
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        self.flags(self.classify({'external/query.sql': "SELECT q'{it's -- new}';"}),
                    full=True, authority=True, recovery=True)
 
     def test_deleted_source(self):
