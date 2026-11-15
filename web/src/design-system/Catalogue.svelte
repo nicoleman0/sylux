@@ -9,6 +9,8 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import SortHeader from '$lib/SortHeader.svelte';
   import RefreshButton from '$lib/RefreshButton.svelte';
+  import AccountStatus from '$lib/AccountStatus.svelte';
+  import AccountOptions from '$lib/AccountOptions.svelte';
   import { Badge } from '$lib/components/ui/badge/index.js';
 
   type ColorSample = { label: string; token: string; value: string };
@@ -170,7 +172,8 @@
       </div>
       <p class="sample-notice" role="status" aria-live="polite">{sampleNotice}</p>
     </section>
-  </main>
+  <section class="catalogue-section"><h2>Account actions and status</h2><div class="flex items-center gap-4"><AccountStatus enabled={true} /><AccountStatus enabled={false} /><AccountOptions account={{ account_id: 'example', handle: 'example', role: 'user', enabled: true }} onaction={() => {}} /><AccountOptions account={{ account_id: 'owner', handle: 'owner', role: 'administrator', enabled: true }} self lastAdministrator onaction={() => {}} /></div></section>
+</main>
 </div>
 
 <style>

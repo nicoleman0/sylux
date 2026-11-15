@@ -564,15 +564,15 @@ test('account screens create, reset, disable and change passwords', async ({ pag
   await create.getByLabel('Password', { exact: true }).fill('long enough password');
   await create.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(page.getByText('second', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Reset password', exact: true }).click();
+  await accountAction(page, 'Reset password');
   const reset = page.getByRole('dialog', { name: 'Reset password for second' });
   await reset.getByLabel('New password', { exact: true }).fill('another long password');
   await reset.getByRole('button', { name: 'Reset password', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('Password reset');
   await expect(page.getByRole('heading', { name: 'Accounts', exact: true })).toBeFocused();
-  await page.getByRole('button', { name: 'Disable', exact: true }).click();
+  await accountAction(page, 'Disable');
   await page.getByRole('dialog', { name: 'Disable second?' }).getByRole('button', { name: 'Disable account', exact: true }).click();
-  await expect(page.getByText('Disabled', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Disabled', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Accounts', exact: true })).toBeFocused();
   await page.getByRole('button', { name: 'Account', exact: true }).click();
   await page.getByRole('button', { name: 'Change password', exact: true }).click();
@@ -626,7 +626,7 @@ test('logging out clears account form secrets before another sign-in', async ({ 
   await page.getByLabel('New password', { exact: true }).fill('private new password');
   await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Reset password', exact: true }).click();
+  await accountAction(page, 'Reset password');
   await page.getByRole('dialog').getByLabel('New password', { exact: true }).fill('private reset password');
   await signOut(page, true);
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
@@ -645,7 +645,7 @@ test('logging out clears account form secrets before another sign-in', async ({ 
   await expect(create.getByLabel('Account name')).toHaveValue('');
   await expect(create.getByLabel('Password', { exact: true })).toHaveValue('');
   await create.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await page.getByRole('button', { name: 'Reset password', exact: true }).click();
+  await accountAction(page, 'Reset password');
   await expect(page.getByRole('dialog').getByLabel('New password', { exact: true })).toHaveValue('');
 });
 
@@ -1399,38 +1399,38 @@ test('account authority confirmations cancel, promote, demote and enable with lo
   await createSecondAccount(page);
   const owner = page.locator('.account-row').filter({ hasText: 'owner' });
   const second = page.locator('.account-row').filter({ hasText: 'second' });
-  await expect(owner.getByRole('button')).toHaveCount(0);
-  const promote = second.getByRole('button', { name: 'Make administrator', exact: true });
-  await promote.click();
+  await expect(owner.getByRole('button', { name: 'Actions for owner' })).toBeVisible();
+  const promote = second.getByRole('button', { name: 'Actions for second', exact: true });
+  await accountAction(page, 'Make administrator');
   let dialog = page.getByRole('dialog');
   await expect(dialog).toContainText('Other accounts’ files stay private.');
   await expect(dialog).toContainText('signs out all their sessions');
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(promote).toBeFocused();
-  await promote.click();
+  await accountAction(page, 'Make administrator');
   const promotion = page.waitForRequest((request) => request.url().endsWith('/accounts/account-2/role'));
   await dialog.getByRole('button', { name: 'Make administrator', exact: true }).click();
   expect((await promotion).postDataJSON()).toEqual({ role: 'administrator' });
   await expect(second.getByText('Administrator', { exact: true })).toBeVisible();
   await expect(second.getByRole('button', { name: 'Reset password', exact: true })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Accounts', exact: true })).toBeFocused();
-  await second.getByRole('button', { name: 'Make user', exact: true }).click();
+  await accountAction(page, 'Make user');
   await expect(dialog).toContainText('lose access to account and instance settings');
   await dialog.getByRole('button', { name: 'Make user', exact: true }).click();
   await expect(second.getByText('User', { exact: true })).toBeVisible();
-  await second.getByRole('button', { name: 'Disable', exact: true }).click();
+  await accountAction(page, 'Disable');
   await dialog.getByRole('button', { name: 'Disable account', exact: true }).click();
-  await expect(second.getByText('Disabled', { exact: true })).toBeVisible();
+  await expect(second.getByRole('button', { name: 'Disabled', exact: true })).toBeVisible();
   await expect(second.getByRole('button', { name: 'Make administrator', exact: true })).toHaveCount(0);
-  const enable = second.getByRole('button', { name: 'Enable', exact: true });
-  await enable.click();
+  const enable = second.getByRole('button', { name: 'Actions for second', exact: true });
+  await accountAction(page, 'Enable');
   await expect(dialog).toContainText('current password');
   await expect(dialog).toContainText('Old sessions stay signed out.');
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(enable).toBeFocused();
-  await enable.click();
+  await accountAction(page, 'Enable');
   await dialog.getByRole('button', { name: 'Enable account', exact: true }).click();
-  await expect(second.getByText('Active', { exact: true })).toBeVisible();
+  await expect(second.getByRole('button', { name: 'Active', exact: true })).toBeVisible();
   await expect(second.getByText('User', { exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Accounts', exact: true })).toBeFocused();
 });
@@ -1440,13 +1440,13 @@ for (const action of ['role', 'enable'] as const) {
     await login(page);
     await createSecondAccount(page);
     if (action === 'enable') {
-      await page.getByRole('button', { name: 'Disable', exact: true }).click();
+      await accountAction(page, 'Disable');
       await page.getByRole('dialog').getByRole('button', { name: 'Disable account', exact: true }).click();
-      await expect(page.getByText('Disabled', { exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Disabled', exact: true })).toBeVisible();
     }
     await page.route(`**/accounts/account-2/${action}`, (route) => route.fulfill({ status: 409 }));
-    const trigger = page.getByRole('button', { name: action === 'role' ? 'Make administrator' : 'Enable', exact: true });
-    await trigger.click();
+    const trigger = page.getByRole('button', { name: 'Actions for second', exact: true });
+    await accountAction(page, action === 'role' ? 'Make administrator' : 'Enable');
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: action === 'role' ? 'Make administrator' : 'Enable account', exact: true }).click();
     await expect(dialog.getByRole('alert')).toContainText('Cancel, refresh accounts and try again.');
@@ -1461,9 +1461,9 @@ for (const action of ['role', 'enable'] as const) {
       await login(page);
       await createSecondAccount(page);
       if (action === 'enable') {
-        await page.getByRole('button', { name: 'Disable', exact: true }).click();
+        await accountAction(page, 'Disable');
         await page.getByRole('dialog').getByRole('button', { name: 'Disable account', exact: true }).click();
-        await expect(page.getByText('Disabled', { exact: true })).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Disabled', exact: true })).toBeVisible();
       }
       const path = `/accounts/account-2/${action}`;
       await page.route(`**${path}`, async (route) => {
@@ -1474,8 +1474,8 @@ for (const action of ['role', 'enable'] as const) {
         ] }));
         return route.abort('connectionreset');
       });
-      const trigger = page.getByRole('button', { name: action === 'role' ? 'Make administrator' : 'Enable', exact: true });
-      await trigger.click();
+      const trigger = page.getByRole('button', { name: 'Actions for second', exact: true });
+      await accountAction(page, action === 'role' ? 'Make administrator' : 'Enable');
       const dialog = page.getByRole('dialog');
       const confirm = dialog.getByRole('button', { name: action === 'role' ? 'Make administrator' : 'Enable account', exact: true });
       await confirm.click();
@@ -1490,11 +1490,12 @@ for (const action of ['role', 'enable'] as const) {
       await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
       await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       if (failure === 'interrupted') {
-        await expect(page.getByRole('button', { name: action === 'role' ? 'Make user' : 'Make administrator', exact: true })).toBeEnabled();
-        await expect(trigger).toHaveCount(0);
+        await trigger.click();
+        await expect(page.getByRole('menuitem', { name: action === 'role' ? 'Make user' : 'Make administrator', exact: true })).toBeEnabled();
+        await page.keyboard.press('Escape');
       } else {
         await expect(trigger).toBeEnabled();
-        await trigger.click();
+        await accountAction(page, action === 'role' ? 'Make administrator' : 'Enable');
         await expect(confirm).toBeEnabled();
         await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
       }
@@ -1505,16 +1506,16 @@ for (const action of ['role', 'enable'] as const) {
     await login(page);
     await createSecondAccount(page);
     if (action === 'enable') {
-      await page.getByRole('button', { name: 'Disable', exact: true }).click();
+      await accountAction(page, 'Disable');
       await page.getByRole('dialog').getByRole('button', { name: 'Disable account', exact: true }).click();
-      await expect(page.getByText('Disabled', { exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Disabled', exact: true })).toBeVisible();
     }
     let release!: () => void;
     let started!: () => void;
     const waiting = new Promise<void>((resolve) => { started = resolve; });
     const gate = new Promise<void>((resolve) => { release = resolve; });
     await page.route(`**/accounts/account-2/${action}`, async (route) => { started(); await gate; await route.fulfill({ status: 204 }); });
-    await page.getByRole('button', { name: action === 'role' ? 'Make administrator' : 'Enable', exact: true }).click();
+    await accountAction(page, action === 'role' ? 'Make administrator' : 'Enable');
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: action === 'role' ? 'Make administrator' : 'Enable account', exact: true }).click();
     await waiting;
@@ -1556,8 +1557,7 @@ for (const width of [1280, 390]) {
       await expect(page.locator('[data-slot=sheet-content]')).toHaveCount(0);
       await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
       await expect(page.getByText('disabled-administrator', { exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Make user', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Enable', exact: true })).toHaveCount(2);
+      await expect(page.getByRole('button', { name: /^Actions for / })).toHaveCount(5);
       expect(await page.evaluate(() => document.body.scrollWidth <= innerWidth)).toBeTruthy();
       for (const row of await page.locator('.account-row').all()) {
         const bounds = await row.boundingBox();
@@ -1568,7 +1568,8 @@ for (const width of [1280, 390]) {
         await mkdir('../.impeccable/review', { recursive: true });
         await page.screenshot({ path: `../.impeccable/review/syl-35-accounts-${width}-${theme}.png`, fullPage: true, animations: 'disabled' });
       }
-      await page.getByRole('button', { name: 'Make administrator', exact: true }).click();
+      await page.getByRole('button', { name: 'Actions for a-long-account-name.with-more-characters', exact: true }).click();
+      await page.getByRole('menuitem', { name: 'Make administrator', exact: true }).click();
       await expect(page.getByRole('dialog')).toBeVisible();
       await expect(page.getByRole('dialog')).toHaveCSS('opacity', '1');
       await expect(page.getByRole('dialog')).toContainText('Other accounts’ files stay private.');
@@ -1576,4 +1577,9 @@ for (const width of [1280, 390]) {
       if (process.env.SYLUX_REVIEW_SCREENSHOTS) await page.screenshot({ path: `../.impeccable/review/syl-35-role-${width}-${theme}.png`, fullPage: true, animations: 'disabled' });
     });
   }
+}
+
+async function accountAction(page: import('@playwright/test').Page, name: string): Promise<void> {
+  await page.getByRole('button', { name: 'Actions for second', exact: true }).click();
+  await page.getByRole('menuitem', { name, exact: true }).click();
 }

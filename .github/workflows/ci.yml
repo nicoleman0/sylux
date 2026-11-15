@@ -110,7 +110,12 @@ jobs:
           cargo test --locked --features test-harness --test browser_fixture
 
       - name: Check account authority browser journeys
-        run: npm --prefix web run smoke -- --grep 'account authority|account screens'
+        run: |
+          npm --prefix web run smoke -- --grep 'account authority|account screens'
+          npm --prefix web run smoke -- account-actions.spec.ts
+
+      - name: Check live search responsiveness
+        run: npm --prefix web run smoke -- search-responsiveness.spec.ts
 
       - name: Check action feedback and navigation lifetime
         run: npm --prefix web run smoke -- bulk-actions.spec.ts desktop-upload.spec.ts moves.spec.ts replacement.spec.ts smoke.spec.ts folder-recovery.spec.ts trash.spec.ts refresh-feedback.spec.ts

@@ -1,0 +1,558 @@
+{
+  "date": "2026-11-15",
+  "baseline_commit": "82f1455",
+  "node": "24.22.2",
+  "playwright": "1.65.0",
+  "browser": "Chromium headless shell 1254",
+  "fixture": "five-character input; one synthetic search hit; mocked API delayed 40 or 300ms; real browser timers/fetch/render",
+  "runs": [
+    {
+      "delayMs": "250",
+      "samples": [
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 296.2999999821186,
+          "schedulingMs": 251,
+          "apiMs": 42.69999998807907,
+          "responseToRenderMs": 2.5999999940395355,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 305,
+          "schedulingMs": 252.09999999403954,
+          "apiMs": 46.900000005960464,
+          "responseToRenderMs": 6,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 304.40000000596046,
+          "schedulingMs": 251.90000000596046,
+          "apiMs": 46.900000005960464,
+          "responseToRenderMs": 5.5999999940395355,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 563.7999999821186,
+          "schedulingMs": 252.39999997615814,
+          "apiMs": 306.30000001192093,
+          "responseToRenderMs": 5.0999999940395355,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 563.3000000119209,
+          "schedulingMs": 251.40000000596046,
+          "apiMs": 306.19999998807907,
+          "responseToRenderMs": 5.700000017881393,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 561.5,
+          "schedulingMs": 251.09999999403954,
+          "apiMs": 304.40000000596046,
+          "responseToRenderMs": 6,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 303.59999999403954,
+          "schedulingMs": 251.40000000596046,
+          "apiMs": 46.5,
+          "responseToRenderMs": 5.699999988079071,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 305.10000002384186,
+          "schedulingMs": 251.30000001192093,
+          "apiMs": 47,
+          "responseToRenderMs": 6.800000011920929,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 303.19999998807907,
+          "schedulingMs": 251.40000000596046,
+          "apiMs": 46.5,
+          "responseToRenderMs": 5.299999982118607,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 557.6999999880791,
+          "schedulingMs": 251.19999998807907,
+          "apiMs": 304.5,
+          "responseToRenderMs": 2,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 562.7000000178814,
+          "schedulingMs": 251.40000000596046,
+          "apiMs": 306.30000001192093,
+          "responseToRenderMs": 5,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 562.9000000059605,
+          "schedulingMs": 251.19999998807907,
+          "apiMs": 306.60000002384186,
+          "responseToRenderMs": 5.0999999940395355,
+          "staleRenders": 0
+        }
+      ]
+    },
+    {
+      "delayMs": "0",
+      "samples": [
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 0,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 51.5,
+          "schedulingMs": 1.7999999821186066,
+          "apiMs": 44.60000002384186,
+          "responseToRenderMs": 5.0999999940395355,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 1,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 53.30000001192093,
+          "schedulingMs": 3.199999988079071,
+          "apiMs": 44.900000005960464,
+          "responseToRenderMs": 5.200000017881393,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 2,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 48.29999998211861,
+          "schedulingMs": 1.5,
+          "apiMs": 43.19999998807907,
+          "responseToRenderMs": 3.5999999940395355,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 0,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 310.5,
+          "schedulingMs": 0.5999999940395355,
+          "apiMs": 304.5,
+          "responseToRenderMs": 5.4000000059604645,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 1,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 312.5,
+          "schedulingMs": 1.699999988079071,
+          "apiMs": 305,
+          "responseToRenderMs": 5.800000011920929,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 2,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 315.10000002384186,
+          "schedulingMs": 1.9000000059604645,
+          "apiMs": 305.90000000596046,
+          "responseToRenderMs": 7.300000011920929,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 0,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 54.80000001192093,
+          "schedulingMs": 4.200000017881393,
+          "apiMs": 44.900000005960464,
+          "responseToRenderMs": 5.699999988079071,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 1,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 53.5,
+          "schedulingMs": 3,
+          "apiMs": 45.5,
+          "responseToRenderMs": 5,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 2,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 54,
+          "schedulingMs": 3.199999988079071,
+          "apiMs": 45.599999994039536,
+          "responseToRenderMs": 5.200000017881393,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 0,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 312.19999998807907,
+          "schedulingMs": 1.300000011920929,
+          "apiMs": 305.59999999403954,
+          "responseToRenderMs": 5.299999982118607,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 1,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 307.90000000596046,
+          "schedulingMs": 1.2000000178813934,
+          "apiMs": 304.09999999403954,
+          "responseToRenderMs": 2.5999999940395355,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 2,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 310.40000000596046,
+          "schedulingMs": 1.9000000059604645,
+          "apiMs": 304.69999998807907,
+          "responseToRenderMs": 3.800000011920929,
+          "staleRenders": 0
+        }
+      ]
+    },
+    {
+      "delayMs": "75",
+      "samples": [
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 133.89999997615814,
+          "schedulingMs": 78,
+          "apiMs": 47.29999998211861,
+          "responseToRenderMs": 8.599999994039536,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 129.60000002384186,
+          "schedulingMs": 76.80000001192093,
+          "apiMs": 46.900000005960464,
+          "responseToRenderMs": 5.9000000059604645,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 121.5,
+          "schedulingMs": 76.59999999403954,
+          "apiMs": 43.099999994039536,
+          "responseToRenderMs": 1.800000011920929,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 389.39999997615814,
+          "schedulingMs": 77.09999999403954,
+          "apiMs": 306.59999999403954,
+          "responseToRenderMs": 5.699999988079071,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 383.39999997615814,
+          "schedulingMs": 76.59999999403954,
+          "apiMs": 304.5,
+          "responseToRenderMs": 2.2999999821186066,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 388,
+          "schedulingMs": 77.59999999403954,
+          "apiMs": 305.60000002384186,
+          "responseToRenderMs": 4.799999982118607,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 0,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 121.59999999403954,
+          "schedulingMs": 76.5,
+          "apiMs": 43.19999998807907,
+          "responseToRenderMs": 1.9000000059604645,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 1,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 129.5,
+          "schedulingMs": 77.40000000596046,
+          "apiMs": 46.5,
+          "responseToRenderMs": 5.5999999940395355,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 2,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 128.89999997615814,
+          "schedulingMs": 77.2999999821186,
+          "apiMs": 46,
+          "responseToRenderMs": 5.5999999940395355,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 0,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 388.60000002384186,
+          "schedulingMs": 77.40000000596046,
+          "apiMs": 305.40000000596046,
+          "responseToRenderMs": 5.800000011920929,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 1,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 388.59999999403954,
+          "schedulingMs": 76.59999999403954,
+          "apiMs": 306.90000000596046,
+          "responseToRenderMs": 5.0999999940395355,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 2,
+          "requests": 5,
+          "finalKeystrokeToResultsMs": 385.5,
+          "schedulingMs": 77,
+          "apiMs": 305.2999999821186,
+          "responseToRenderMs": 3.2000000178813934,
+          "staleRenders": 0
+        }
+      ]
+    },
+    {
+      "delayMs": "120",
+      "samples": [
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 178,
+          "schedulingMs": 122.09999999403954,
+          "apiMs": 47.400000005960464,
+          "responseToRenderMs": 8.5,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 173.7000000178814,
+          "schedulingMs": 121,
+          "apiMs": 46.70000001788139,
+          "responseToRenderMs": 6,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 40,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 167,
+          "schedulingMs": 121.5,
+          "apiMs": 43,
+          "responseToRenderMs": 2.5,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 432.7999999821186,
+          "schedulingMs": 122,
+          "apiMs": 305.39999997615814,
+          "responseToRenderMs": 5.4000000059604645,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 427.7000000178814,
+          "schedulingMs": 121.2000000178814,
+          "apiMs": 304.2999999821186,
+          "responseToRenderMs": 2.2000000178813934,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 60,
+          "apiDelayMs": 300,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 434.40000000596046,
+          "schedulingMs": 121.90000000596046,
+          "apiMs": 306.5,
+          "responseToRenderMs": 6,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 166.40000000596046,
+          "schedulingMs": 121.09999999403954,
+          "apiMs": 42.900000005960464,
+          "responseToRenderMs": 2.4000000059604645,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 174,
+          "schedulingMs": 121.39999997615814,
+          "apiMs": 47.30000001192093,
+          "responseToRenderMs": 5.300000011920929,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 40,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 173.7000000178814,
+          "schedulingMs": 121.40000000596046,
+          "apiMs": 47.099999994039536,
+          "responseToRenderMs": 5.200000017881393,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 0,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 435,
+          "schedulingMs": 122.2000000178814,
+          "apiMs": 306.89999997615814,
+          "responseToRenderMs": 5.9000000059604645,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 1,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 447.2000000178814,
+          "schedulingMs": 121.30000001192093,
+          "apiMs": 320.7999999821186,
+          "responseToRenderMs": 5.100000023841858,
+          "staleRenders": 0
+        },
+        {
+          "gapMs": 100,
+          "apiDelayMs": 300,
+          "repeat": 2,
+          "requests": 1,
+          "finalKeystrokeToResultsMs": 432.60000002384186,
+          "schedulingMs": 121.80000001192093,
+          "apiMs": 305.5,
+          "responseToRenderMs": 5.300000011920929,
+          "staleRenders": 0
+        }
+      ]
+    }
+  ]
+}
