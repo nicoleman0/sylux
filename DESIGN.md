@@ -13,7 +13,7 @@ Change a shared value in the token file, rather than overriding each consumer. T
 
 ## Typography
 
-Use `--font-ui` for the interface and `--font-code` for file content or code that needs fixed-width characters. Use `--weight-heading` for semibold headings, `--weight-body` for ordinary content and `--weight-control` for control labels.
+Use `--font-ui` for interface prose and `--font-code` for file content or code that needs fixed-width characters. Use `--font-data` (self-hosted JetBrains Mono) for compact metadata and table headings, including file sizes, modified dates, account roles and search locations. Filenames and navigation remain in `--font-ui`. Use `--weight-heading` for semibold headings, `--weight-body` for ordinary content and `--weight-control` for control labels.
 
 | Role | CSS token | Use |
 | --- | --- | --- |
