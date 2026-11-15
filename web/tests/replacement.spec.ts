@@ -20,6 +20,7 @@ async function replacementBackend(page: Page, outcome: 'confirmed' | 'lost-respo
     const json = (body: unknown, status = 200) => route.fulfill({ status, json: body });
     if (path === '/auth/csrf') return json({ csrf_token: 'csrf' });
     if (path === '/auth/local') return json({ account_id: 'owner', handle: 'owner', role: 'user' });
+    if (path === '/folders/root/path') return json({ items: [root] });
     if (path === '/folders/children') return json({ root, items: [], has_more: false, next_cursor: null });
     if (path === '/folders/root/children') return json({ items: active, has_more: false, next_cursor: null });
     if (path === '/trash') return json({ items: deleted.map((entry) => ({ ...entry, original_path: [] })) });

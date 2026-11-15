@@ -52,6 +52,7 @@ async function installBackend(page: import('@playwright/test').Page): Promise<vo
     }
     if (path === '/me/password' && method === 'POST') return route.fulfill({ status: 204 });
 
+    if (path === `/folders/${root.id}/path`) return json({ items: [root] });
     if (path === '/folders/children' && method === 'GET') return json({ items: [], root, next_cursor: null, has_more: false });
     if (path === '/folders/children' && method === 'POST') {
       const body = request.postDataJSON() as { parent_id: string; name: string };
