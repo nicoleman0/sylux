@@ -2,15 +2,21 @@
 
 ## Pull request checks
 
-Change selection runs on every PR and main push. It compares the complete PR diff, runs its own regression checks and verifies the account-model source fingerprints. Documentation and recognized ordinary comment changes skip runtime tests. Rust doc-comment changes select documentation tests; authority source or model changes also select TLC. Unknown input or syntax the detector cannot establish safely selects the full suite. Tool directives remain significant. The selector loads the locked TypeScript/Svelte parsers and pinned shfmt only when needed; Ruby's standard YAML parser preserves block scalars and tags. Parse errors or unavailable parsers keep the full suite selected. See `scripts/ci-changes.py` and its tests for the supported syntax.
+- Every PR and main push runs change selection, its regression tests and the authority source-fingerprint check.
+- Docs and verified ordinary comments skip runtime tests. Rust doc comments select documentation tests; authority inputs also select TLC. The selector loads the locked TypeScript/Svelte parsers and pinned shfmt only when needed. Ruby's YAML parser preserves block scalars and tags. Unknown syntax, missing parsers and tool directives retain full checks.
+- Runtime changes run Rust/storage/dependency checks, real TLS and four browser shards independently. Each shard uses two workers; tests within a file stay serial. All web specs are discovered, including the previously omitted transport and paging-focus files.
+- The `Linux x86_64 checks` aggregate rejects failed selection and any failed, cancelled or unexpectedly skipped selected job. Container recovery uses the same selector and keeps a lightweight visible check when not selected. Manual recovery and release qualification retain their full gates.
+- PR Rust dependency caching uses the pinned action below with `ci-host-v1`, the runner image and shared `host` key. Binaries and workspace crates are excluded. Selected checks always run on cache hits.
 
-Runtime changes run Rust/storage/dependency checks, real TLS tests and four web-browser shards independently. Each browser runner uses two workers while preserving serial order within a test file. All web specs are discovered, including the previously omitted transport and paging-focus tests. Release qualification keeps its existing full gate.
+| Measurement | Elapsed | Notes |
+| --- | ---: | --- |
+| [Comment-cleanup baseline](https://github.com/nicoleman0/sylux/actions/runs/43753973643) | 11m41s | Linux job only; action/navigation browser batch took 4m07s. |
+| [First parallel run](https://github.com/nicoleman0/sylux/actions/runs/43757024751) | 5m13s | Whole CI workflow; includes 91s installing cargo-deny after a cache miss. |
+| [Final guard-fix run](https://github.com/nicoleman0/sylux/actions/runs/43757710373) | 4m05s | Whole CI workflow; selector 18s, Rust/storage 2m18s, TLS 2m28s, longest browser shard 3m36s. |
 
-The `Linux x86_64 checks` aggregate fails if selection fails or any selected job fails, is cancelled or is skipped. Container recovery uses the same classifier in its own workflow; manual dispatch still runs recovery. A lightweight no-op recovery check remains visible for docs and comment changes.
+Local discovery found 423 browser tests. The four shard sets form the exact union with no duplicates. Replaying the complete cleanup diff (`ecb2814..97eafe0`) selects `full=false`, `recovery=false`, `rustdoc=true`, `authority=true`.
 
-PR Rust dependencies use the pinned cache action below with `ci-host-v1`, the runner image and the shared `host` key. Binaries and workspace crates are excluded. All selected checks run on cache hits.
-
-[Comment-cleanup baseline 43753973643](https://github.com/nicoleman0/sylux/actions/runs/43753973643) took 11m41s in the Linux job. Documented checks took 2m00s, storage contracts 34s, browser prerequisites 34s, TLS 52s, account screens 39s, search 9s and action/navigation tests 4m07s. The initial authority fingerprint failure and its correction are outside that successful-run timing. Replaying the complete comment-cleanup diff (`ecb2814` to `97eafe0`) with the new selector produces `full=false`, `recovery=false`, `rustdoc=true`, `authority=true`. This is local classification evidence. [First parallel run 43757024751](https://github.com/nicoleman0/sylux/actions/runs/43757024751) passed in 5m13s from workflow creation to completion, including the selector and aggregate. Its four browser jobs took 3m06s, 1m24s, 3m05s and 1m03s. Rust/storage took 4m38s, including 91s installing cargo-deny after a cache miss. The npm and shell-parser caches hit. This is one hosted sample with different cache state, not an isolated speedup or a timing guarantee. The classifier review fixes require their own final run.
+These are individual hosted samples with different cache states and job layouts. They show elapsed feedback time, not a timing guarantee or lower total runner-minute use. The first run's npm and shell-parser caches hit; it was not wholly cold. The earlier authority-fingerprint failure is outside the successful baseline timing.
 
 ## Baseline and scope
 
