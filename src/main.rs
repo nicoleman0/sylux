@@ -45,10 +45,39 @@ async fn main() -> ExitCode {
                     }
                 }
             }
+            CommandKind::AdminVerifyPayloads => run_verify_payloads(&configuration),
         },
         Err(error) => {
             eprintln!("sylux: {}", error.reason());
             ExitCode::from(2)
+        }
+    }
+}
+
+fn run_verify_payloads(configuration: &CliConfig) -> ExitCode {
+    match sylux::admin::verify_payloads(&configuration.root) {
+        Ok(report) => {
+            for (blob_id, fault) in &report.damaged {
+                println!(
+                    "damaged blob={blob_id} reason={}",
+                    sylux::admin::PayloadReport::fault_label(*fault)
+                );
+            }
+            let verified = report.checked - report.damaged.len() as u64;
+            println!(
+                "payload_verification checked={} verified={verified} damaged={}",
+                report.checked,
+                report.damaged.len()
+            );
+            if report.damaged.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(reason) => {
+            eprintln!("sylux: {reason}");
+            ExitCode::FAILURE
         }
     }
 }

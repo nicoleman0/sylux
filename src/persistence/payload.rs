@@ -124,49 +124,121 @@ impl PayloadStore {
         expected_length: u64,
         expected_sha256: [u8; 32],
     ) -> Result<VerifiedPayload, PayloadError> {
-        validate_id(blob_id)?;
-        let shard = open_directory(&self.payloads, &blob_id[..2])?;
-        let fd = fs::openat(
-            &shard,
-            blob_id,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|error| match std::io::Error::from(error).kind() {
-            std::io::ErrorKind::NotFound => PayloadError::Missing,
-            _ => PayloadError::Io("payload_open_failed"),
-        })?;
-        let mut file = File::from(fd);
-        let stat = fs::fstat(&file).map_err(|_| PayloadError::Io("payload_stat_failed"))?;
-        if !FileType::from_raw_mode(stat.st_mode).is_file()
-            || stat.st_nlink != 1
-            || stat.st_mode & 0o777 != 0o600
-            || stat.st_size < 0
-            || stat.st_size as u64 != expected_length
-        {
-            return Err(PayloadError::Integrity);
-        }
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|_| PayloadError::Io("payload_read_failed"))?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        let actual: [u8; 32] = hasher.finalize().into();
-        if actual != expected_sha256 {
-            return Err(PayloadError::Integrity);
-        }
+        let mut file = check_payload(&self.payloads, blob_id, expected_length, expected_sha256)
+            .map_err(|fault| match fault {
+                PayloadFault::InvalidId => PayloadError::InvalidId,
+                PayloadFault::Missing => PayloadError::Missing,
+                PayloadFault::Io(code) => PayloadError::Io(code),
+                PayloadFault::NotPrivateFile
+                | PayloadFault::LengthMismatch
+                | PayloadFault::DigestMismatch => PayloadError::Integrity,
+            })?;
         file.seek(SeekFrom::Start(0))
             .map_err(|_| PayloadError::Io("payload_seek_failed"))?;
         Ok(VerifiedPayload {
             file,
             length: expected_length,
         })
+    }
+}
+
+/// Why a stored payload failed verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadFault {
+    InvalidId,
+    Missing,
+    /// Not a single-link regular file with mode 0600.
+    NotPrivateFile,
+    LengthMismatch,
+    DigestMismatch,
+    Io(&'static str),
+}
+
+/// Read-only access to the payload directory for offline verification.
+/// Unlike `PayloadStore`, it never creates a directory.
+pub struct PayloadVerifier {
+    payloads: File,
+}
+
+impl PayloadVerifier {
+    pub fn open(root: &Path) -> Result<Self, PayloadError> {
+        let root_fd = fs::open(
+            root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| PayloadError::Io("payload_root_open_failed"))?;
+        validate_directory(&root_fd, "payload_root_invalid")?;
+        let payloads = open_directory(&File::from(root_fd), PAYLOADS)?;
+        Ok(Self { payloads })
+    }
+
+    pub fn verify(
+        &self,
+        blob_id: &str,
+        expected_length: u64,
+        expected_sha256: [u8; 32],
+    ) -> Result<(), PayloadFault> {
+        check_payload(&self.payloads, blob_id, expected_length, expected_sha256).map(|_| ())
+    }
+}
+
+/// The one rule for a valid stored payload: private regular file, recorded
+/// length, recorded SHA-256. Hashing streams through a fixed buffer.
+fn check_payload(
+    payloads: &File,
+    blob_id: &str,
+    expected_length: u64,
+    expected_sha256: [u8; 32],
+) -> Result<File, PayloadFault> {
+    validate_id(blob_id).map_err(|_| PayloadFault::InvalidId)?;
+    let shard = open_directory(payloads, &blob_id[..2]).map_err(fault_from_error)?;
+    let fd = fs::openat(
+        &shard,
+        blob_id,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| match std::io::Error::from(error).kind() {
+        std::io::ErrorKind::NotFound => PayloadFault::Missing,
+        _ => PayloadFault::Io("payload_open_failed"),
+    })?;
+    let mut file = File::from(fd);
+    let stat = fs::fstat(&file).map_err(|_| PayloadFault::Io("payload_stat_failed"))?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file()
+        || stat.st_nlink != 1
+        || stat.st_mode & 0o777 != 0o600
+        || stat.st_size < 0
+    {
+        return Err(PayloadFault::NotPrivateFile);
+    }
+    if stat.st_size as u64 != expected_length {
+        return Err(PayloadFault::LengthMismatch);
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| PayloadFault::Io("payload_read_failed"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual: [u8; 32] = hasher.finalize().into();
+    if actual != expected_sha256 {
+        return Err(PayloadFault::DigestMismatch);
+    }
+    Ok(file)
+}
+
+fn fault_from_error(error: PayloadError) -> PayloadFault {
+    match error {
+        PayloadError::InvalidId => PayloadFault::InvalidId,
+        PayloadError::Missing => PayloadFault::Missing,
+        PayloadError::Io(code) => PayloadFault::Io(code),
+        _ => PayloadFault::Io("payload_directory_open_failed"),
     }
 }
 

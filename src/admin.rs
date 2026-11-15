@@ -8,8 +8,114 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     domain::authz::{MAX_PASSWORD_BYTES, PasswordLimiter, validate_password},
-    persistence::{ownership, root, schema, sqlite::DEFAULT_BUSY_TIMEOUT},
+    persistence::{
+        ownership,
+        payload::{PayloadError, PayloadFault, PayloadVerifier},
+        root, schema,
+        sqlite::DEFAULT_BUSY_TIMEOUT,
+    },
 };
+
+const VERIFY_PAGE: i64 = 64;
+
+/// Outcome of `verify_payloads`. Damaged entries carry only blob IDs, which
+/// are random server-generated hex and safe to log.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PayloadReport {
+    pub checked: u64,
+    pub damaged: Vec<(String, PayloadFault)>,
+}
+
+impl PayloadReport {
+    pub fn fault_label(fault: PayloadFault) -> &'static str {
+        match fault {
+            PayloadFault::Missing => "missing",
+            PayloadFault::LengthMismatch => "length_mismatch",
+            PayloadFault::DigestMismatch => "digest_mismatch",
+            PayloadFault::NotPrivateFile => "not_private_file",
+            PayloadFault::InvalidId | PayloadFault::Io(_) => "unreadable",
+        }
+    }
+}
+
+/// Check every payload against the length and SHA-256 recorded in metadata.
+/// Takes the writer lock like recovery, but opens SQLite read-only and
+/// creates nothing. Damage is reported, not an error.
+pub fn verify_payloads(root_path: &Path) -> Result<PayloadReport, &'static str> {
+    verify_recovery_owner(root_path, rustix::process::geteuid().as_raw()).map_err(
+        |code| match code {
+            "recovery_service_identity_required" => "verify_service_identity_required",
+            _ => "verify_root_invalid",
+        },
+    )?;
+    let _guard = ownership::acquire_writer_lock(root_path).map_err(|error| match error {
+        ownership::OwnershipError::LockHeld => "service_running_stop_before_verify",
+        _ => "verify_root_invalid",
+    })?;
+    let manifest = root::read_manifest(root_path).map_err(|_| "verify_binding_invalid")?;
+    root::verify_protected_material(root_path).map_err(|_| "verify_binding_invalid")?;
+    // Declared after ownership so every return closes SQLite before unlocking.
+    let bound = root::open_bound_database_read_only(root_path, DEFAULT_BUSY_TIMEOUT)
+        .map_err(|_| "verify_database_unavailable")?;
+    root::verify_binding(&bound, root_path, &manifest).map_err(|_| "verify_binding_invalid")?;
+    let version: i64 = bound
+        .connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|_| "verify_schema_invalid")?;
+    if version != schema::SUPPORTED_SCHEMA_VERSION {
+        return Err("verify_schema_unsupported");
+    }
+    schema::verify_core_schema(&bound.connection).map_err(|_| "verify_schema_invalid")?;
+    schema::recovery_checks(&bound.connection).map_err(|_| "verify_integrity_failed")?;
+
+    // A root that never served has no payload directory; its blobs are missing.
+    let verifier = match PayloadVerifier::open(root_path) {
+        Ok(verifier) => Some(verifier),
+        Err(PayloadError::Missing) => None,
+        Err(_) => return Err("verify_payload_store_invalid"),
+    };
+    let mut statement = bound
+        .connection
+        .prepare(
+            "SELECT blob_id,length,sha256 FROM blob WHERE blob_id>?1 ORDER BY blob_id LIMIT ?2",
+        )
+        .map_err(|_| "verify_metadata_unreadable")?;
+    let mut report = PayloadReport::default();
+    let mut after = String::new();
+    loop {
+        let page = statement
+            .query_map(params![after, VERIFY_PAGE], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+            .map_err(|_| "verify_metadata_unreadable")?;
+        let Some((last, _, _)) = page.last() else {
+            break;
+        };
+        after = last.clone();
+        for (blob_id, length, digest) in page {
+            // Schema CHECK constraints guarantee these; a violation means the database was altered.
+            let length = u64::try_from(length).map_err(|_| "verify_metadata_invalid")?;
+            let digest = <[u8; 32]>::try_from(digest).map_err(|_| "verify_metadata_invalid")?;
+            report.checked += 1;
+            let result = match &verifier {
+                Some(verifier) => verifier.verify(&blob_id, length, digest),
+                None => Err(PayloadFault::Missing),
+            };
+            if let Err(fault) = result {
+                if fault == PayloadFault::InvalidId {
+                    return Err("verify_metadata_invalid");
+                }
+                report.damaged.push((blob_id, fault));
+            }
+        }
+    }
+    Ok(report)
+}
 
 pub async fn reset_password_from_stdin(root_path: &Path, handle: &str) -> Result<(), &'static str> {
     verify_recovery_owner(root_path, rustix::process::geteuid().as_raw())?;
