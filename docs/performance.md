@@ -15,6 +15,7 @@ node scripts/measure-workflows.mjs --release
 # Explicit recovery and bounded diagnostic after a slow baseline:
 node scripts/measure-workflows.mjs --release --without-search
 node scripts/measure-workflows.mjs --release --search-only
+node scripts/measure-workflows.mjs --release --search-matrix
 node scripts/measure-workflows.mjs --release --scale=10000 --transfers-only
 ```
 
@@ -30,7 +31,7 @@ Each run creates an ignored `reports/syl-48/<timestamp>-<mode>/` directory:
 - `summary.json`: nearest-rank percentiles grouped by scale, sample type and operation. Sparse p95/p99 values are exploratory maxima, not stable tail estimates.
 - `source.diff` and `harness-snapshot/`: tracked diff and exact copies of the harness sources, including untracked files, as executed. Hashes identify those copies before commit.
 
-`--scale=10000` or `--scale=100000` restricts a run to one scale. `--without-search` explicitly excludes account search, typing, search during transfer and search queue probes. `--search-only` runs deepest-folder metadata cases and one bounded no-match HTTP search per scale. `--transfers-only` runs API batches and one mixed probe batch. These limited modes never establish full-matrix acceptance.
+`--scale=10000` or `--scale=100000` restricts a run to one scale. `--without-search` explicitly excludes account search, typing, search during transfer and search queue probes. `--search-only` runs deepest-folder metadata cases and one bounded no-match HTTP search per scale. `--transfers-only` runs API batches and one mixed probe batch. `--search-matrix` runs seven HTTP samples for each search shape, each paired with an overlapping name-ascending browse request, then three batches of the existing twelve mixed queue/service probes. Both responses are checked against the seed oracle. HTTP dispatch does not impose reader admission order. This mode excludes browser journeys, transfers, content and standalone browse cases. These limited modes never establish full-matrix acceptance.
 
 A failed run exits nonzero and retains partial evidence. Preview and main browser phase failures are recorded and the API transfer/probe phases continue. SIGINT, SIGTERM and the overall deadline cancel active work. One idempotent stop operation closes stdin and bounds child join/kill; interrupted runs retain nonzero status and evidence. The runner closes browser contexts and destroys requests before stopping the fixture. A forced termination retains its disposable fixture. Only the fixture owner removes its own marked root after the TLS server and SQLite workers join. No user data is read or deleted.
 
@@ -110,6 +111,34 @@ An injected first-preview launch failure in `2026-11-14T23-55-34.293Z-quick` pro
 After the final child observer was changed to wait for stdio `close`, quick search-only run `2026-11-14T23-57-20.933Z-quick` passed with 14 samples and clean fixture join. Final formatting, release all-target Clippy, numeric/discovery skip checks and all seven retained helper tests passed.
 
 The final child-output drain check `2026-11-14T23-57-20.933Z-quick` passed the short TLS/deep/search path with clean shutdown. Seven retained helper test groups passed. CI runs these unit checks and Cargo discovery; it does not execute the benchmarks.
+
+## Recursive search traversal correction (SYL-58)
+
+The recursive step now starts with `live CROSS JOIN entry child`. SQLite documents that [CROSS JOIN prevents join reordering](https://www.sqlite.org/lang_select.html#special_handling_of_cross_join). The bundled SQLite 3.54.1 plan at both scales changes from `SEARCH child USING INDEX entry_active_listing (owner_account_id=?)` to `SEARCH child USING INDEX entry_active_listing (owner_account_id=? AND parent_id=? AND state=?)`. No schema, matching, ordering, fingerprint or cursor rule changed.
+
+The focused release runs used base `7a34bebc58ccfbd7ee396ea5da98859b3b885c83` plus their recorded diffs, Rust 1.99.1, Node 24.22.2 and the same Apple M4/Darwin arm64 host and seed described above. [Portable raw samples and run metadata](measurements/syl-58-search.jsonl) retain executable, harness and raw-sample hashes, plans, dimensions, fixture filesystem observations and cleanup outcomes. Full local source snapshots, diffs and resource traces remain under ignored `reports/syl-48/<runId>/`.
+
+| Search HTTP median | 10k before, ms | 10k after, ms | 100k after, ms |
+| --- | ---: | ---: | ---: |
+| selective | 4,818.92 | 12.62 | 165.64 |
+| broad | 5,757.72 | 24.00 | 278.63 |
+| none | 5,486.54 | 17.83 | 164.87 |
+| one | 5,368.26 | 28.89 | 271.96 |
+
+Each cell has seven completed samples. Each search was paired with an overlapping first-page name browse, rather than the standalone searches in the historical full matrix. Final after samples include pair IDs and monotonic HTTP start/end times. These intervals measure outstanding HTTP requests; they do not prove SQLite admission order. At 100k before, the first selective search and paired browse both exceeded the 120-second HTTP bound. No baseline 100k result, other search shapes or queue probes completed. That failure required killing the fixture, which retained its disposable data; all 10k-before and both-scale after fixtures joined and cleaned normally.
+
+| Search closure service median | 10k before, ms | 10k after, ms | 100k after, ms |
+| --- | ---: | ---: | ---: |
+| search_selective | 6,326.28 | 12.20 | 161.15 |
+| search_broad | 8,430.99 | 23.10 | 272.25 |
+| search_none | 7,713.68 | 12.41 | 162.11 |
+| search_one | 5,926.21 | 22.93 | 272.93 |
+
+Queue evidence is separate from HTTP latency: each scale/pass has three twelve-closure batches. Selective search has six service samples; each other search shape has three. Closure service excludes admission wait and HTTP serialization. Across the 36 mixed probes, median/max queue wait was 21,085/34,569 ms before at 10k, 58/124 ms after at 10k and 774/1,475 ms after at 100k. Paired-browse timings and every individual queue/service sample are retained in the linked raw record.
+
+The before 10k run overlapped other benchmark fixtures, including the bounded 100k baseline, and local compilation. The after run used a quiet benchmark window. These descriptive timings are not a controlled speedup ratio. Seeding warmed metadata; no OS cache eviction or physical storage qualification occurred. Fixture-path filesystem type was observed, but physical media metadata was unavailable. Sparse maxima do not establish tails or capacity. This focused pass contains no browser, transfer, deployment, durability or upgrade evidence.
+
+Regression checks compare complete ordered traversal inputs before/after on a wide tree and a depth 128 chain, including case-equivalent duplicate file names, Unicode, literal wildcards, other accounts, deleted ancestors and the depth cutoff. Rename, generation, move and deletion preserve query equivalence while changing fingerprints. Plan checks use fresh 10k/100k mixed wide/deep data before and after `ANALYZE`. All 70 library and 41 names/listing integration tests passed, including real TLS search pagination and stale-cursor rejection; the expanded two search regressions passed again after review. Release all-target Clippy and seven measurement-helper groups passed. Web source and dependency inputs were unchanged; current built assets were reused before Cargo.
 
 ## Proposed budgets
 

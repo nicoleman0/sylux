@@ -31,18 +31,19 @@ pub fn fold(value: &str) -> String {
         .collect()
 }
 
-pub fn find(db: &Connection, owner: &str, query: &str) -> Result<SearchResults, NamespaceError> {
-    let root = super::namespace::private_root(db, owner)?;
-    let mut stmt = db.prepare(
-        "WITH RECURSIVE live(entry_id,parent_id,original_name,kind,generation,depth) AS (\
+// Keep live outermost so each child lookup uses owner, parent and state.
+const LIVE_SQL: &str = "WITH RECURSIVE live(entry_id,parent_id,original_name,kind,generation,depth) AS (\
          SELECT entry_id,parent_id,original_name,kind,generation,0 FROM entry \
          WHERE entry_id=?1 AND owner_account_id=?2 AND parent_id IS NULL AND state='active' \
          UNION ALL \
          SELECT child.entry_id,child.parent_id,child.original_name,child.kind,child.generation,live.depth+1 \
-         FROM entry child JOIN live ON child.parent_id=live.entry_id \
+         FROM live CROSS JOIN entry child ON child.parent_id=live.entry_id \
          WHERE child.owner_account_id=?2 AND child.state='active' AND live.depth<?3) \
-         SELECT entry_id,parent_id,original_name,kind,generation FROM live ORDER BY entry_id"
-    ).map_err(|_| NamespaceError::Sql)?;
+         SELECT entry_id,parent_id,original_name,kind,generation FROM live ORDER BY entry_id";
+
+pub fn find(db: &Connection, owner: &str, query: &str) -> Result<SearchResults, NamespaceError> {
+    let root = super::namespace::private_root(db, owner)?;
+    let mut stmt = db.prepare(LIVE_SQL).map_err(|_| NamespaceError::Sql)?;
     let entries: Vec<Entry> = stmt
         .query_map(params![root, owner, MAX_ENTRY_DEPTH], |r| {
             let id: String = r.get(0)?;
@@ -117,3 +118,6 @@ pub fn find(db: &Connection, owner: &str, query: &str) -> Result<SearchResults, 
         fingerprint: URL_SAFE_NO_PAD.encode(digest.finalize()),
     })
 }
+
+#[cfg(test)]
+mod tests;

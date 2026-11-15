@@ -14,7 +14,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 if (process.versions.node !== '24.22.2') throw new Error('Use pinned Node 24.22.2 from .nvmrc');
 const args = process.argv.slice(2);
-const { quick, profile, transfersOnly, searchOnly, withoutSearch, scales } = parseArgs(args);
+const { quick, profile, transfersOnly, searchOnly, searchMatrix, withoutSearch, scales } = parseArgs(args);
 const repetitions = quick ? 2 : 7;
 const contentSizes = quick ? [4 * 1024 ** 2, 8 * 1024 ** 2] : [256 * 1024 ** 2, 1024 ** 3];
 const output = resolve('reports/syl-48', `${new Date().toISOString().replaceAll(':', '-')}-${quick ? 'quick' : 'full'}`);
@@ -32,7 +32,7 @@ const run = (cmd, argv) => {
 const evidence = {
   schema: 1, command: `${process.execPath} scripts/measure-workflows.mjs${args.length ? ' ' + args.join(' ') : ''}`,
   source: null,
-  fixtureWorkerThreads: 4, ttfbDefinition: 'request start to response headers callback; headers-arrival proxy', profile, quick, scales, repetitions, contentSizes, transfersOnly, searchOnly, withoutSearch, exclusions: withoutSearch ? ['all account search', 'search during upload', 'repeated typing', 'search queue probes'] : [],
+  fixtureWorkerThreads: 4, ttfbDefinition: 'request start to response headers callback; headers-arrival proxy', profile, quick, scales, repetitions, contentSizes, transfersOnly, searchOnly, searchMatrix, withoutSearch, exclusions: withoutSearch ? ['all account search', 'search during upload', 'repeated typing', 'search queue probes'] : searchMatrix ? ['browser journeys', 'uploads and content', 'standalone browse cases'] : [],
   started: new Date().toISOString(), node: process.versions.node,
   machine: { os: platform(), release: release(), architecture: arch(), cpu: cpus()[0].model, logicalCpus: cpus().length, ramBytes: totalmem() },
   harnessHashes: {},
@@ -165,7 +165,7 @@ async function startFixture(scale) {
     resources.push(data); appendFileSync(resolve(output, 'resources.jsonl'), JSON.stringify(data) + '\n', { mode: 0o600 });
   }, 1000);
 }
-function request(label, path, { method = 'GET', session = fixture.sessions[0], body, headers = {}, expect = 200, length, throttle = false, collect = true } = {}) {
+function request(label, path, { method = 'GET', session = fixture.sessions[0], body, headers = {}, expect = 200, length, throttle = false, collect = true, pairId } = {}) {
   checkInterrupted();
   requestCount++;
   const started = performance.now();
@@ -182,7 +182,7 @@ function request(label, path, { method = 'GET', session = fixture.sessions[0], b
       res.on('error', reject);
       res.on('end', () => {
         const elapsedMs = performance.now() - started;
-        const sample = { ...(length !== undefined ? { sentBytes: length, uploadMibPerSecond: length / 1024 ** 2 / (elapsedMs / 1000) } : {}), scale: fixture.dimensions.metadata_entries, kind: 'http', label, method, status: res.statusCode, elapsedMs, ttfbMs, bytes, mibPerSecond: bytes / 1024 ** 2 / (elapsedMs / 1000) };
+        const sample = { ...(pairId === undefined ? {} : { pairId, startedMs: started, finishedMs: performance.now() }), ...(length !== undefined ? { sentBytes: length, uploadMibPerSecond: length / 1024 ** 2 / (elapsedMs / 1000) } : {}), scale: fixture.dimensions.metadata_entries, kind: 'http', label, method, status: res.statusCode, elapsedMs, ttfbMs, bytes, mibPerSecond: bytes / 1024 ** 2 / (elapsedMs / 1000) };
         record(sample);
         if (res.statusCode !== expect) return reject(new Error(`${label} expected ${expect}, received ${res.statusCode}`));
         const text = collect ? Buffer.concat(chunks).toString('utf8') : '';
@@ -192,7 +192,7 @@ function request(label, path, { method = 'GET', session = fixture.sessions[0], b
     });
     active.add(req); req.on('close', () => active.delete(req));
     req.on('timeout', () => req.destroy(new Error(`${label} request timeout`)));
-    req.on('error', error => { record({ kind: 'http_failure', scale: fixture.dimensions.metadata_entries, label, method, elapsedMs: performance.now() - started, error: error.code ?? error.name }); reject(error); });
+    req.on('error', error => { record({ ...(pairId === undefined ? {} : { pairId, startedMs: started, finishedMs: performance.now() }), kind: 'http_failure', scale: fixture.dimensions.metadata_entries, label, method, elapsedMs: performance.now() - started, error: error.code ?? error.name }); reject(error); });
     if (length !== undefined) {
       (async () => {
         const chunk = Buffer.alloc(65536, 97);
@@ -235,6 +235,19 @@ async function deepMetadata() {
     const response = await request(`deep:browse:${sort}`, `/folders/${deepest}/children?sort=${sort}&limit=100`);
     validatePage(response.data, fixture.expectations.deep[sort], fixture.dimensions.deep_live_children_by_layer.at(-1));
     record({ kind: 'deep_shape', scale: fixture.dimensions.metadata_entries, sort, firstPageRows: response.data.items.length, hasMore: response.data.has_more, pathEntries: path.data.items.length });
+  }
+}
+async function searchMatrixSamples() {
+  for (const [label, query] of [['selective', 'item-000099'], ['broad', 'item'], ['none', 'zzzz-no-match'], ['one', 'i']]) {
+    for (let i = 0; i < repetitions; i++) {
+      const pairId = `${fixture.dimensions.metadata_entries}:${label}:${i}`;
+      const searching = request(`search:${label}`, `/entries/search?q=${query}&limit=100`, { pairId });
+      // Overlap HTTP requests without imposing SQLite admission order.
+      const browsing = request(`during_search:${label}:browse`, '/folders/children?sort=name_asc&limit=100', { pairId });
+      const [found, listed] = await Promise.all([searching, browsing]);
+      validateSearch(found.data, fixture.expectations.search_ids[label], fixture.expectations.search_counts[label]);
+      validatePage(listed.data, fixture.expectations.root.name_asc, fixture.dimensions.wide_root_live_children);
+    }
   }
 }
 async function apiMatrix() {
@@ -431,7 +444,11 @@ try {
   for (const scale of scales) {
     progress(`starting ${scale} metadata fixture (${profile})`);
     await startFixture(scale);
-    if (searchOnly) {
+    if (searchMatrix) {
+      progress(`${scale}: four search shapes with concurrent browsing`);
+      await searchMatrixSamples();
+      await queueProbes(scale);
+    } else if (searchOnly) {
       progress(`${scale}: deep folder/path and isolated bounded no-match search`);
       await deepMetadata();
       validateSearch((await request('search:probe_no_match', '/entries/search?q=zzzz-no-match')).data, fixture.expectations.search_ids.none, fixture.expectations.search_counts.none);
