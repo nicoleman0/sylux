@@ -66,6 +66,17 @@ jobs:
       - name: Install pinned browser prerequisites
         run: npm --prefix web exec -- playwright install --with-deps chromium
 
+      - name: Check real TLS browser journeys
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libnss3-tools
+          export S1_CERTUTIL
+          S1_CERTUTIL=$(command -v certutil)
+          mkdir -p evidence/ci
+          export S1_HARNESS_OUTPUT
+          S1_HARNESS_OUTPUT=$(mktemp -d "$PWD/evidence/ci/browser.XXXXXXXX")
+          cargo test --locked --features test-harness --test browser_fixture
+
       - name: Check account authority browser journeys
         run: npm --prefix web run smoke -- --grep 'account authority|account screens'
 

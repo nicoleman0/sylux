@@ -256,11 +256,11 @@ test('browsing remains available while a real upload body is delayed', { annotat
   const report = page.getByRole('region', { name: 'Upload results', exact: true });
   await expect(report).toBeVisible();
   await expect(report.getByRole('status', { name: 'Uploading', exact: true })).toBeVisible();
+  await expect(report.locator('details')).toHaveCount(0);
   release();
-  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled({ timeout: 20_000 });
-  await expect(report).toBeVisible();
-  await report.locator('summary').click();
-  await expect(report.locator(`[data-upload-result="slow-upload-${phase}.bin"]`)).toContainText('Saved');
+  await expect(report.getByRole('status').filter({ hasText: 'Uploaded to Files' })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
+  await expect(report.locator('details')).toHaveCount(0);
   await page.getByRole('navigation', { name: 'Files', exact: true }).getByRole('button', { name: 'Files', exact: true }).click();
   await expect(page.getByRole('article', { name: `slow-upload-${phase}.bin`, exact: true })).toBeVisible();
 });
@@ -339,11 +339,12 @@ test('lost commit response is resolved through the original upload status', { an
   const unresolved = page.getByRole('alert').filter({ hasText: 'Upload status needs checking' });
   await expect(unresolved).toBeVisible();
   await expect(page.getByRole('button', { name: 'Check upload status' })).toBeVisible();
-  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: 'Uploaded to Files' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Check upload status' }).click();
   await expect(unresolved).toBeHidden();
   await expect(page.getByRole('article').filter({ hasText: fileName })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole('status').filter({ hasText: 'Upload complete' })).toBeAttached();
+  await expect(page.getByRole('status').filter({ hasText: 'Uploaded to Files' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Upload results', exact: true }).locator('details')).toHaveCount(0);
   await expect(page.locator('.upload-status')).toHaveCount(0);
 
   let ticketRequests = 0;
