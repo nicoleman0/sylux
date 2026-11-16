@@ -21,30 +21,12 @@
   prerequisites, ownership boundary, and acceptance criteria/checks. Add
   blockers only for concrete technical prerequisites; don't invent
   cross-Project blockers.
-- Statuses mean: Backlog is captured, not picked up; Todo is ready, authorized,
-  bounded and unblocked; In Progress is claimed; In Review has reviewable
-  results and checks (a PR for code); Done meets acceptance criteria, with
-  implementation source merged.
-- When starting an issue, move it to In Progress, record the Codex chat and
-  worktree, and delegate where supported. Nick remains assignee, including on
-  delegated issues. Keep the recorded chat and worktree accurate as work moves.
-- The coordinator owns integration and reports the evidence collected and its
-  limits. Feature completion needs merged source and relevant verification.
+- Follow the global `delivery` skill for issue statuses, the build, review
+  and ship flow, PR permissions and Linear project updates.
+- Nick remains assignee, including on delegated issues. Keep the recorded
+  chat and worktree accurate as work moves.
+- Feature completion needs merged source and relevant verification.
   Publishing and deployment are separate, with no fixed beta deadline.
-- Post a Linear project update after work ships: merged changes, published
-  releases or deployments. Skip ready-for-review and other pre-shipping posts.
-  Summarize outcomes, evidence, limits and next steps; link relevant issues/PRs.
-  Distinguish merged, published and deployed work. Check the latest
-  update first and batch related work; avoid per-commit or no-change updates.
-- Build the smallest useful end-to-end slice. Split work when a part can
-  deliver value independently. Avoid speculative hooks.
-- Prefer finishing work; keep only a few issues ready and normally 1–2
-  in progress. These are defaults, not limits on useful parallel work.
-- Treat priorities as guidance. Features need not wait for feedback,
-  publication or rollout.
-- After self-review and relevant checks, agents may commit, push a feature
-  branch and open a PR without further permission. Leave the PR open for
-  the owner's review; merge or enable auto-merge only with explicit approval.
 - Use the owner's configured Git identity for commits. The public contact
   address in the README is not a commit identity; do not override author or
   committer identity with Corvus Dev or its contact address.
