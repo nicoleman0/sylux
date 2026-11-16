@@ -119,3 +119,23 @@ test('live failure state is announced and has a text retry action', { annotation
   await expect(error.getByRole('button', { name: /try again/i })).toBeVisible();
   await page.unrouteAll({ behavior: 'ignoreErrors' });
 });
+
+test('created account can sign in through verified TLS', { annotation: { type: 'harness_case', description: 'accessibility_create_account_sign_in' } }, async () => {
+  await signIn();
+  const handle = `${fixture.handle}-${process.env.S1_BROWSER_PHASE}-created`;
+  const password = 'Created account password 2026';
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Create account', exact: true });
+  await dialog.getByLabel('Account name').fill(handle);
+  await dialog.getByLabel('Password', { exact: true }).fill(password);
+  await dialog.getByLabel('Confirm password', { exact: true }).fill(password);
+  await dialog.getByRole('button', { name: 'Create account', exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  await page.getByRole('button', { name: 'Log out', exact: true }).click();
+  await page.getByLabel('Account name').fill(handle);
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
+});
