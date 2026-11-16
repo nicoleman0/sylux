@@ -14,6 +14,9 @@ async function installFileWorkspace(page: import('@playwright/test').Page): Prom
     if (path === '/instance/appearance') return json({ accentColor: null, loginBackgroundColor: null, logoUrl: null, loginImageUrl: null });
     if (path === '/auth/csrf') return json({ csrf_token: 'typography-test-csrf' });
     if (path === '/auth/local') return json({ account_id: 'account-1', handle: 'owner', role: 'administrator', csrf_token: 'typography-test-session' });
+    if (path === '/accounts') return json([{ account_id: 'account-1', handle: 'owner', role: 'administrator', enabled: true }]);
+    if (path === '/trash') return json({ items: [{ ...entries[0], original_path: [] }], next_cursor: null, has_more: false });
+    if (path === '/entries/search') return json({ items: [{ entry: entries[0], location: [root] }], next_cursor: null, has_more: false });
     if (path === '/folders/children') return json({ items: [], root, next_cursor: null, has_more: false });
     if (path === '/folders/root-1/children') return json({ items: entries, next_cursor: null, has_more: false });
     return route.continue();
@@ -36,7 +39,7 @@ test('catalogue documents the selected data type without experiment controls', a
 
   await expect(page.locator('[data-type-sample="--type-meta"] .type-specimen')).toHaveCSS('font-family', /JetBrains Mono/);
   await expect(page.locator('[data-type-sample="--type-note"] .type-specimen')).toHaveCSS('font-family', /system-ui/);
-  await expect(page.locator('.data-role-samples .list-head')).toHaveCSS('font-family', /JetBrains Mono/);
+  await expect(page.locator('.data-role-samples .list-head')).toHaveCSS('font-family', /system-ui/);
   await expect(page.locator('.data-role-samples .file-modified')).toHaveCSS('font-family', /JetBrains Mono/);
   await expect(page.locator('.data-role-samples .file-size')).toHaveCSS('font-family', /JetBrains Mono/);
   await expect(page.locator('.data-role-samples p')).toHaveCSS('font-family', /system-ui/);
@@ -54,7 +57,7 @@ test('catalogue documents the selected data type without experiment controls', a
   await page.screenshot({ path: testInfo.outputPath('catalogue-narrow-dark.png'), fullPage: true, animations: 'disabled' });
 });
 
-test('app data and headings use JetBrains Mono while filenames, navigation, and prose stay sans', async ({ page }, testInfo) => {
+test('app metadata uses JetBrains Mono while column headings and interface text stay sans', async ({ page }, testInfo) => {
   await installFileWorkspace(page);
   await page.setViewportSize({ width: 1280, height: 844 });
   await page.goto('/?typography=filenames');
@@ -68,7 +71,7 @@ test('app data and headings use JetBrains Mono while filenames, navigation, and 
 
   const headings = page.locator('.list-head .sort-heading');
   await expect(headings).toHaveCount(3);
-  for (let index = 0; index < 3; index++) await expect(headings.nth(index)).toHaveCSS('font-family', /JetBrains Mono/);
+  for (let index = 0; index < 3; index++) await expect(headings.nth(index)).toHaveCSS('font-family', /system-ui/);
   await expect(page.locator('.file-row .file-size').first()).toHaveCSS('font-family', /JetBrains Mono/);
   await expect(page.locator('.file-row .file-modified').first()).toHaveCSS('font-family', /JetBrains Mono/);
   await expect(page.locator('.mobile-file-size').first()).toHaveCSS('font-family', /JetBrains Mono/);
@@ -88,5 +91,61 @@ test('app data and headings use JetBrains Mono while filenames, navigation, and 
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`app-${width}-${theme}.png`), fullPage: true, animations: 'disabled' });
     }
+  }
+});
+
+test('search, Trash and Accounts keep sans headings and monospace values', async ({ page }, testInfo) => {
+  await installFileWorkspace(page);
+  await page.goto('/');
+  await page.getByLabel('Account name').fill('owner');
+  await page.getByLabel('Password').fill('test-password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Files' })).toBeVisible();
+
+  for (const theme of ['light', 'dark'] as const) {
+    await page.setViewportSize({ width: 1280, height: 844 });
+    await setAppTheme(page, theme);
+    await page.getByLabel('Search files').fill('report');
+    await expect(page.locator('.search-row')).toHaveCount(1);
+    await expect(page.locator('.search-head .sort-heading')).toHaveCount(4);
+    for (const heading of await page.locator('.search-head .sort-heading').all()) await expect(heading).toHaveCSS('font-family', /system-ui/);
+    await expect(page.locator('.search-row .file-size')).toHaveCSS('font-family', /JetBrains Mono/);
+    await expect(page.locator('.search-location')).toHaveCSS('font-family', /JetBrains Mono/);
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`search-${width}-${theme}.png`), fullPage: true });
+    }
+    await page.setViewportSize({ width: 1280, height: 844 });
+    await page.getByRole('button', { name: 'Clear search', exact: true }).click();
+    await page.getByRole('button', { name: 'Trash', exact: true }).click();
+    await expect(page.locator('.trash-row')).toHaveCount(1);
+    await expect(page.locator('.trash-sort .sort-heading')).toHaveCount(4);
+    for (const heading of await page.locator('.trash-sort .sort-heading').all()) await expect(heading).toHaveCSS('font-family', /system-ui/);
+    await expect(page.locator('.trash-row .file-size')).toHaveCSS('font-family', /JetBrains Mono/);
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`trash-${width}-${theme}.png`), fullPage: true });
+    }
+    await page.setViewportSize({ width: 1280, height: 844 });
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await expect(page.locator('.account-row')).toHaveCount(1);
+    await expect(page.locator('.account-head .sort-heading')).toHaveCount(3);
+    for (const heading of await page.locator('.account-head .sort-heading').all()) await expect(heading).toHaveCSS('font-family', /system-ui/);
+    await expect(page.locator('.account-role')).toHaveCSS('font-family', /JetBrains Mono/);
+    const sort = page.locator('.account-head .sort-heading').first();
+    await expect(sort).toBeEnabled();
+    await sort.focus();
+    await sort.press('Enter');
+    await expect(sort).toBeFocused();
+    await expect(page.locator('.account-head [aria-label="Name"]')).toHaveAttribute('aria-sort', 'descending');
+    await sort.press('Enter');
+    await expect(page.locator('.account-head [aria-label="Name"]')).toHaveAttribute('aria-sort', 'ascending');
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`accounts-narrow-${theme}.png`), fullPage: true });
+    await page.setViewportSize({ width: 1280, height: 844 });
+    await page.getByRole('button', { name: 'Files', exact: true }).click();
   }
 });

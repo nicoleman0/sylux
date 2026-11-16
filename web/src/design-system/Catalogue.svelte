@@ -89,7 +89,7 @@
       <div role="table" aria-label="Sorting examples"><div role="row" class="flex flex-wrap gap-3"><SortHeader label="Name" column="name" sort="name_asc" onclick={() => {}} /><SortHeader label="Modified" column="modified" sort="name_asc" onclick={() => {}} /><SortHeader label="Size" column="size" sort="name_asc" disabled onclick={() => {}} /></div></div>
     </section>
     <section class="catalogue-section" aria-labelledby="type-title">
-      <div class="section-heading"><h2 id="type-title">Typography</h2><p>Interface text stays sans. File data and column headings use JetBrains Mono.</p></div>
+      <div class="section-heading"><h2 id="type-title">Typography</h2><p>Interface text and column headings stay sans. File data uses JetBrains Mono.</p></div>
       <div class="type-grid">
         {#each typography as item}
           <div class="type-sample" data-type-sample={item.token}>
@@ -105,7 +105,7 @@
     </section>
 
     <section class="catalogue-section" aria-labelledby="data-type-title">
-      <div class="section-heading"><h2 id="data-type-title">Data roles</h2><p>JetBrains Mono 400 marks column headings, dates, sizes, and account roles.</p></div>
+      <div class="section-heading"><h2 id="data-type-title">Data roles</h2><p>Column headings use the interface font. JetBrains Mono 400 marks dates, sizes, and account roles.</p></div>
       <div class="data-role-samples">
         <div><span class="sample-caption">Column headings</span><div class="list-head"><span>Name</span><span>Modified</span><span>Size</span></div></div>
         <div><span class="sample-caption">File metadata</span><div class="file-row"><span class="file-modified">Jan 1, 2026</span><span class="file-size">1.15 GB</span></div></div>
