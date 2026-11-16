@@ -42,6 +42,7 @@ fn safe_reporter_events(log: &str) -> Vec<Value> {
         "accessibility_control_names",
         "accessibility_rename_escape_focus",
         "accessibility_live_failure_retry",
+        "accessibility_create_account_sign_in",
         "storage_responsive_controls",
         "storage_listing_states",
         "storage_upload_download_roundtrip",

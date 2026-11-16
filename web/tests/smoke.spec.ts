@@ -563,6 +563,7 @@ test('account screens create, reset, disable and change passwords', async ({ pag
   const create = page.getByRole('dialog', { name: 'Create account', exact: true });
   await create.getByLabel('Account name').fill('second');
   await create.getByLabel('Password', { exact: true }).fill('long enough password');
+  await create.getByLabel('Confirm password', { exact: true }).fill('long enough password');
   await create.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(page.getByText('second', { exact: true })).toBeVisible();
   await accountAction(page, 'Reset password');
@@ -582,6 +583,162 @@ test('account screens create, reset, disable and change passwords', async ({ pag
   await page.getByRole('dialog', { name: 'Change password', exact: true }).getByRole('button', { name: 'Change password', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('Password changed');
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
+});
+
+test('account creation requires matching passwords and keeps keyboard toggles accessible', async ({ page }) => {
+  await login(page);
+  let createRequests = 0;
+  let createdBody: { handle: string; password: string } | undefined;
+  page.on('request', (request) => {
+    if (request.url().endsWith('/accounts') && request.method() === 'POST') {
+      createRequests++;
+      createdBody = request.postDataJSON() as { handle: string; password: string };
+    }
+  });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Create account', exact: true });
+  const password = dialog.getByLabel('Password', { exact: true });
+  const confirmation = dialog.getByLabel('Confirm password', { exact: true });
+  await expect(password).toHaveAttribute('type', 'password');
+  await expect(confirmation).toHaveAttribute('type', 'password');
+  await dialog.getByLabel('Account name').fill('second');
+  await password.fill('long enough password');
+  await confirmation.fill('long enough password');
+  await dialog.getByRole('button', { name: 'Show password', exact: true }).focus();
+  await page.keyboard.press('Space');
+  await expect(dialog.getByRole('button', { name: 'Hide password', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(password).toHaveAttribute('type', 'text');
+  await expect(password).toHaveValue('long enough password');
+  await page.keyboard.press('Space');
+  await expect(password).toHaveAttribute('type', 'password');
+  const confirmationToggle = dialog.locator('button[aria-controls="account-password-confirmation"]');
+  await expect(confirmationToggle).toHaveAttribute('aria-controls', 'account-password-confirmation');
+  await confirmationToggle.focus();
+  await page.keyboard.press('Space');
+  await expect(dialog.getByRole('button', { name: 'Hide confirmation', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(confirmation).toHaveAttribute('type', 'text');
+  await expect(confirmation).toHaveValue('long enough password');
+  await expect(confirmationToggle).toBeFocused();
+  await page.keyboard.press('Space');
+  await expect(confirmation).toHaveAttribute('type', 'password');
+
+  await confirmation.fill('');
+  await dialog.getByRole('button', { name: 'Create account', exact: true }).click();
+  await expect(confirmation).toBeFocused();
+  expect(createRequests).toBe(0);
+  await confirmation.fill('different long password');
+  await dialog.getByRole('button', { name: 'Create account', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Passwords do not match.');
+  await expect(dialog.getByLabel('Account name')).toHaveValue('second');
+  expect(createRequests).toBe(0);
+
+  await confirmation.fill('long enough password');
+  await dialog.getByRole('button', { name: 'Create account', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(createRequests).toBe(1);
+  expect(createdBody).toEqual({ handle: 'second', password: 'long enough password' });
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  const reopened = page.getByRole('dialog', { name: 'Create account', exact: true });
+  await expect(reopened.getByLabel('Account name')).toHaveValue('');
+  await expect(reopened.getByLabel('Password', { exact: true })).toHaveValue('');
+  await expect(reopened.getByLabel('Confirm password', { exact: true })).toHaveValue('');
+  await expect(reopened.getByRole('button', { name: 'Show password', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await expect(reopened.getByRole('button', { name: 'Show confirmation', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await reopened.getByLabel('Account name').fill('draft');
+  await reopened.getByLabel('Password', { exact: true }).fill('draft password value');
+  await reopened.getByLabel('Confirm password', { exact: true }).fill('draft password value');
+  await reopened.getByRole('button', { name: 'Show password', exact: true }).click();
+  await reopened.getByRole('button', { name: 'Show confirmation', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(reopened).toBeHidden();
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  let cleared = page.getByRole('dialog', { name: 'Create account', exact: true });
+  await expect(cleared.getByLabel('Account name')).toHaveValue('draft');
+  await expect(cleared.getByLabel('Password', { exact: true })).toHaveValue('');
+  await expect(cleared.getByLabel('Confirm password', { exact: true })).toHaveValue('');
+  await expect(cleared.getByRole('button', { name: 'Show password', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await expect(cleared.getByRole('button', { name: 'Show confirmation', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await cleared.getByLabel('Password', { exact: true }).fill('draft password value');
+  await cleared.getByLabel('Confirm password', { exact: true }).fill('draft password value');
+  await cleared.getByRole('button', { name: 'Show password', exact: true }).click();
+  await cleared.getByRole('button', { name: 'Show confirmation', exact: true }).click();
+  await page.mouse.click(8, 8);
+  await expect(cleared).toBeHidden();
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  cleared = page.getByRole('dialog', { name: 'Create account', exact: true });
+  await expect(cleared.getByLabel('Password', { exact: true })).toHaveValue('');
+  await expect(cleared.getByLabel('Confirm password', { exact: true })).toHaveValue('');
+  await expect(cleared.getByRole('button', { name: 'Show password', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await expect(cleared.getByRole('button', { name: 'Show confirmation', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await cleared.getByRole('button', { name: 'Cancel', exact: true }).click();
+});
+
+test('account creation stays open while pending and retains values on server error', async ({ page }) => {
+  await login(page);
+  let release!: () => void;
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/accounts', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    started();
+    await gate;
+    await route.fulfill({ status: 500 });
+  });
+  let createRequests = 0;
+  page.on('request', (request) => {
+    if (request.url().endsWith('/accounts') && request.method() === 'POST') createRequests++;
+  });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  let dialog = page.getByRole('dialog', { name: 'Create account', exact: true });
+  await dialog.getByLabel('Account name').fill('unfinished');
+  await dialog.getByLabel('Password', { exact: true }).fill('unfinished password');
+  await dialog.getByLabel('Confirm password', { exact: true }).fill('unfinished password');
+  await dialog.getByRole('button', { name: 'Create account', exact: true }).click();
+  await waiting;
+  await dialog.locator('form').evaluate((form) => (form as HTMLFormElement).requestSubmit());
+  expect(createRequests).toBe(1);
+  await expect(dialog.locator('form')).toHaveAttribute('aria-busy', 'true');
+  await expect(dialog.getByRole('button', { name: 'Creating…', exact: true })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(8, 8);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(dialog).toBeVisible();
+  release();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('alert')).toHaveText('Account could not be created. Check the name and password, then try again.');
+  await expect(dialog.getByLabel('Account name')).toHaveValue('unfinished');
+  await expect(dialog.getByLabel('Password', { exact: true })).toHaveValue('unfinished password');
+  await expect(dialog.getByLabel('Confirm password', { exact: true })).toHaveValue('unfinished password');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await page.locator('#main-content').getByRole('button', { name: 'Create account', exact: true }).click();
+  dialog = page.getByRole('dialog', { name: 'Create account', exact: true });
+  await expect(dialog.getByLabel('Password', { exact: true })).toHaveValue('');
+  await expect(dialog.getByLabel('Confirm password', { exact: true })).toHaveValue('');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+});
+
+test('account creation fits desktop and narrow layouts in both themes', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 360, height: 800 }]) {
+    await page.setViewportSize(viewport);
+    for (const theme of ['light', 'dark'] as const) {
+      await page.emulateMedia({ colorScheme: theme });
+      await expect(page.locator('html')).toHaveClass(theme === 'dark' ? /dark/ : /^(?!.*dark).*/);
+      await page.locator('#main-content').getByRole('button', { name: 'Create account', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Create account', exact: true });
+      await expect(dialog.getByLabel('Password', { exact: true })).toBeVisible();
+      await expect(dialog.getByLabel('Confirm password', { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+      await page.screenshot({ path: test.info().outputPath(`account-${viewport.width}-${theme}.png`), animations: 'disabled' });
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    }
+  }
 });
 
 test('settings tab selection draws only the underline and keeps keyboard focus visible', async ({ page }) => {
@@ -615,11 +772,13 @@ test('logging out clears account form secrets before another sign-in', async ({ 
   let create = page.getByRole('dialog', { name: 'Create account', exact: true });
   await create.getByLabel('Account name').fill('second');
   await create.getByLabel('Password', { exact: true }).fill('temporary password');
+  await create.getByLabel('Confirm password', { exact: true }).fill('temporary password');
   await create.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(create).toBeHidden();
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await create.getByLabel('Account name').fill('unfinished');
   await create.getByLabel('Password', { exact: true }).fill('unfinished password');
+  await create.getByLabel('Confirm password', { exact: true }).fill('unfinished password');
   await create.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByRole('button', { name: 'Account', exact: true }).click();
   await page.getByRole('button', { name: 'Change password', exact: true }).click();
@@ -1390,6 +1549,7 @@ async function createSecondAccount(page: import('@playwright/test').Page): Promi
   const dialog = page.getByRole('dialog', { name: 'Create account', exact: true });
   await dialog.getByLabel('Account name').fill('second');
   await dialog.getByLabel('Password', { exact: true }).fill('long enough password');
+  await dialog.getByLabel('Confirm password', { exact: true }).fill('long enough password');
   await dialog.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByText('second', { exact: true })).toBeVisible();
