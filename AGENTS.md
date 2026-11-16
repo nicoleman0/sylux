@@ -9,20 +9,12 @@
   fast, efficient and focused file server for self-hosters and small groups.
 - Linear is authoritative for priorities, scope and work state. Keep planning
   detail there and link [direction and delivery](https://linear.app/corvus-dev/document/sylux-direction-and-delivery-5a323553eb7b).
-- Use finite outcome Projects with a clear completion boundary. Treat the
-  existing product-development Project as the historical completed baseline.
-  Use labels for enduring areas, the team backlog for unselected ideas, and
-  don't create a Project for each small fix.
-- Use milestones for usable increments. Give each a completion criterion and
-  contributing issues; dates are optional. Don't require a research/backend/
-  frontend/test waterfall.
+- Follow the global `delivery` skill for Linear structure, issue content,
+  statuses, model routing, the build, review and ship flow, PR permissions
+  and Linear project updates.
+- Treat the existing product-development Project as the historical
+  completed baseline.
 - Use the native templates `Sylux outcome project` and `Sylux agent task`.
-- Every issue states its user outcome and exclusions, source context and real
-  prerequisites, ownership boundary, and acceptance criteria/checks. Add
-  blockers only for concrete technical prerequisites; don't invent
-  cross-Project blockers.
-- Follow the global `delivery` skill for issue statuses, the build, review
-  and ship flow, PR permissions and Linear project updates.
 - Nick remains assignee, including on delegated issues. Keep the recorded
   chat and worktree accurate as work moves.
 - Feature completion needs merged source and relevant verification.
