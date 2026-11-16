@@ -13,7 +13,7 @@ Change a shared value in the token file, rather than overriding each consumer. T
 
 ## Typography
 
-Use `--font-ui` for interface prose and `--font-code` for file content or code that needs fixed-width characters. Use `--font-data` (self-hosted JetBrains Mono) for compact metadata and table headings, including file sizes, modified dates, account roles and search locations. Filenames and navigation remain in `--font-ui`. Use `--weight-heading` for semibold headings, `--weight-body` for ordinary content and `--weight-control` for control labels.
+Use `--font-ui` for interface prose and table headings. Use `--font-code` for file content or code that needs fixed-width characters. Use `--font-data` (self-hosted JetBrains Mono) for compact metadata values, including file sizes, modified dates, account roles and search locations. Filenames and navigation remain in `--font-ui`. Use `--weight-heading` for semibold headings, `--weight-body` for ordinary content and `--weight-control` for control labels.
 
 | Role | CSS token | Use |
 | --- | --- | --- |
@@ -22,7 +22,7 @@ Use `--font-ui` for interface prose and `--font-code` for file content or code t
 | Section | `--type-section` | Settings sections and result headings |
 | Brand | `--type-brand` | Instance name in the sidebar |
 | Interface | `--type-ui` | File names, body text, controls and navigation |
-| Metadata | `--type-meta` | Column labels, secondary file details and account roles |
+| Metadata | `--type-meta` | Compact column labels (UI font), secondary file details and account roles (data font) |
 | Note | `--type-note` | The persistent beta notice |
 
 Tailwind `text-sm` maps to the interface role; `text-xs` maps to metadata. Use these for shared controls. Heading line heights and responsive layout belong in app.css. Do not resize the root font to change interface text: rem units also size the sidebar, spacing and controls.
