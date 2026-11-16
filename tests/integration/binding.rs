@@ -159,6 +159,8 @@ fn event(line: &str) -> &'static str {
         "binding.refused",
         "database.open",
         "migration.start",
+        "migration.complete",
+        "removal.cleanup_pending",
         "recovery.start",
         "startup.failed",
         "listener.bind",
@@ -568,4 +570,93 @@ fn a10_second_process_refused_before_database_migration_recovery_listener() {
     );
     drop(held);
     case.cleanup();
+}
+
+#[test]
+fn serve_upgrades_v1_and_recovers_committed_transition_with_partial_manifest_temp() {
+    use sha2::{Digest, Sha256};
+    use sylux::persistence::{root, schema, sqlite};
+    for interruption in ["none", "database", "manifest-temp"] {
+        let case = Case::new(&format!("legacy-{interruption}"));
+        case.bound();
+        let mut legacy = root::read_manifest(&case.store).unwrap();
+        legacy.schema_version = 1;
+        fs::write(
+            case.store.join(root::MANIFEST_NAME),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let path = case.store.join("metadata/sylux.sqlite3");
+        fs::remove_file(&path).unwrap();
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            let db = sqlite::open_writer(&path, Duration::from_millis(375)).unwrap();
+            db.execute_batch(schema::MIGRATION_0001_S1).unwrap();
+            schema::insert_installation_row(&db, &legacy, [7; 32]).unwrap();
+            db.execute_batch("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES('11111111111111111111111111111111','legacy-owner','administrator',1,0);
+                INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES('22222222222222222222222222222222','11111111111111111111111111111111',NULL,'folder','',x'',1);").unwrap();
+            if interruption != "none" {
+                let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
+                schema::migrate_v1(&db, Some(hash.as_slice())).unwrap();
+            }
+        }
+        if interruption == "manifest-temp" {
+            private_file(&case.store, "installation.json.tmp")
+                .write_all(b"{partial")
+                .unwrap();
+        }
+        let admin = Command::new(env!("CARGO_BIN_EXE_sylux"))
+            .args(["admin", "verify-payloads", "--root"])
+            .arg(&case.store)
+            .output()
+            .unwrap();
+        assert!(!admin.status.success());
+        assert!(
+            String::from_utf8_lossy(&admin.stderr)
+                .contains("verify_schema_upgrade_required_run_serve")
+        );
+        let observed = probe(&case, "serve");
+        for (earlier, later) in [
+            ("binding.verified", "migration.start"),
+            ("migration.start", "migration.complete"),
+            ("migration.complete", "recovery.start"),
+            ("recovery.start", "listener.bind"),
+        ] {
+            let a = observed.events.iter().position(|e| e == earlier);
+            let b = observed.events.iter().position(|e| e == later);
+            assert!(
+                matches!((a,b), (Some(a),Some(b)) if a<b),
+                "{interruption}: {observed:?}"
+            );
+        }
+        assert!(!observed.watchdog_expired && !observed.trace_overflow);
+        let upgraded = root::read_manifest(&case.store).unwrap();
+        assert_eq!(upgraded.schema_version, 2);
+        assert_eq!(upgraded.installation_id, legacy.installation_id);
+        assert!(!case.store.join("installation.json.tmp").exists());
+        let db = Connection::open(&path).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM account WHERE handle='legacy-owner'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(db);
+        require_valid_root(&case);
+        case.cleanup();
+    }
 }

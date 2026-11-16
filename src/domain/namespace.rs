@@ -546,7 +546,7 @@ fn deleted_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Entry, Option<i64
 }
 
 pub fn trashed(db: &Connection, owner: &str) -> Result<Vec<DeletedEntry>, NamespaceError> {
-    let mut stmt = db.prepare("SELECT e.entry_id,e.parent_id,e.original_name,e.kind,e.generation,CASE e.kind WHEN 'file' THEN r.length END,CASE e.kind WHEN 'file' THEN r.committed_at END FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id WHERE e.owner_account_id=?1 AND e.state='deleted' ORDER BY e.original_name,e.entry_id").map_err(|_| NamespaceError::Sql)?;
+    let mut stmt = db.prepare("SELECT e.entry_id,e.parent_id,e.original_name,e.kind,e.generation,CASE e.kind WHEN 'file' THEN r.length END,CASE e.kind WHEN 'file' THEN r.committed_at END FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id WHERE e.owner_account_id=?1 AND e.state='deleted' AND NOT EXISTS(SELECT 1 FROM removal_member rm WHERE rm.entry_id=e.entry_id) ORDER BY e.original_name,e.entry_id").map_err(|_| NamespaceError::Sql)?;
     let rows = stmt
         .query_map([owner], deleted_entry)
         .map_err(|_| NamespaceError::Sql)?
@@ -664,7 +664,7 @@ pub fn trashed_page_sorted(
             CASE e.kind WHEN 'folder' THEN 0 ELSE 1 END AS kind_rank,
             {location_column} AS location_key
         FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id
-        {location_join} WHERE e.owner_account_id=?1 AND e.state='deleted'
+        {location_join} WHERE e.owner_account_id=?1 AND e.state='deleted' AND NOT EXISTS(SELECT 1 FROM removal_member rm WHERE rm.entry_id=e.entry_id)
     )");
     let pivot = if let Some(after) = after {
         Some(db.query_row(
@@ -823,7 +823,7 @@ fn mark_deleted_references(
     let mut stmt = db
         .prepare(&format!(
             "SELECT entry_id,parent_id,original_name FROM entry WHERE owner_account_id=?
-         AND state='deleted' AND original_name IN ({placeholders})"
+         AND state='deleted' AND NOT EXISTS(SELECT 1 FROM removal_member rm WHERE rm.entry_id=entry.entry_id) AND original_name IN ({placeholders})"
         ))
         .map_err(|_| NamespaceError::Sql)?;
     let mut rows = stmt
@@ -861,7 +861,7 @@ pub fn restore(
     entry: &str,
     if_match: &str,
 ) -> Result<(), NamespaceError> {
-    let row: Option<(String, i64)> = db.query_row("SELECT parent_id,generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='deleted'", params![entry,owner], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_| NamespaceError::Sql)?;
+    let row: Option<(String, i64)> = db.query_row("SELECT parent_id,generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='deleted' AND NOT EXISTS(SELECT 1 FROM removal_member rm WHERE rm.entry_id=entry.entry_id)", params![entry,owner], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_| NamespaceError::Sql)?;
     let Some((parent, generation)) = row else {
         return Err(NamespaceError::NotFound);
     };
@@ -890,6 +890,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(include_str!("../../migrations/sqlite/0001_s1.sql"))
             .unwrap();
+        crate::persistence::schema::migrate_v1(&db, None).unwrap();
         for sort in [
             ListingSort::NameAsc,
             ListingSort::NameDesc,

@@ -473,3 +473,251 @@ test('Trash byte ordering handles UTF-16 differences within and across pages', a
   expect((await across.api.deletedTargets([first.id, second.id], () => true)).map(item => item.name)).toEqual([first.name, second.name]);
   expect(across.paths).toHaveLength(2);
 });
+
+async function removalRoutes(page: Page, outcome: 'success' | 'unknown' | 'changed' = 'success') {
+  let submissions = 0;
+  let checks = 0;
+  let operation = '';
+  let selected: unknown;
+  await page.route('**/trash/removals/preview', route => {
+    selected = route.request().postDataJSON().selection;
+    return route.fulfill({ json: { confirmation: 'bounded-confirmation', count: 105 } });
+  });
+  await page.route('**/trash/removals', route => {
+    submissions++; operation = route.request().postDataJSON().operation_id;
+    expect(operation).toMatch(/^[a-f0-9]{32}$/);
+    if (outcome === 'unknown') return route.abort('failed');
+    if (outcome === 'changed') return route.fulfill({ status: 409, json: { code: 'listing_changed' } });
+    return route.fulfill({ json: { operation_id: operation, state: 'committed', count: 105, cleanup: 'complete' } });
+  });
+  await page.route('**/trash/removals/*', route => {
+    if (new URL(route.request().url()).pathname.endsWith('/preview')) return route.fallback();
+    checks++;
+    expect(new URL(route.request().url()).pathname.split('/').at(-1)).toBe(operation);
+    return route.fulfill({ json: { operation_id: operation, state: 'committed', count: 105, cleanup: 'complete' } });
+  });
+  return { submissions: () => submissions, checks: () => checks, selected: () => selected };
+}
+
+test('permanent removal confirms server snapshot count, defaults to Cancel, and restores focus without an effect', async ({ page }) => {
+  await openTrash(page);
+  const backend = await removalRoutes(page);
+  const empty = page.getByRole('button', { name: 'Empty Trash', exact: true });
+  await empty.click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('heading')).toHaveText('Remove 105 items permanently?');
+  await expect(dialog).toContainText('Removal cannot be undone.');
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(empty).toBeFocused();
+  expect(backend.submissions()).toBe(0);
+  expect(backend.selected()).toEqual({ kind: 'all' });
+});
+
+test('selected permanent removal submits once and clears completed feedback on navigation', async ({ page }) => {
+  const controls = await openTrash(page);
+  const backend = await removalRoutes(page);
+  await page.getByRole('checkbox', { name: 'Select Projects', exact: true }).check();
+  await page.getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  expect(backend.selected()).toEqual({ kind: 'selected', items: [{ id: 'folder', etag: 'folder:1' }] });
+  controls.empty();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  await expect(page.getByText('Removed 105 items permanently', { exact: true })).toBeVisible();
+  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  expect(backend.submissions()).toBe(1);
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await expect(page.getByText('Removed 105 items permanently', { exact: true })).toHaveCount(0);
+});
+
+test('unknown permanent removal stays reachable across navigation and checks the original operation without replay', async ({ page }) => {
+  await openTrash(page);
+  const backend = await removalRoutes(page, 'unknown');
+  await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Permanent removal status' })).toContainText('unconfirmed');
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await page.getByRole('button', { name: 'Check removal status', exact: true }).click();
+  await expect(page.getByText('Removed 105 items permanently', { exact: true })).toBeVisible();
+  expect(backend.submissions()).toBe(1);
+  expect(backend.checks()).toBe(1);
+});
+
+test('changed permanent removal requires new confirmation', async ({ page }) => {
+  await openTrash(page);
+  const backend = await removalRoutes(page, 'changed');
+  await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('alert')).toContainText('Trash changed. Review the current items and confirm again.');
+  expect(backend.submissions()).toBe(1);
+});
+
+test('pending removal prevents duplicate dispatch and keeps its dialog busy', async ({ page }) => {
+  await openTrash(page);
+  await removalRoutes(page);
+  let held: import('@playwright/test').Route | undefined;
+  await page.route('**/trash/removals', route => { held = route; });
+  await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('button', { name: 'Removing…', exact: true })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => !!held).toBe(true);
+  const operation = held!.request().postDataJSON().operation_id;
+  await held!.fulfill({ json: { operation_id: operation, state: 'committed', count: 105, cleanup: 'pending' } });
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Permanent removal status' })).toContainText('Removal is complete. Storage cleanup is pending.');
+});
+
+test('unknown status is unresolved and does not enable a second removal', async ({ page }) => {
+  await openTrash(page);
+  const backend = await removalRoutes(page, 'unknown');
+  await page.route('**/trash/removals/*', route => {
+    if (new URL(route.request().url()).pathname.endsWith('/preview')) return route.fallback();
+    return route.fulfill({ json: { operation_id: new URL(route.request().url()).pathname.split('/').at(-1), state: 'unknown' } });
+  });
+  await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  await page.getByRole('button', { name: 'Check removal status', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Permanent removal status' })).toContainText('still unconfirmed');
+  await expect(page.getByRole('button', { name: 'Empty Trash', exact: true })).toBeDisabled();
+  expect(backend.submissions()).toBe(1);
+});
+
+for (const theme of ['light', 'dark']) for (const width of [390, 1280]) {
+  test(`permanent removal confirmation at ${width}px in ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.addInitScript(value => localStorage.setItem('sylux-theme', value), theme);
+    await openTrash(page, width);
+    await removalRoutes(page);
+    await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath(`permanent-removal-${width}-${theme}.png`) });
+  });
+}
+
+test('prototype permanent removal preserves independently trashed descendants and replays the original result', async () => {
+  const mock = new MockTransport();
+  await mock.request('/auth/local', { method: 'POST', body: { handle: 'owner' } });
+  const parent = await mock.request<Folder>('/folders/children', { method: 'POST', body: { parent_id: 'root', name: 'Parent' } });
+  const child = await mock.request<Folder>('/folders/children', { method: 'POST', body: { parent_id: parent.id, name: 'Child' } });
+  await mock.request(`/entries/${child.id}`, { method: 'DELETE', headers: { 'If-Match': child.etag } });
+  const rootPage = await mock.request<{ items: Folder[] }>('/folders/children');
+  const currentParent = rootPage.items.find(item => item.id === parent.id)!;
+  await mock.request(`/entries/${parent.id}`, { method: 'DELETE', headers: { 'If-Match': currentParent.etag } });
+  const deleted = await mock.request<TrashPage>('/trash');
+  const selectedParent = deleted.items.find(item => item.id === parent.id)!;
+  const preview = await mock.request<{ confirmation: string; count: number }>('/trash/removals/preview', { method: 'POST', body: { selection: { kind: 'selected', items: [{ id: parent.id, etag: selectedParent.etag }] } } });
+  expect(preview.count).toBe(1);
+  const body = { operation_id: 'a'.repeat(32), confirmation: preview.confirmation };
+  const result = await mock.request('/trash/removals', { method: 'POST', body });
+  expect(await mock.request('/trash/removals', { method: 'POST', body })).toEqual(result);
+  await expect(mock.request('/trash/removals', { method: 'POST', body: { ...body, confirmation: 'different' } })).rejects.toMatchObject({ status: 409, details: { code: 'operation_conflict' } });
+  await expect(mock.request('/trash/removals/preview', { method: 'POST', body: { selection: { kind: 'selected', items: [{ id: parent.id, etag: selectedParent.etag }] } } })).rejects.toMatchObject({ status: 404, details: { code: 'not_found' } });
+  const remaining = await mock.request<TrashPage>('/trash');
+  expect(remaining.items.map(item => item.id)).toEqual([child.id]);
+  expect(remaining.items[0].original_path).toEqual(['Parent']);
+  expect(await mock.request(`/trash/removals/${'b'.repeat(32)}`)).toEqual({ operation_id: 'b'.repeat(32), state: 'unknown' });
+});
+
+test('unknown removal survives reload and deliberately replays the exact original confirmation', async ({ page }) => {
+  await openTrash(page);
+  await removalRoutes(page);
+  const bodies: unknown[] = [];
+  await page.route('**/trash/removals', route => {
+    const body = route.request().postDataJSON(); bodies.push(body);
+    if (bodies.length === 1) return route.abort('failed');
+    return route.fulfill({ json: { operation_id: body.operation_id, state: 'committed', count: 105, cleanup: 'complete' } });
+  });
+  await page.route('**/trash/removals/*', route => {
+    if (new URL(route.request().url()).pathname.endsWith('/preview')) return route.fallback();
+    return route.fulfill({ json: { operation_id: new URL(route.request().url()).pathname.split('/').at(-1), state: 'unknown' } });
+  });
+  await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Permanent removal status' })).toContainText('unconfirmed');
+  expect(bodies).toHaveLength(1);
+  await page.reload();
+  await page.getByLabel('Account name').fill('owner');
+  await page.getByLabel('Password', { exact: true }).fill('password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Permanent removal status' })).toContainText('unconfirmed');
+  await page.getByRole('button', { name: 'Check removal status', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Permanent removal status' })).toContainText('still unconfirmed');
+  expect(bodies).toHaveLength(1);
+  await page.getByRole('button', { name: 'Retry same removal', exact: true }).click();
+  await expect(page.getByText('Removed 105 items permanently', { exact: true })).toBeVisible();
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).toEqual(bodies[0]);
+  expect(await page.evaluate(() => sessionStorage.getItem('sylux-removal:owner'))).toBeNull();
+});
+
+for (const rejection of [400, 409]) test(`exact replay rejection ${rejection} resolves an expired or stale uncommitted removal`, async ({ page }) => {
+  await openTrash(page);
+  await removalRoutes(page);
+  let attempts = 0;
+  const bodies: unknown[] = [];
+  await page.route('**/trash/removals', route => {
+    bodies.push(route.request().postDataJSON());
+    if (++attempts === 1) return route.abort('failed');
+    return route.fulfill({ status: rejection, json: { code: rejection === 400 ? 'invalid_confirmation' : 'listing_changed' } });
+  });
+  await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  await page.getByRole('button', { name: 'Retry same removal', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Permanent removal status' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Empty Trash', exact: true })).toBeEnabled();
+  await expect(page.getByRole('alert')).toContainText(rejection === 400 ? 'confirmation expired' : 'Trash changed');
+  expect(bodies[0]).toEqual(bodies[1]);
+  expect(attempts).toBe(2);
+});
+
+test('committed pending cleanup leaves restore and further removal usable', async ({ page }) => {
+  const controls = await openTrash(page);
+  controls.succeed();
+  await removalRoutes(page);
+  await page.route('**/trash/removals', route => route.fulfill({ json: { operation_id: route.request().postDataJSON().operation_id, state: 'committed', count: 1, cleanup: 'pending' } }));
+  await page.getByLabel('Select Projects', { exact: true }).check();
+  await page.getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Permanent removal status' })).toContainText('Storage cleanup is pending');
+  await expect(page.getByRole('button', { name: 'Empty Trash', exact: true })).toBeEnabled();
+  const restore = page.getByRole('button', { name: /Restore notes.txt.*item reference a/ });
+  await expect(restore).toBeEnabled();
+  await restore.click();
+  await expect(restore).toHaveCount(0);
+  await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+});
+
+for (const selection of ['selected', 'all']) test(`real preview 404 for ${selection} refreshes stale Trash before another choice`, async ({ page }) => {
+  const controls = await openTrash(page);
+  await page.route('**/trash/removals/preview', route => {
+    controls.empty();
+    return route.fulfill({ status: 404, json: { code: 'not_found' } });
+  });
+  if (selection === 'selected') {
+    await page.getByLabel('Select Projects', { exact: true }).check();
+    await page.getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  } else await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Trash changed. Review the current items and confirm again.');
+});
+
+test('confirmation explains folder counting and scopes independent Trash copy to selection', async ({ page }) => {
+  await openTrash(page);
+  await removalRoutes(page);
+  await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('Folders include their contents, which are not counted separately.');
+  await expect(page.getByRole('dialog')).not.toContainText('unless selected separately');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByLabel('Select Projects', { exact: true }).check();
+  await page.getByRole('button', { name: 'Remove permanently', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('unless selected separately');
+});

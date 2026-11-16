@@ -294,7 +294,7 @@ h1:focus, h2:focus { outline: none; }
 .name-cell > .item-name { width: 100%; }
 .account-head { display: grid; grid-template-columns: minmax(100px, 1fr) 100px 75px 44px; gap: 12px; max-width: 640px; align-items: center; }
 .account-row .account-role { margin: 0; }
-.trash-row, .trash-sort { display: grid; grid-template-columns: 18px minmax(100px, 1fr) minmax(100px, 1fr) 116px 90px 80px; align-items: center; gap: 12px; }
+.trash-row, .trash-sort { display: grid; grid-template-columns: 70px minmax(100px, 1fr) minmax(100px, 1fr) 116px 90px 80px; align-items: center; gap: 12px; }
 .trash-item, .trash-location { min-width: 0; overflow-wrap: anywhere; }
 .trash-metadata { display: none; }
 .file-row.search-row, .list-head.search-head { grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr) 116px 100px 44px; }
@@ -305,7 +305,7 @@ h1:focus, h2:focus { outline: none; }
   .search-head > .file-modified .sort-heading, .search-head > .file-size .sort-heading { display: none; }
   .search-row > .file-modified, .search-row > .file-size { @apply sr-only; }
   .search-row .mobile-file-size:not(:empty) { display: block; color: var(--muted-foreground); font-size: var(--type-meta); }
-  .trash-row, .trash-sort { grid-template-columns: 18px minmax(0, 1fr) 80px; }
+  .trash-row, .trash-sort { grid-template-columns: 70px minmax(0, 1fr) 80px; }
   .trash-row > .trash-location { grid-column: 2; grid-row: 2; }
   .trash-row > .trash-actions { grid-column: 3; grid-row: 1 / 3; }
   .trash-row > .file-modified, .trash-row > .file-size { @apply sr-only; }
@@ -323,7 +323,7 @@ h1:focus, h2:focus { outline: none; }
   .search-row > .file-location span { overflow-wrap: anywhere; }
   .search-row .item-name { padding-bottom: 0; }
   .account-row, .account-head { grid-template-columns: minmax(0, 1fr) 80px 48px 44px; gap: 4px; }
-  .trash-row, .trash-sort { grid-template-columns: 18px minmax(0, 1fr) 80px; }
+  .trash-row, .trash-sort { grid-template-columns: 70px minmax(0, 1fr) 80px; }
   .trash-row > .trash-location { grid-column: 2; grid-row: 2; }
   .trash-row > .trash-actions { grid-column: 3; grid-row: 1 / 3; }
   .trash-row > .file-modified, .trash-row > .file-size { @apply sr-only; }
@@ -336,3 +336,7 @@ h1:focus, h2:focus { outline: none; }
 
 .branded-signin { background-size: cover; background-position: center; }
 .branded-signin .signin-form { box-sizing: content-box; padding: 28px; background: var(--background); color: var(--foreground); border-radius: var(--radius); max-width: calc(100% - 56px); }
+
+.trash-kind { gap: 0.5rem; }
+.trash-kind label { display: grid; place-items: center; min-width: 44px; min-height: var(--control-height-touch); cursor: pointer; }
+.trash-content input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--primary); }

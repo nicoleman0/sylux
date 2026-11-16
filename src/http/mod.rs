@@ -7,6 +7,7 @@ pub mod entries;
 pub mod instance;
 pub mod middleware;
 pub mod mutations;
+pub mod removals;
 pub mod setup;
 pub mod status;
 pub mod uploads;
@@ -39,6 +40,7 @@ pub struct AuthState {
     pub limiter: PasswordLimiter,
     pub anonymous: Arc<Mutex<AnonymousSessions>>,
     pub coordinator: MutationCoordinator,
+    pub cleanup_wake: Arc<tokio::sync::Notify>,
     pub storage: Option<Arc<UploadStorage>>,
     pub instance_settings: Option<Arc<crate::persistence::instance::InstanceSettings>>,
     pub archive_tickets: Arc<Mutex<archives::ArchiveTickets>>,
@@ -49,6 +51,9 @@ pub struct AuthState {
     pub upload_cancel_test_barrier: Option<Arc<uploads::UploadCancelTestBarrier>>,
     #[cfg(feature = "test-harness")]
     pub upload_commit_test_barrier: Option<Arc<uploads::UploadCommitTestBarrier>>,
+    #[cfg(feature = "test-harness")]
+    pub removal_commit_hook:
+        Option<Arc<dyn Fn(&'static str) -> rusqlite::Result<()> + Send + Sync>>,
 }
 
 impl AuthState {
@@ -69,6 +74,7 @@ impl AuthState {
             limiter: PasswordLimiter::default(),
             anonymous: Arc::default(),
             coordinator,
+            cleanup_wake: Arc::default(),
             storage: None,
             instance_settings: None,
             archive_tickets: Arc::default(),
@@ -78,6 +84,8 @@ impl AuthState {
             upload_cancel_test_barrier: None,
             #[cfg(feature = "test-harness")]
             upload_commit_test_barrier: None,
+            #[cfg(feature = "test-harness")]
+            removal_commit_hook: None,
         }
     }
 
@@ -91,6 +99,16 @@ impl AuthState {
                 .map_err(|_| crate::domain::upload::StorageOpenError::InstanceSettings)?,
         ));
         Ok(self)
+    }
+
+    pub fn start_cleanup(&self) -> Option<crate::persistence::cleanup::Runner> {
+        self.storage.as_ref().map(|storage| {
+            crate::persistence::cleanup::Runner::start(
+                self.workers.clone(),
+                Arc::clone(&storage.payloads),
+                Arc::clone(&self.cleanup_wake),
+            )
+        })
     }
 
     #[cfg(feature = "test-harness")]
@@ -119,6 +137,9 @@ pub fn router(state: AuthState) -> Router {
             axum::routing::patch(entries::rename).delete(entries::trash),
         )
         .route("/trash", get(entries::trash_listing))
+        .route("/trash/removals/preview", post(removals::preview))
+        .route("/trash/removals", post(removals::execute))
+        .route("/trash/removals/{id}", get(removals::status))
         .route("/entries/search", get(entries::search))
         .route("/entries/{id}/move", post(entries::move_entry))
         .route("/trash/{id}/restore", axum::routing::post(entries::restore))

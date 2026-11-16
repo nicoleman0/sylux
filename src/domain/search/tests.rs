@@ -10,6 +10,7 @@ fn database() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
     db.execute_batch(MIGRATION_0001_S1).unwrap();
+    crate::persistence::schema::migrate_v1(&db, None).unwrap();
     for (owner, root) in [(OWNER, ROOT), (OTHER, OTHER_ROOT)] {
         db.execute("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES(?1,?1,'user',1,0)", [owner]).unwrap();
         db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,NULL,'folder','',x'',1)", params![root,owner]).unwrap();

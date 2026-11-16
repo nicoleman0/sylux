@@ -74,6 +74,9 @@ struct Fixture {
     origin: String,
     address: String,
     server: Option<JoinHandle<()>>,
+    cleanup: Option<sylux::persistence::cleanup::Runner>,
+    cleanup_fault: Option<sylux::persistence::payload::PublishFaultHook>,
+    removal_commit_hook: Option<Arc<dyn Fn(&'static str) -> rusqlite::Result<()> + Send + Sync>>,
 }
 
 impl Fixture {
@@ -105,6 +108,9 @@ impl Fixture {
             origin: String::new(),
             address: String::new(),
             server: None,
+            cleanup: None,
+            cleanup_fault: None,
+            removal_commit_hook: None,
         };
         fixture.start(connection, cancel_barrier).await;
         fixture
@@ -136,6 +142,17 @@ impl Fixture {
         if let Some(barrier) = cancel_barrier {
             state = state.with_upload_cancel_test_barrier(barrier);
         }
+        if let Some(hook) = &self.cleanup_fault {
+            Arc::get_mut(
+                &mut Arc::get_mut(state.storage.as_mut().unwrap())
+                    .unwrap()
+                    .payloads,
+            )
+            .unwrap()
+            .set_publish_fault_hook(Some(hook.clone()));
+        }
+        state.removal_commit_hook = self.removal_commit_hook.clone();
+        self.cleanup = state.start_cleanup();
         let app = http::router(state);
         self.server = Some(tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -153,6 +170,9 @@ impl Fixture {
             server.abort();
             let _ = server.await;
         }
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup.shutdown().await.unwrap();
+        }
         if let Some(workers) = self.workers.take() {
             workers.shutdown().await.unwrap();
         }
@@ -165,6 +185,9 @@ impl Fixture {
         if let Some(server) = self.server.take() {
             server.abort();
             let _ = server.await;
+        }
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup.shutdown().await.unwrap();
         }
         if let Some(workers) = self.workers.take() {
             workers.shutdown().await.unwrap();
@@ -2406,5 +2429,1150 @@ async fn folder_recovery_accepts_fresh_create_and_replacement_with_exact_bytes()
         )
         .await;
     assert_eq!(old.status, 404);
+    fixture.close().await;
+}
+
+impl Fixture {
+    async fn upload_current(&self, name: &str, bytes: &[u8]) -> Value {
+        let generation: i64 = self
+            .db()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT generation FROM entry WHERE entry_id=?1",
+                [OWNER_ROOT],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let (id, ticket) = self
+            .admit(&owner_auth(), OWNER_ROOT, generation as u64, name, bytes)
+            .await;
+        let staged = self
+            .mutate(
+                "PUT",
+                &format!("/uploads/{id}/content"),
+                &owner_auth(),
+                Some(&ticket),
+                &[("Content-Type", "application/octet-stream".into())],
+                bytes.to_vec(),
+            )
+            .await;
+        assert_eq!(staged.status, 200, "{}", staged.text());
+        let committed = self.mutate("POST", &format!("/uploads/{id}/commit"), &owner_auth(), Some(&ticket), &[("Content-Type", "application/json".into()), ("If-None-Match", "*".into())], serde_json::to_vec(&serde_json::json!({"sha256":hex(&Sha256::digest(bytes)),"parent_etag":folder_etag(OWNER_ROOT,generation as u64)})).unwrap()).await;
+        assert_eq!(committed.status, 201, "{}", committed.text());
+        committed.json()
+    }
+    async fn wait_cleanup(&self, operation: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let response = self
+                    .request(
+                        "GET",
+                        &format!("/trash/removals/{operation}"),
+                        Some(&owner_auth()),
+                        &[],
+                        Vec::new(),
+                    )
+                    .await;
+                if response.json()["cleanup"] == "complete" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("runtime cleanup must finish without restart or another removal");
+    }
+    async fn removal_json(&self, path: &str, body: Value) -> Response {
+        self.mutate(
+            "POST",
+            path,
+            &owner_auth(),
+            None,
+            &[("Content-Type", "application/json".into())],
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .await
+    }
+    async fn trash_uploaded(&self, entry: &Value) -> Value {
+        let response = self
+            .mutate(
+                "DELETE",
+                &format!("/entries/{}", entry["entry_id"].as_str().unwrap()),
+                &owner_auth(),
+                None,
+                &[(
+                    "If-Match",
+                    folder_etag(entry["entry_id"].as_str().unwrap(), 1),
+                )],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(response.status, 204, "{}", response.text());
+        let listing = self
+            .request("GET", "/trash", Some(&owner_auth()), &[], Vec::new())
+            .await
+            .json();
+        listing["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == entry["entry_id"])
+            .unwrap()
+            .clone()
+    }
+}
+
+#[tokio::test]
+async fn permanent_removal_replays_original_result_and_preserves_upload_reconciliation() {
+    let mut fixture = Fixture::new("permanent-removal").await;
+    let (upload_id, ticket, _) = fixture.stage("remove.txt", b"remove these bytes").await;
+    let response = fixture
+        .commit_staged(&upload_id, &ticket, b"remove these bytes")
+        .await;
+    assert_eq!(response.status, 201, "{}", response.text());
+    let uploaded = response.json();
+    let deleted = fixture.trash_uploaded(&uploaded).await;
+    let preview=fixture.removal_json("/trash/removals/preview",serde_json::json!({"selection":{"kind":"selected","items":[{"id":deleted["id"],"etag":deleted["etag"]}]}})).await;
+    assert_eq!(preview.status, 200, "{}", preview.text());
+    assert_eq!(preview.json()["count"], 1);
+    let operation = "a0000000000000000000000000000078";
+    let body =
+        serde_json::json!({"operation_id":operation,"confirmation":preview.json()["confirmation"]});
+    let removed = fixture.removal_json("/trash/removals", body.clone()).await;
+    assert_eq!(removed.status, 200, "{}", removed.text());
+    assert_eq!(removed.json()["state"], "committed");
+    assert_eq!(removed.json()["cleanup"], "pending");
+    fixture.wait_cleanup(operation).await;
+    let replay = fixture.removal_json("/trash/removals", body.clone()).await;
+    assert_eq!(replay.json()["state"], "committed");
+    assert_eq!(replay.json()["count"], removed.json()["count"]);
+    assert_eq!(replay.json()["cleanup"], "complete");
+    let listing = fixture
+        .request("GET", "/trash", Some(&owner_auth()), &[], Vec::new())
+        .await;
+    assert_eq!(listing.json()["items"].as_array().unwrap().len(), 0);
+    let restore = fixture
+        .mutate(
+            "POST",
+            &format!("/trash/{}/restore", deleted["id"].as_str().unwrap()),
+            &owner_auth(),
+            None,
+            &[("If-Match", deleted["etag"].as_str().unwrap().into())],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(restore.status, 404, "{}", restore.text());
+    let forbidden = fixture
+        .request(
+            "GET",
+            &format!("/entries/{}/content", deleted["id"].as_str().unwrap()),
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(forbidden.status, 404);
+    let foreign = fixture
+        .request(
+            "GET",
+            &format!("/trash/removals/{operation}"),
+            Some(&other_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(foreign.json()["state"], "unknown");
+    fixture.restart().await;
+    let recovery = sylux::persistence::reconcile::reconcile(
+        fixture.workers.as_ref().unwrap(),
+        &fixture.product,
+    )
+    .await
+    .unwrap();
+    assert!(recovery.ready, "{recovery:?}");
+    let replay = fixture.removal_json("/trash/removals", body).await;
+    assert_eq!(replay.json()["state"], "committed");
+    assert_eq!(replay.json()["count"], removed.json()["count"]);
+    assert_eq!(replay.json()["cleanup"], "complete");
+    let upload_status = fixture
+        .request(
+            "GET",
+            &format!("/uploads/{upload_id}"),
+            Some(&owner_auth()),
+            &[("X-Mutation-ID", ticket)],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(upload_status.status, 200, "{}", upload_status.text());
+    assert_eq!(upload_status.json()["state"], "committed");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_rejects_changed_namespace_and_unconfirmed_requests() {
+    let fixture = Fixture::new("permanent-removal-stale").await;
+    let uploaded = fixture.upload("first.txt", b"first").await;
+    fixture.trash_uploaded(&uploaded).await;
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await;
+    assert_eq!(preview.status, 200, "{}", preview.text());
+    let foreign=fixture.mutate("POST","/trash/removals",&other_auth(),None,&[("Content-Type","application/json".into())],serde_json::to_vec(&serde_json::json!({"operation_id":"b0000000000000000000000000000078","confirmation":preview.json()["confirmation"]})).unwrap()).await;
+    assert_eq!(foreign.status, 400, "{}", foreign.text());
+    let missing_csrf = fixture
+        .request(
+            "POST",
+            "/trash/removals/preview",
+            Some(&owner_auth()),
+            &[
+                ("Content-Type", "application/json".into()),
+                ("Origin", fixture.origin.clone()),
+            ],
+            serde_json::to_vec(&serde_json::json!({"selection":{"kind":"all"}})).unwrap(),
+        )
+        .await;
+    assert_eq!(missing_csrf.status, 403, "{}", missing_csrf.text());
+    let changed = fixture
+        .removal_json(
+            "/folders/children",
+            serde_json::json!({"parent_id":OWNER_ROOT,"name":"changed"}),
+        )
+        .await;
+    assert_eq!(changed.status, 201, "{}", changed.text());
+    let unrelated = fixture.removal_json("/trash/removals",serde_json::json!({"operation_id":"b0000000000000000000000000000078","confirmation":preview.json()["confirmation"]})).await;
+    assert_eq!(
+        unrelated.status,
+        200,
+        "unrelated active folder must not invalidate Trash: {}",
+        unrelated.text()
+    );
+    let next = fixture.upload_current("next.txt", b"next").await;
+    fixture.trash_uploaded(&next).await;
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await;
+    let changed = fixture.upload_current("changed.txt", b"changed").await;
+    fixture.trash_uploaded(&changed).await;
+    let stale=fixture.removal_json("/trash/removals",serde_json::json!({"operation_id":"b1000000000000000000000000000078","confirmation":preview.json()["confirmation"]})).await;
+    assert_eq!(stale.status, 409, "{}", stale.text());
+    let forged=fixture.removal_json("/trash/removals",serde_json::json!({"operation_id":"b2000000000000000000000000000078","confirmation":"unconfirmed"})).await;
+    assert_eq!(forged.status, 400);
+    let count: i64 = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM removal", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_resumes_each_authorized_cleanup_boundary() {
+    use sylux::{
+        domain::removal::{self, Selection},
+        persistence::{
+            cleanup,
+            payload::{PayloadError, PayloadStore},
+        },
+    };
+    for boundary in [
+        "cleanup.before_unlink",
+        "cleanup.before_directory_sync",
+        "cleanup.before_finalize",
+    ] {
+        let mut fixture = Fixture::new(&boundary.replace(['.', '_'], "-")).await;
+        let active = fixture
+            .upload("active.txt", b"active bytes survive every cleanup boundary")
+            .await;
+        let uploaded = fixture
+            .upload_current("boundary.txt", b"owned cleanup bytes")
+            .await;
+        fixture.cleanup.take().unwrap().shutdown().await.unwrap();
+        fixture.trash_uploaded(&uploaded).await;
+        let workers = fixture.workers.as_ref().unwrap();
+        workers
+            .transact(|tx| {
+                let preview =
+                    removal::preview(tx, OWNER_ID, Selection::All, &[8; 32], unix_now()).unwrap();
+                removal::execute(
+                    tx,
+                    OWNER_ID,
+                    "c0000000000000000000000000000078",
+                    &preview.confirmation,
+                    &[8; 32],
+                    unix_now(),
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        {
+            let db = fixture.db();
+            let db = db.lock().unwrap();
+            db.execute_batch(&format!("SAVEPOINT retained_reference; INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES('30000000000000000000000000000078','{OTHER_ID}','{OTHER_ROOT}','file','new.txt',x'6e65772e747874',1)")).unwrap();
+            let inserted=db.execute("INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) SELECT '40000000000000000000000000000078','30000000000000000000000000000078',blob_id,length,sha256,1,?1 FROM blob",[OTHER_ID]);
+            assert!(
+                inserted.is_err(),
+                "deleting blobs must reject new retained references"
+            );
+            db.execute_batch("ROLLBACK TO retained_reference; RELEASE retained_reference")
+                .unwrap();
+            assert!(
+                db.execute(
+                    "UPDATE entry SET state='active' WHERE entry_id=?1",
+                    [uploaded["id"].as_str().unwrap()]
+                )
+                .is_err(),
+                "removed entries cannot reactivate"
+            );
+        }
+        let mut store = PayloadStore::open(&fixture.product).unwrap();
+        store.set_publish_fault_hook(Some(Arc::new(move |at| {
+            if at == boundary {
+                Err(PayloadError::Io("injected_cleanup_fault"))
+            } else {
+                Ok(())
+            }
+        })));
+        let store = Arc::new(store);
+        assert!(cleanup::resume(workers, &store).await.is_err());
+        let status = workers
+            .read(|db| {
+                Ok(removal::status(db, OWNER_ID, "c0000000000000000000000000000078").unwrap())
+            })
+            .await
+            .unwrap();
+        assert_eq!(status.cleanup, Some("pending"));
+        drop(store);
+        fixture.restart().await;
+        let workers = fixture.workers.as_ref().unwrap();
+        let recovery = sylux::persistence::reconcile::reconcile(workers, &fixture.product)
+            .await
+            .unwrap();
+        assert!(recovery.ready, "{boundary}: {recovery:?}");
+        let status = workers
+            .read(|db| {
+                Ok(removal::status(db, OWNER_ID, "c0000000000000000000000000000078").unwrap())
+            })
+            .await
+            .unwrap();
+        assert_eq!(status.cleanup, Some("complete"));
+        let content = fixture
+            .request(
+                "GET",
+                &format!("/entries/{}/content", active["entry_id"].as_str().unwrap()),
+                Some(&owner_auth()),
+                &[],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(content.status, 200);
+        assert_eq!(
+            content.body.as_ref(),
+            b"active bytes survive every cleanup boundary"
+        );
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn permanent_removal_keeps_payload_referenced_by_another_accounts_revision() {
+    let mut fixture = Fixture::new("removal-shared-payload").await;
+    let bytes = b"shared immutable payload";
+    let uploaded = fixture.upload("shared.txt", bytes).await;
+    let entry_id = uploaded["entry_id"].as_str().unwrap();
+    fixture.db().lock().unwrap().execute_batch(&format!("BEGIN;
+        INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES('d0000000000000000000000000000078','{OTHER_ID}','{OTHER_ROOT}','file','retained.txt',x'72657461696e65642e747874',1);
+        INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) SELECT 'e0000000000000000000000000000078','d0000000000000000000000000000078',blob_id,length,sha256,committed_at,'{OTHER_ID}' FROM revision WHERE entry_id='{entry_id}';
+        UPDATE entry SET current_revision_id='e0000000000000000000000000000078' WHERE entry_id='d0000000000000000000000000000078'; COMMIT;")).unwrap();
+    fixture.trash_uploaded(&uploaded).await;
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await;
+    let removed=fixture.removal_json("/trash/removals",serde_json::json!({"operation_id":"f0000000000000000000000000000078","confirmation":preview.json()["confirmation"]})).await;
+    assert_eq!(removed.status, 200, "{}", removed.text());
+    let count: i64 = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM removal_cleanup", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let retained = fixture
+        .request(
+            "GET",
+            "/entries/d0000000000000000000000000000078/content",
+            Some(&other_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(retained.status, 200, "{}", retained.text());
+    assert_eq!(retained.body.as_ref(), bytes);
+    fixture.restart().await;
+    let retained_after_restart = fixture
+        .request(
+            "GET",
+            "/entries/d0000000000000000000000000000078/content",
+            Some(&other_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(retained_after_restart.status, 200);
+    assert_eq!(retained_after_restart.body.as_ref(), bytes);
+    let recovery = sylux::persistence::reconcile::reconcile(
+        fixture.workers.as_ref().unwrap(),
+        &fixture.product,
+    )
+    .await
+    .unwrap();
+    assert!(recovery.ready, "{recovery:?}");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_of_folder_preserves_independently_trashed_child_and_history() {
+    let fixture = Fixture::new("removal-folder").await;
+    let uploaded = fixture
+        .upload("nested.txt", b"hidden active descendant")
+        .await;
+    let top = fixture
+        .removal_json(
+            "/folders/children",
+            serde_json::json!({"parent_id":OWNER_ROOT,"name":"top"}),
+        )
+        .await
+        .json();
+    let top_id = top["id"].as_str().unwrap();
+    let earlier = fixture
+        .removal_json(
+            "/folders/children",
+            serde_json::json!({"parent_id":top_id,"name":"earlier"}),
+        )
+        .await
+        .json();
+    let earlier_id = earlier["id"].as_str().unwrap();
+    let moved = fixture
+        .mutate(
+            "POST",
+            &format!("/entries/{}/move", uploaded["id"].as_str().unwrap()),
+            &owner_auth(),
+            None,
+            &[
+                ("Content-Type", "application/json".into()),
+                ("If-Match", folder_etag(uploaded["id"].as_str().unwrap(), 1)),
+            ],
+            serde_json::to_vec(&serde_json::json!({"parent_id":top_id})).unwrap(),
+        )
+        .await;
+    assert_eq!(moved.status, 200, "{}", moved.text());
+    for id in [earlier_id, top_id] {
+        let generation: i64 = fixture
+            .db()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT generation FROM entry WHERE entry_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let trashed = fixture
+            .mutate(
+                "DELETE",
+                &format!("/entries/{id}"),
+                &owner_auth(),
+                None,
+                &[("If-Match", folder_etag(id, generation as u64))],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(trashed.status, 204, "{}", trashed.text());
+    }
+    let listing = fixture
+        .request("GET", "/trash", Some(&owner_auth()), &[], Vec::new())
+        .await
+        .json();
+    let selected = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == top_id)
+        .unwrap();
+    let preview=fixture.removal_json("/trash/removals/preview",serde_json::json!({"selection":{"kind":"selected","items":[{"id":top_id,"etag":selected["etag"]}]}})).await;
+    assert_eq!(preview.status, 200, "{}", preview.text());
+    let removed=fixture.removal_json("/trash/removals",serde_json::json!({"operation_id":"10000000000000000000000000000078","confirmation":preview.json()["confirmation"]})).await;
+    assert_eq!(removed.status, 200, "{}", removed.text());
+    let hidden = fixture
+        .request(
+            "GET",
+            &format!(
+                "/entries/{}/content",
+                uploaded["entry_id"].as_str().unwrap()
+            ),
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(hidden.status, 404);
+    let search = fixture
+        .request(
+            "GET",
+            "/entries/search?q=nested",
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(search.status, 200, "{}", search.text());
+    assert!(search.json()["items"].as_array().unwrap().is_empty());
+    let archive = fixture
+        .removal_json(
+            "/archives",
+            serde_json::json!({"entry_ids":[uploaded["entry_id"]]}),
+        )
+        .await;
+    assert_eq!(archive.status, 404, "{}", archive.text());
+    let listing = fixture
+        .request("GET", "/trash", Some(&owner_auth()), &[], Vec::new())
+        .await
+        .json();
+    assert_eq!(listing["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["items"][0]["id"], earlier_id);
+    assert_eq!(
+        listing["items"][0]["original_path"],
+        serde_json::json!(["top"])
+    );
+    let count: i64 = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM removal_member", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+    let restore = fixture
+        .mutate(
+            "POST",
+            &format!("/trash/{earlier_id}/restore"),
+            &owner_auth(),
+            None,
+            &[(
+                "If-Match",
+                listing["items"][0]["etag"].as_str().unwrap().into(),
+            )],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(restore.status, 409, "{}", restore.text());
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await;
+    assert_eq!(preview.json()["count"], 1);
+    let removed=fixture.removal_json("/trash/removals",serde_json::json!({"operation_id":"20000000000000000000000000000078","confirmation":preview.json()["confirmation"]})).await;
+    assert_eq!(removed.status, 200, "{}", removed.text());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_real_replay_auth_expiry_and_stale_previews() {
+    use sylux::domain::removal::{self, Selection};
+    let fixture = Fixture::new("removal-replay-rules").await;
+    let first = fixture.upload("first.txt", b"first").await;
+    let deleted = fixture.trash_uploaded(&first).await;
+    let selected = serde_json::json!({"selection":{"kind":"selected","items":[{"id":deleted["id"],"etag":deleted["etag"]}]}});
+    let preview = fixture
+        .removal_json("/trash/removals/preview", selected.clone())
+        .await
+        .json();
+    let operation = "31000000000000000000000000000078";
+    let body = serde_json::json!({"operation_id":operation,"confirmation":preview["confirmation"]});
+    for headers in [
+        vec![("Origin", fixture.origin.clone())],
+        vec![
+            ("Origin", fixture.origin.clone()),
+            ("X-CSRF-Token", other_auth().csrf),
+        ],
+        vec![
+            ("Origin", "https://foreign.invalid".into()),
+            ("X-CSRF-Token", owner_auth().csrf),
+        ],
+        vec![("X-CSRF-Token", owner_auth().csrf)],
+    ] {
+        let mut headers = headers;
+        headers.push(("Content-Type", "application/json".into()));
+        let rejected = fixture
+            .request(
+                "POST",
+                "/trash/removals",
+                Some(&owner_auth()),
+                &headers,
+                serde_json::to_vec(&body).unwrap(),
+            )
+            .await;
+        assert_eq!(rejected.status, 403, "{}", rejected.text());
+    }
+    let restored = fixture
+        .mutate(
+            "POST",
+            &format!("/trash/{}/restore", deleted["id"].as_str().unwrap()),
+            &owner_auth(),
+            None,
+            &[("If-Match", deleted["etag"].as_str().unwrap().into())],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(restored.status, 204, "{}", restored.text());
+    let stale = fixture
+        .removal_json("/trash/removals/preview", selected)
+        .await;
+    assert_eq!(stale.status, 404);
+    let empty = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await;
+    assert_eq!(empty.status, 404);
+    let stale_execute = fixture.removal_json("/trash/removals", body).await;
+    assert_eq!(stale_execute.status, 409);
+    let second = fixture.upload_current("second.txt", b"second").await;
+    fixture.trash_uploaded(&second).await;
+    let key: [u8; 32] = fs::read(fixture.product.join("secrets/mutation.key"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let expired = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .read(move |db| {
+            Ok(
+                removal::preview(db, OWNER_ID, Selection::All, &key, unix_now() - 601)
+                    .unwrap()
+                    .confirmation,
+            )
+        })
+        .await
+        .unwrap();
+    let expired_body = serde_json::json!({"operation_id":operation,"confirmation":expired});
+    let rejected = fixture
+        .removal_json("/trash/removals", expired_body.clone())
+        .await;
+    assert_eq!(rejected.status, 400);
+    // Commit with the original clock, then prove HTTP replay ignores expiry of that result.
+    let confirmation = expired.clone();
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(move |tx| {
+            removal::execute(
+                tx,
+                OWNER_ID,
+                operation,
+                &confirmation,
+                &key,
+                unix_now() - 601,
+            )
+            .unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let replay = fixture
+        .removal_json("/trash/removals", expired_body.clone())
+        .await;
+    assert_eq!(replay.status, 200, "{}", replay.text());
+    assert_eq!(replay.json()["state"], "committed");
+    let conflict = fixture
+        .removal_json(
+            "/trash/removals",
+            serde_json::json!({"operation_id":operation,"confirmation":"different-confirmation"}),
+        )
+        .await;
+    assert_eq!(conflict.status, 409);
+    assert_eq!(conflict.json()["code"], "operation_conflict");
+    let foreign = fixture
+        .mutate(
+            "POST",
+            "/trash/removals",
+            &other_auth(),
+            None,
+            &[("Content-Type", "application/json".into())],
+            serde_json::to_vec(&expired_body).unwrap(),
+        )
+        .await;
+    assert_eq!(foreign.status, 200);
+    assert_eq!(
+        foreign.json(),
+        serde_json::json!({"operation_id":operation,"state":"unknown"})
+    );
+    let count: i64 = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM removal", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_runtime_cleanup_retries_without_blocking_other_trash_actions() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use sylux::persistence::payload::PayloadError;
+    let mut fixture = Fixture::new("removal-runtime-retry").await;
+    let fail = Arc::new(AtomicBool::new(true));
+    let fail_hook = Arc::clone(&fail);
+    fixture.cleanup_fault = Some(Arc::new(move |boundary| {
+        if boundary == "cleanup.before_unlink" && fail_hook.load(Ordering::SeqCst) {
+            Err(PayloadError::Io("injected_cleanup_fault"))
+        } else {
+            Ok(())
+        }
+    }));
+    fixture.restart().await;
+    let removed = fixture.upload_current("remove.txt", b"removed bytes").await;
+    let deleted = fixture.trash_uploaded(&removed).await;
+    let other = fixture
+        .upload_current("restore.txt", b"retained active bytes")
+        .await;
+    let restorable = fixture.trash_uploaded(&other).await;
+    let preview = fixture.removal_json("/trash/removals/preview", serde_json::json!({"selection":{"kind":"selected","items":[{"id":deleted["id"],"etag":deleted["etag"]}]}})).await.json();
+    let operation = "32000000000000000000000000000078";
+    let result = fixture
+        .removal_json(
+            "/trash/removals",
+            serde_json::json!({"operation_id":operation,"confirmation":preview["confirmation"]}),
+        )
+        .await;
+    assert_eq!(result.status, 200);
+    assert_eq!(result.json()["state"], "committed");
+    assert_eq!(result.json()["cleanup"], "pending");
+    let restored = fixture
+        .mutate(
+            "POST",
+            &format!("/trash/{}/restore", restorable["id"].as_str().unwrap()),
+            &owner_auth(),
+            None,
+            &[("If-Match", restorable["etag"].as_str().unwrap().into())],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(restored.status, 204, "{}", restored.text());
+    // No second removal or restart is needed to reclaim the first operation's bytes.
+    fail.store(false, Ordering::SeqCst);
+    fixture.wait_cleanup(operation).await;
+    let content = fixture
+        .request(
+            "GET",
+            &format!("/entries/{}/content", other["entry_id"].as_str().unwrap()),
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(content.status, 200);
+    assert_eq!(content.body.as_ref(), b"retained active bytes");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_commit_rollback_and_lost_socket_reply_recover_same_operation() {
+    let mut fixture = Fixture::new("removal-commit-fault").await;
+    let active = fixture
+        .upload_current("active.txt", b"active content")
+        .await;
+    let doomed = fixture
+        .upload_current("doomed.txt", b"removed content")
+        .await;
+    fixture.trash_uploaded(&doomed).await;
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await
+        .json();
+    let operation = "33000000000000000000000000000078";
+    let body = serde_json::json!({"operation_id":operation,"confirmation":preview["confirmation"]});
+    fixture.removal_commit_hook = Some(Arc::new(|_| Err(rusqlite::Error::InvalidQuery)));
+    fixture.restart().await;
+    let rejected = fixture.removal_json("/trash/removals", body.clone()).await;
+    assert_eq!(rejected.status, 409);
+    assert_eq!(rejected.json()["code"], "removal_not_committed");
+    assert_eq!(
+        fixture
+            .db()
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM removal_member", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    fixture.removal_commit_hook = None;
+    fixture.restart().await;
+    let recovery = sylux::persistence::reconcile::reconcile(
+        fixture.workers.as_ref().unwrap(),
+        &fixture.product,
+    )
+    .await
+    .unwrap();
+    assert!(recovery.ready);
+    let (reached, observed) = tokio::sync::oneshot::channel();
+    let reached = Mutex::new(Some(reached));
+    let (release, paused) = std::sync::mpsc::channel();
+    let paused = Mutex::new(paused);
+    fixture.removal_commit_hook = Some(Arc::new(move |_| {
+        if let Some(reached) = reached.lock().unwrap().take() {
+            reached.send(()).unwrap();
+            paused.lock().unwrap().recv().unwrap();
+        }
+        Ok(())
+    }));
+    fixture.restart().await;
+    let mut stream = TcpStream::connect(&fixture.address).await.unwrap();
+    let json = serde_json::to_vec(&body).unwrap();
+    let auth = owner_auth();
+    let headers = format!(
+        "POST /trash/removals HTTP/1.1\r\nHost: {}\r\nOrigin: {}\r\nCookie: {}\r\nX-CSRF-Token: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        fixture.address,
+        fixture.origin,
+        auth.cookie,
+        auth.csrf,
+        json.len()
+    );
+    stream.write_all(headers.as_bytes()).await.unwrap();
+    stream.write_all(&json).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(stream);
+    release.send(()).unwrap();
+    let replay = fixture.removal_json("/trash/removals", body.clone()).await;
+    assert_eq!(replay.status, 200, "{}", replay.text());
+    assert_eq!(replay.json()["state"], "committed");
+    fixture.wait_cleanup(operation).await;
+    fixture.removal_commit_hook = None;
+    fixture.restart().await;
+    let recovery = sylux::persistence::reconcile::reconcile(
+        fixture.workers.as_ref().unwrap(),
+        &fixture.product,
+    )
+    .await
+    .unwrap();
+    assert!(recovery.ready);
+    let replay = fixture.removal_json("/trash/removals", body).await;
+    assert_eq!(replay.json()["state"], "committed");
+    assert_eq!(
+        fixture
+            .db()
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM removal", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let content = fixture
+        .request(
+            "GET",
+            &format!("/entries/{}/content", active["entry_id"].as_str().unwrap()),
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(content.status, 200);
+    assert_eq!(content.body.as_ref(), b"active content");
+    fixture.cleanup.take().unwrap().shutdown().await.unwrap();
+    if let Some(server) = fixture.server.take() {
+        server.abort();
+        let _ = server.await;
+    }
+    fixture.workers.take().unwrap().shutdown().await.unwrap();
+    fixture.db.take();
+    // Offline verification must accept the missing authorized payload and still check active bytes.
+    let report = sylux::admin::verify_payloads(&fixture.product, |_, _| {
+        panic!("retained payload must verify")
+    })
+    .unwrap();
+    assert_eq!(report.checked, 1);
+    assert_eq!(report.damaged, 0);
+    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_sylux"))
+        .args(["admin", "verify-payloads", "--root"])
+        .arg(&fixture.product)
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(cli.stdout).unwrap(),
+        "payload_verification checked=1 verified=1 damaged=0\n"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_confirmation_tracks_effect_content_and_ancestry_not_unrelated_items() {
+    let fixture = Fixture::new("removal-fingerprint-scope").await;
+    let first = fixture.upload_current("same.txt", b"first").await;
+    let first_deleted = fixture.trash_uploaded(&first).await;
+    let selected = serde_json::json!({"selection":{"kind":"selected","items":[{"id":first_deleted["id"],"etag":first_deleted["etag"]}]}});
+    let preview = fixture
+        .removal_json("/trash/removals/preview", selected.clone())
+        .await
+        .json();
+    let second = fixture.upload_current("same.txt", b"second").await;
+    let second_deleted = fixture.trash_uploaded(&second).await;
+    let listing = fixture
+        .request("GET", "/trash", Some(&owner_auth()), &[], Vec::new())
+        .await
+        .json();
+    assert!(
+        listing["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["needs_reference"] == true)
+    );
+    let result = fixture.removal_json("/trash/removals", serde_json::json!({"operation_id":"34000000000000000000000000000078","confirmation":preview["confirmation"]})).await;
+    assert_eq!(
+        result.status,
+        200,
+        "unrelated upload and Trash root must not invalidate selected removal: {}",
+        result.text()
+    );
+    let listing = fixture
+        .request("GET", "/trash", Some(&owner_auth()), &[], Vec::new())
+        .await
+        .json();
+    assert_eq!(listing["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["items"][0]["id"], second_deleted["id"]);
+    assert_ne!(listing["items"][0]["needs_reference"], true);
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await
+        .json();
+    // A retained revision added without changing the current revision still changes the effect.
+    let second_id = second["entry_id"].as_str().unwrap();
+    fixture.db().lock().unwrap().execute("INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) SELECT '35000000000000000000000000000078',entry_id,blob_id,length,sha256,committed_at,actor_account_id FROM revision WHERE entry_id=?1", [second_id]).unwrap();
+    let rejected = fixture.removal_json("/trash/removals", serde_json::json!({"operation_id":"36000000000000000000000000000078","confirmation":preview["confirmation"]})).await;
+    assert_eq!(rejected.status, 409);
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await
+        .json();
+    let _unrelated = fixture.upload_current("unrelated.txt", b"unrelated").await;
+    let removed = fixture.removal_json("/trash/removals", serde_json::json!({"operation_id":"37000000000000000000000000000078","confirmation":preview["confirmation"]})).await;
+    assert_eq!(
+        removed.status,
+        200,
+        "unrelated upload must not invalidate Empty Trash: {}",
+        removed.text()
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_reconcile_rejects_completed_cleanup_with_deleting_blob() {
+    use sylux::domain::removal::{self, Selection};
+    let mut fixture = Fixture::new("removal-cleanup-invariant").await;
+    let uploaded = fixture.upload_current("removed.txt", b"removed").await;
+    fixture.trash_uploaded(&uploaded).await;
+    fixture.cleanup.take().unwrap().shutdown().await.unwrap();
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            let preview =
+                removal::preview(tx, OWNER_ID, Selection::All, &[8; 32], unix_now()).unwrap();
+            removal::execute(
+                tx,
+                OWNER_ID,
+                "38000000000000000000000000000078",
+                &preview.confirmation,
+                &[8; 32],
+                unix_now(),
+            )
+            .unwrap();
+            tx.execute("UPDATE removal_cleanup SET state='complete'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fixture.restart().await;
+    let report = sylux::persistence::reconcile::reconcile(
+        fixture.workers.as_ref().unwrap(),
+        &fixture.product,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !report.ready,
+        "inconsistent cleanup metadata must refuse readiness"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_cleanup_shutdown_joins_blocking_io_before_database_shutdown() {
+    let mut fixture = Fixture::new("removal-cleanup-join").await;
+    let (reached, observed) = tokio::sync::oneshot::channel();
+    let reached = Mutex::new(Some(reached));
+    let (release, paused) = std::sync::mpsc::channel();
+    let paused = Mutex::new(paused);
+    fixture.cleanup_fault = Some(Arc::new(move |at| {
+        if at == "cleanup.before_unlink"
+            && let Some(reached) = reached.lock().unwrap().take()
+        {
+            let _ = reached.send(());
+            paused
+                .lock()
+                .unwrap()
+                .recv()
+                .map_err(|_| sylux::persistence::payload::PayloadError::Cancelled)?;
+        }
+        Ok(())
+    }));
+    fixture.restart().await;
+    let uploaded = fixture.upload_current("removed.txt", b"removed").await;
+    fixture.trash_uploaded(&uploaded).await;
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await
+        .json();
+    let removed = fixture.removal_json("/trash/removals", serde_json::json!({"operation_id":"39000000000000000000000000000078","confirmation":preview["confirmation"]})).await;
+    assert_eq!(removed.status, 200);
+    tokio::time::timeout(Duration::from_secs(3), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    let shutdown = tokio::spawn(fixture.cleanup.take().unwrap().shutdown());
+    tokio::task::yield_now().await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown must join in-flight blocking cleanup"
+    );
+    let status = fixture
+        .request(
+            "GET",
+            "/trash/removals/39000000000000000000000000000078",
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(status.json()["cleanup"], "pending");
+    release.send(()).unwrap();
+    shutdown.await.unwrap().unwrap();
+    fixture
+        .wait_cleanup("39000000000000000000000000000078")
+        .await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn permanent_removal_confirmation_rejects_changed_ancestor_path() {
+    let fixture = Fixture::new("removal-ancestor-snapshot").await;
+    let parent = fixture
+        .removal_json(
+            "/folders/children",
+            serde_json::json!({"parent_id":OWNER_ROOT,"name":"Parent"}),
+        )
+        .await
+        .json();
+    let child = fixture
+        .removal_json(
+            "/folders/children",
+            serde_json::json!({"parent_id":parent["id"],"name":"Child"}),
+        )
+        .await
+        .json();
+    let trashed = fixture
+        .mutate(
+            "DELETE",
+            &format!("/entries/{}", child["id"].as_str().unwrap()),
+            &owner_auth(),
+            None,
+            &[("If-Match", child["etag"].as_str().unwrap().into())],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(trashed.status, 204);
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"all"}}),
+        )
+        .await
+        .json();
+    let parent_id = parent["id"].as_str().unwrap();
+    let generation: i64 = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT generation FROM entry WHERE entry_id=?1",
+            [parent_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let renamed = fixture
+        .mutate(
+            "PATCH",
+            &format!("/entries/{parent_id}"),
+            &owner_auth(),
+            None,
+            &[
+                ("Content-Type", "application/json".into()),
+                ("If-Match", folder_etag(parent_id, generation as u64)),
+            ],
+            serde_json::to_vec(&serde_json::json!({"name":"Renamed"})).unwrap(),
+        )
+        .await;
+    assert_eq!(renamed.status, 200, "{}", renamed.text());
+    let rejected = fixture.removal_json("/trash/removals", serde_json::json!({"operation_id":"3a000000000000000000000000000078","confirmation":preview["confirmation"]})).await;
+    assert_eq!(rejected.status, 409);
+    assert_eq!(
+        fixture
+            .db()
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM removal", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     fixture.close().await;
 }

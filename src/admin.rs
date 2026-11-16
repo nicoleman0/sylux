@@ -57,6 +57,9 @@ pub fn verify_payloads(
         _ => "verify_root_invalid",
     })?;
     let manifest = root::read_manifest(root_path).map_err(|_| "verify_binding_invalid")?;
+    if manifest.schema_version == 1 {
+        return Err("verify_schema_upgrade_required_run_serve");
+    }
     root::verify_protected_material(root_path).map_err(|_| "verify_binding_invalid")?;
     // Declared after ownership so every return closes SQLite before unlocking.
     let bound = root::open_bound_database_read_only(root_path, DEFAULT_BUSY_TIMEOUT)
@@ -81,7 +84,7 @@ pub fn verify_payloads(
     let mut statement = bound
         .connection
         .prepare(
-            "SELECT blob_id,length,sha256 FROM blob WHERE blob_id>?1 ORDER BY blob_id LIMIT ?2",
+            "SELECT blob_id,length,sha256 FROM blob WHERE blob_id>?1 AND lifecycle='live' ORDER BY blob_id LIMIT ?2",
         )
         .map_err(|_| "verify_metadata_unreadable")?;
     let mut report = PayloadReport::default();
@@ -129,6 +132,9 @@ pub async fn reset_password_from_stdin(root_path: &Path, handle: &str) -> Result
         _ => "recovery_root_invalid",
     })?;
     let manifest = root::read_manifest(root_path).map_err(|_| "recovery_binding_invalid")?;
+    if manifest.schema_version == 1 {
+        return Err("recovery_schema_upgrade_required_run_serve");
+    }
     root::verify_protected_material(root_path).map_err(|_| "recovery_binding_invalid")?;
     // Declared after ownership so every return closes SQLite before unlocking.
     let mut bound = root::open_bound_database(root_path, DEFAULT_BUSY_TIMEOUT)

@@ -32,7 +32,7 @@
   import XIcon from '@lucide/svelte/icons/x';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
   import { modifiedTime } from './lib/modified-time';
-  import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort, type ResultSort } from './lib/listing';
+  import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort, type ResultSort, type RemovalPreview, type RemovalResult } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, type Replacement } from './lib/transfers';
   import { directoryFilesToUpload, filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
@@ -482,6 +482,108 @@
   let trashBusy = $state(false);
   const resultSortBlocked = $derived(bulkBusy || bulkNeedsRefresh || restorationPending || trashBusy);
 
+  let removalSelection = $state<string[]>([]);
+  let removalPreview = $state<(RemovalPreview & { all: boolean }) | null>(null);
+  let removalPreparing = $state<'selected' | 'all' | null>(null);
+  let removalSubmitting = $state(false);
+  let removalError = $state('');
+  let removalTrigger: HTMLElement | null = null;
+  type PendingRemoval = { id: string; confirmation: string; result: RemovalResult | null; message: string };
+  let removalPending = $state<PendingRemoval | null>(null);
+  let removalChecking = $state(false);
+
+  function saveRemoval(pending: PendingRemoval | null): void {
+    removalPending = pending;
+    if (!user) return;
+    const key = `sylux-removal:${user.id}`;
+    try {
+      if (pending && !pending.result) sessionStorage.setItem(key, JSON.stringify({ id: pending.id, confirmation: pending.confirmation }));
+      else sessionStorage.removeItem(key);
+    } catch { removalError = 'This browser cannot save removal recovery across reloads. Keep this tab open until the outcome is confirmed.'; }
+  }
+  function recoverRemoval(): void {
+    if (!user) return;
+    try {
+      const saved = sessionStorage.getItem(`sylux-removal:${user.id}`);
+      if (!saved) return;
+      const pending = JSON.parse(saved);
+      if (!/^[a-f0-9]{32}$/.test(pending.id) || typeof pending.confirmation !== 'string' || pending.confirmation.length > 60000) throw new Error('Invalid removal recovery');
+      removalPending = { ...pending, result: null, message: 'Removal outcome unconfirmed. Check its status or retry the same removal.' };
+    } catch { removalError = 'Could not read saved removal recovery. Keep the original tab open to resolve its outcome.'; }
+  }
+  async function refreshRemovalSelection(message: string): Promise<void> {
+    removalPreview = null; removalSelection = [];
+    if (showTrash) await loadTrash();
+    removalError = message;
+  }
+  async function prepareRemoval(all: boolean, trigger: HTMLElement): Promise<void> {
+    if (removalBlocked || (!all && !removalSelection.length)) return;
+    const generation = sessionGeneration, navigation = navigationRequest;
+    removalTrigger = trigger; removalPreparing = all ? 'all' : 'selected'; removalError = '';
+    try {
+      const preview = await listing.removalPreview(all ? { kind: 'all' } : { kind: 'selected', items: deletedItems.filter(item => removalSelection.includes(item.id)).map(({ id, etag }) => ({ id, etag })) });
+      if (generation !== sessionGeneration || navigation !== navigationRequest || !showTrash) return;
+      removalPreview = { ...preview, all };
+    } catch (error) {
+      if (generation !== sessionGeneration || navigation !== navigationRequest) return;
+      if (error instanceof HttpError && [404, 409].includes(error.status)) await refreshRemovalSelection('Trash changed. Review the current items and confirm again.');
+      else removalError = 'Could not prepare removal. Try again.';
+    } finally { if (generation === sessionGeneration) removalPreparing = null; }
+  }
+  async function finishRemoval(result: RemovalResult): Promise<void> {
+    clearCompletedFeedback();
+    actionNotice = `Removed ${result.count} ${result.count === 1 ? 'item' : 'items'} permanently`;
+    saveRemoval(result.cleanup === 'complete' ? null : { id: result.operation_id, confirmation: '', result, message: 'Removal is complete. Storage cleanup is pending.' });
+    removalSelection = [];
+    if (showTrash) {
+      deletedItems = []; trashPageIndex = 0; trashPageCursors = [null]; trashNextCursor = null; trashHasMore = false; trashRetry = null;
+      await loadTrash();
+    }
+  }
+  async function submitRemoval(pending: PendingRemoval): Promise<void> {
+    const generation = sessionGeneration;
+    removalSubmitting = true; removalError = '';
+    saveRemoval(pending);
+    try {
+      const result = await listing.removePermanently(pending.id, pending.confirmation);
+      if (generation !== sessionGeneration) return;
+      removalPreview = null;
+      if (result.state === 'unknown') saveRemoval({ ...pending, message: 'Removal outcome is still unconfirmed. Check its status or retry the same removal.' });
+      else await finishRemoval(result);
+    } catch (error) {
+      if (generation !== sessionGeneration) return;
+      removalPreview = null;
+      if (moveOutcomeUncertain(error) || !(error instanceof HttpError)) {
+        saveRemoval({ ...pending, message: 'Removal outcome unconfirmed. Check its status or retry the same removal.' });
+      } else {
+        saveRemoval(null);
+        await refreshRemovalSelection(error.status === 409 && error.code !== 'removal_not_committed' ? 'Trash changed. Review the current items and confirm again.' : 'Removal was rejected or its confirmation expired. Review Trash and confirm again.');
+      }
+    } finally { if (generation === sessionGeneration) removalSubmitting = false; }
+  }
+  async function confirmRemoval(): Promise<void> {
+    if (!removalPreview || removalSubmitting || (removalPending && !removalPending.result)) return;
+    await submitRemoval({ id: crypto.randomUUID().replaceAll('-', ''), confirmation: removalPreview.confirmation, result: null, message: 'Removal outcome unconfirmed. Check its status or retry the same removal.' });
+  }
+  async function replayRemoval(): Promise<void> {
+    if (!removalPending || removalPending.result || removalChecking || removalSubmitting) return;
+    await submitRemoval(removalPending);
+  }
+  async function checkRemoval(): Promise<void> {
+    if (!removalPending || removalChecking || removalSubmitting) return;
+    const generation = sessionGeneration, pending = removalPending;
+    removalChecking = true;
+    try {
+      const result = await listing.removalStatus(pending.id);
+      if (generation !== sessionGeneration || removalPending !== pending) return;
+      if (result.state === 'unknown') { saveRemoval({ ...pending, message: 'Removal outcome is still unconfirmed. Retry the same removal to resolve a request that did not arrive, including an expired confirmation.' }); return; }
+      if (pending.result) saveRemoval(result.cleanup === 'complete' ? null : { ...pending, result, message: 'Removal is complete. Storage cleanup is pending.' });
+      else await finishRemoval(result);
+    } catch {
+      if (generation === sessionGeneration && removalPending === pending) saveRemoval({ ...pending, message: pending.result ? 'Removal is complete. Could not check storage cleanup. Try again.' : 'Removal outcome is still unconfirmed. Check your connection and try again.' });
+    } finally { if (generation === sessionGeneration) removalChecking = false; }
+  }
+
   let restoringId = $state('');
   let restoringName = $state('');
   let namespaceUnknown = $state<{ action: 'trash' | 'restore'; entry: Entry; inspected: boolean; message: string } | null>(null);
@@ -494,6 +596,8 @@
   let trashRetry = $state<{ cursor: string | null; page: number } | null>(null);
   let trashPaging = $state<'next' | 'previous' | 'retry' | null>(null);
   let trashNotice = $state('');
+  const removalBlocked = $derived(trashBusy || trashLoading || !!namespaceUnknown || !!removalPreparing || removalSubmitting || (!!removalPending && !removalPending.result));
+
   let renameId = $state('');
   let renameName = $state('');
   let renameError = $state('');
@@ -558,7 +662,8 @@
 
   function clearCompletedFeedback(): void {
     feedbackRevision++;
-    notice = ''; actionNotice = '';
+    if (!removalSubmitting) removalPreview = null;
+    notice = ''; actionNotice = ''; removalError = ''; removalSelection = [];
     if (!bulkBusy) {
       if (!bulkNeedsRefresh) { bulkReport = null; bulkError = ''; }
     }
@@ -1011,6 +1116,7 @@
         notice = 'Setup complete. Sign in with the new account.';
         return;
       }
+      recoverRemoval();
       client.setSessionExpiredHandler(() => expireSession(generation));
       await restoreNavigation();
     } catch {
@@ -1115,6 +1221,7 @@
     draggedEntry = null; dropTarget = ''; dropPending = null; dropError = ''; moveNeedsRefresh = false; knownParents.clear();
     renameId = ''; renameName = ''; renameError = ''; renameBusy = false;
     closeMove(); moveBusy = false;
+    removalSelection = []; removalPreview = null; removalPreparing = null; removalSubmitting = false; removalPending = null; removalChecking = false; removalError = '';
     trashRequest++; deletedItems = []; trashPageIndex = 0; trashPageCursors = [null]; trashNextCursor = null; trashHasMore = false; trashRetry = null; trashPaging = null; trashNotice = ''; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false; restoringId = ''; restoringName = ''; namespaceUnknown = null; namespaceInspecting = false;
   }
   function clearAccountForms(): void {
@@ -1695,7 +1802,7 @@
       if (!isCurrent()) return false;
       if (result.next_cursor && trashPageCursors.slice(0, targetPage + 1).includes(result.next_cursor)) throw new Error('Trash pagination repeated a cursor');
       if (targetPage > trashPageIndex && deletedItems.length && result.items.length && compareDeleted(deletedItems.at(-1)!, result.items[0], trashSort) >= 0) throw new Error('Trash pagination did not advance');
-      deletedItems = result.items;
+      deletedItems = result.items; removalSelection = [];
       trashPageIndex = targetPage;
       trashPageCursors = targetPage === 0 ? [null] : [...trashPageCursors.slice(0, targetPage), cursor];
       trashNextCursor = result.next_cursor; trashHasMore = result.has_more; trashRetry = null;
@@ -1832,7 +1939,7 @@
       other.original_path.every((part, index) => part === item.original_path[index]));
   }
   async function restoreEntry(item: Entry, trigger: HTMLElement): Promise<void> {
-    if (trashBusy || trashLoading || namespaceUnknown) return;
+    if (trashBusy || trashLoading || namespaceUnknown || removalSubmitting || (removalPending && !removalPending.result) || removalPreparing) return;
     const navigation = navigationRequest;
     const watched = watchFocus(trigger);
     trashBusy = true; restoringId = item.id; restoringName = item.name; trashError = '';
@@ -2299,6 +2406,13 @@
                 <p role="status">Restoring {restoringName}…</p><Button variant="ghost" onclick={openTrash}>Open Trash</Button>
               </div>
             {/if}
+            {#if removalPending}
+              <section class="upload-batch-report" aria-label="Permanent removal status">
+                <p role="status">{removalPending.message}</p>
+                <Button variant="outline" size="sm" disabled={removalChecking || removalSubmitting} aria-busy={removalChecking} onclick={checkRemoval}>{removalChecking ? 'Checking…' : 'Check removal status'}</Button>
+                {#if !removalPending.result}<Button variant="outline" size="sm" disabled={removalChecking || removalSubmitting} aria-busy={removalSubmitting} onclick={replayRemoval}>{removalSubmitting ? 'Retrying…' : 'Retry same removal'}</Button>{/if}
+              </section>
+            {/if}
             {#if namespaceUnknown}
               <section class="bulk-results" aria-label="Unconfirmed file action" aria-busy={namespaceInspecting}>
                 <h2>{namespaceUnknown.action === 'trash' ? 'Move to trash unconfirmed' : 'Restore unconfirmed'}</h2>
@@ -2424,7 +2538,9 @@
           </section>
         {:else if showTrash}
             <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}>
-              <div class="trash-heading-row"><h1 id="trash-heading" tabindex="-1">Trash</h1><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={trashBusy} onclick={refreshWorkspace} /></div>
+              <div class="trash-heading-row"><h1 id="trash-heading" tabindex="-1">Trash</h1><div class="flex flex-wrap justify-end gap-2"><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={trashBusy || removalSubmitting} onclick={refreshWorkspace} /><Button variant="outline" size="sm" disabled={removalBlocked || !deletedItems.length} aria-busy={removalPreparing === 'all'} onclick={(event) => prepareRemoval(true, event.currentTarget)}>{removalPreparing === 'all' ? 'Preparing…' : 'Empty Trash'}</Button></div></div>
+              {#if removalError}<p role="alert">{removalError}</p>{/if}
+              {#if deletedItems.length}<div class="flex flex-wrap items-center gap-3"><label class="flex items-center gap-2"><input type="checkbox" aria-label="Select all items on this page" disabled={removalBlocked} checked={!!deletedItems.length && removalSelection.length === deletedItems.length} onchange={(event) => removalSelection = event.currentTarget.checked ? deletedItems.map(item => item.id) : []} />Select page</label>{#if removalSelection.length}<span>{removalSelection.length} selected</span><Button variant="destructive" size="sm" disabled={removalBlocked} aria-busy={removalPreparing === 'selected'} onclick={(event) => prepareRemoval(false, event.currentTarget)}>{removalPreparing === 'selected' ? 'Preparing…' : 'Remove permanently'}</Button>{/if}</div>{/if}
               {#if trashNotice}<p role="status">{trashNotice}</p>{/if}
               {#if trashError}<p role="alert">{trashError}</p>{#if trashRetry}<Button id="trash-page-retry" variant="outline" class="justify-self-start" disabled={trashLoading || trashBusy} aria-busy={trashPaging === 'retry' && trashLoading} onclick={() => pageTrash('retry')}>{trashPaging === 'retry' && trashLoading ? 'Retrying…' : 'Try again'}</Button>{/if}{/if}
               {#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}
@@ -2433,9 +2549,9 @@
                 <ul role="rowgroup">
                   {#each deletedItems as item (item.id)}
                     <li class="trash-row" role="row" aria-label={item.name}>
-                      <span role="cell" class="trash-kind" class:folder-icon={item.kind === 'folder'} aria-label={item.kind}><span aria-hidden="true">{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span></span>
+                      <span role="cell" class="trash-kind" class:folder-icon={item.kind === 'folder'}><label><input type="checkbox" aria-label={`Select ${item.name}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}`} disabled={removalBlocked} checked={removalSelection.includes(item.id)} onchange={(event) => removalSelection = event.currentTarget.checked ? [...removalSelection, item.id] : removalSelection.filter(id => id !== item.id)} /></label><span aria-label={item.kind}>{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span></span>
                       <span role="cell" class="trash-item"><span class="trash-name">{item.name}</span><span class="trash-metadata" aria-hidden="true">{@render modifiedDateLabel(item)} · {typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span></span><span role="cell" class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span><span role="cell" class="file-modified">{@render modifiedDateLabel(item)}</span><span role="cell" class="file-size">{typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
-                      <div role="cell" class="trash-actions"><Button variant="outline" size="sm" disabled={trashBusy || trashLoading || !!namespaceUnknown} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button></div>
+                      <div role="cell" class="trash-actions"><Button variant="outline" size="sm" disabled={removalBlocked} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button></div>
                     </li>
                   {/each}
                 </ul>
@@ -2574,6 +2690,12 @@
       <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); const choose = document.getElementById('choose-file') as HTMLButtonElement | null; restoreFocus(choose && !choose.disabled ? choose : null); }}>
         <Dialog.Header><Dialog.Title>Replace {replacementPrompt?.target.name}?</Dialog.Title><Dialog.Description>A file with this name already exists in {replacementPrompt?.folder.name}. The previous file will move to trash and stay there until restored. Rename the current file before restoring it. If this upload fails or is canceled before saving, the previous file stays unchanged.</Dialog.Description></Dialog.Header>
         <Dialog.Footer><Button variant="outline" onclick={dismissReplacement}>Keep existing file</Button><Button onclick={confirmReplacement}>Replace file</Button></Dialog.Footer>
+      </Dialog.Content>
+    </Dialog.Root>
+    <Dialog.Root open={!!removalPreview} onOpenChange={(open) => { if (!open && !removalSubmitting) removalPreview = null; }}>
+      <Dialog.Content showCloseButton={!removalSubmitting} aria-busy={removalSubmitting} onEscapeKeydown={(event) => { if (removalSubmitting) event.preventDefault(); }} onInteractOutside={(event) => { if (removalSubmitting) event.preventDefault(); }} onOpenAutoFocus={(event) => { event.preventDefault(); document.getElementById('cancel-removal')?.focus(); }} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(removalTrigger, 'trash-heading'); removalTrigger = null; }}>
+        <Dialog.Header><Dialog.Title>Remove {removalPreview?.count} {removalPreview?.count === 1 ? 'item' : 'items'} permanently?</Dialog.Title><Dialog.Description>The count is for Trash items. Folders include their contents, which are not counted separately. Removal cannot be undone. {#if !removalPreview?.all}Items already in Trash inside a folder stay there unless selected separately.{/if}</Dialog.Description></Dialog.Header>
+        <Dialog.Footer><Button id="cancel-removal" variant="outline" disabled={removalSubmitting} onclick={() => removalPreview = null}>Cancel</Button><Button variant="destructive" disabled={removalSubmitting} aria-busy={removalSubmitting} onclick={confirmRemoval}>{removalSubmitting ? 'Removing…' : 'Remove permanently'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!trashTarget} onOpenChange={(open) => { if (!open && !trashBusy) trashTarget = null; }}>

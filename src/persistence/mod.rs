@@ -1,5 +1,6 @@
 //! Local persistence foundation for root binding and SQLite workers.
 
+pub mod cleanup;
 pub mod instance;
 pub mod ownership;
 pub mod payload;

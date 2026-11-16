@@ -177,7 +177,7 @@ fn migration_applies_once_is_idempotent_and_refuses_inconsistent_state() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, schema::SUPPORTED_SCHEMA_VERSION);
     schema::verify_core_schema(&connection).unwrap();
     drop(connection);
 
@@ -820,5 +820,110 @@ fn valid_seed_passes_product_recovery_checks() {
         .unwrap();
     assert_eq!(foreign_key_rows, 0);
     drop(connection);
+    cleanup(owner);
+}
+
+#[test]
+fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication() {
+    use sylux::persistence::root;
+    for interrupted in [false, true] {
+        let (owner, path) = fixture(if interrupted {
+            "legacy-interrupted"
+        } else {
+            "legacy-upgrade"
+        });
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(path.parent().unwrap()).unwrap();
+        let product = owner.path().join("product");
+        fs::DirBuilder::new().mode(0o700).create(&product).unwrap();
+        let path = product.join("metadata/sylux.sqlite3");
+        let initialized = root::initialize_empty_root(&product, BUSY).unwrap();
+        let mut legacy = initialized.identity;
+        legacy.schema_version = 1;
+        fs::write(
+            product.join(root::MANIFEST_NAME),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        let db = sqlite::open_writer(&path, BUSY).unwrap();
+        db.execute_batch(schema::MIGRATION_0001_S1).unwrap();
+        schema::insert_installation_row(&db, &legacy, digest()).unwrap();
+        insert_account(&db, &id(10), "owner-a", "user");
+        insert_root(&db, &id(20), &id(10));
+        if interrupted {
+            use sha2::{Digest, Sha256};
+            let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
+            schema::migrate_v1(&db, Some(hash.as_slice())).unwrap();
+        }
+        drop(db);
+        let bound = root::open_bound_database(&product, BUSY).unwrap();
+        let upgraded = root::upgrade_binding(&bound, &product, &legacy).unwrap();
+        assert_eq!(upgraded.schema_version, 2);
+        assert_eq!(root::read_manifest(&product).unwrap(), upgraded);
+        root::verify_binding(&bound, &product, &upgraded).unwrap();
+        assert_eq!(
+            bound
+                .connection
+                .query_row("SELECT count(*) FROM account", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            root::upgrade_binding(&bound, &product, &upgraded).unwrap(),
+            upgraded
+        );
+        drop(bound);
+        cleanup(owner);
+    }
+}
+
+#[test]
+fn legacy_binding_transition_rejects_unrecorded_or_foreign_manifest() {
+    use sylux::persistence::root;
+    let (owner, path) = fixture("legacy-foreign");
+    fs::remove_file(&path).unwrap();
+    fs::remove_dir(path.parent().unwrap()).unwrap();
+    let product = owner.path().join("product");
+    fs::DirBuilder::new().mode(0o700).create(&product).unwrap();
+    let initialized = root::initialize_empty_root(&product, BUSY).unwrap();
+    let mut legacy = initialized.identity;
+    legacy.schema_version = 1;
+    let bound = root::open_bound_database(&product, BUSY).unwrap();
+    assert!(
+        root::upgrade_binding(&bound, &product, &legacy).is_err(),
+        "v2 database without the committed transition must not accept a v1 manifest"
+    );
+    drop(bound);
+    cleanup(owner);
+}
+
+#[test]
+fn unbound_v1_migration_fails_without_writing_a_partial_transition() {
+    let (owner, path) = fixture("unbound-v1");
+    let db = sqlite::open_writer(&path, BUSY).unwrap();
+    db.execute_batch(schema::MIGRATION_0001_S1).unwrap();
+    assert!(schema::apply_migrations(&db).is_err());
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='removal'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    drop(db);
     cleanup(owner);
 }
