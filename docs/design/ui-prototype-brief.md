@@ -20,7 +20,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 ## Prototype scope
 
-- Separate static application under `prototypes/ui-review/`, served only from that directory.
+- Separate static application, served only from its own directory. Retired and removed from the repo; see git history before SYL-94.
 - Connected sign-in, Files, nested folders, Trash, Account, administrator Accounts and Instance Settings.
 - Representative synthetic file/account data; no real backend or credential storage.
 - Folder creation, preview, row menu actions, trash/restore and simulated account dialogs are reviewable.
