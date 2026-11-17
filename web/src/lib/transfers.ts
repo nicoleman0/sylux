@@ -19,7 +19,7 @@ const IDENTITY_CHUNK = 8 * 1024 * 1024;
 const digestHex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
 export type FileIdentity = { name: string; size: number; fingerprint: string };
 type AdmissionBody = { parent_id: string; parent_etag: string; name: string; length: number; replacement?: Replacement };
-export type UploadJournal = { version: 1; owner: string; id: string; ticket: string; body: AdmissionBody; identity: FileIdentity; expires: number; chunkSize: number; commitStarted?: boolean };
+export type UploadJournal = { version: 1; owner: string; id: string; ticket: string; body: AdmissionBody; identity: FileIdentity; expires: number; chunkSize: number; commitStarted?: boolean; stagedSha256?: string };
 
 // Every byte participates, using at most one file slice and a bounded list of digests.
 export async function identifyFile(file: File, signal?: AbortSignal, progress?: (read: number, total: number) => void): Promise<FileIdentity> {
@@ -32,6 +32,12 @@ export async function identifyFile(file: File, signal?: AbortSignal, progress?: 
   }
   signal?.throwIfAborted();
   return { name: file.name, size: file.size, fingerprint: digestHex(await crypto.subtle.digest('SHA-256', hashes)) };
+}
+
+// The commit handler returns these only after rolling back, so no save happened.
+export function saveRefused(error: unknown): error is HttpError {
+  return error instanceof HttpError && ((error.status === 409 && error.code === 'name_collision') ||
+    (error.status === 412 && (error.code === 'replacement_changed' || error.code === 'stale_parent_etag')));
 }
 
 export class TransferApi {
@@ -48,7 +54,8 @@ export class TransferApi {
     if (value.version !== 1 || value.owner !== owner || !/^[a-f0-9]{32}$/.test(value.id) || typeof value.ticket !== 'string' ||
       !value.body || !value.identity || value.identity.name !== value.body.name || value.identity.size !== value.body.length ||
       !Number.isSafeInteger(value.body.length) || value.body.length < 0 || !/^[a-f0-9]{64}$/.test(value.identity.fingerprint) ||
-      (value.commitStarted !== undefined && typeof value.commitStarted !== 'boolean') || !Number.isSafeInteger(value.expires) || !Number.isSafeInteger(value.chunkSize) || value.chunkSize <= 0 || value.chunkSize > IDENTITY_CHUNK) {
+      (value.commitStarted !== undefined && typeof value.commitStarted !== 'boolean') ||
+      (value.stagedSha256 !== undefined && !/^[a-f0-9]{64}$/.test(value.stagedSha256)) || !Number.isSafeInteger(value.expires) || !Number.isSafeInteger(value.chunkSize) || value.chunkSize <= 0 || value.chunkSize > IDENTITY_CHUNK) {
       throw new Error('The retained upload record is invalid.');
     }
     this.journal = value;
@@ -58,6 +65,14 @@ export class TransferApi {
   }
   pending(): UploadJournal | null { return this.journal; }
   canCommit(uploadId: string): boolean { return this.journal?.id !== uploadId || this.journal.commitStarted !== true; }
+  expired(uploadId: string): boolean { return this.journal?.id === uploadId && this.journal.expires <= Date.now() / 1000; }
+  assertUnexpired(uploadId: string): void {
+    if (this.expired(uploadId)) throw new Error('The 24-hour upload window has expired. Check its status, then start a new upload after this attempt is resolved.');
+  }
+  private stage(uploadId: string, sha256: string): void {
+    this.stagedDigests.set(uploadId, sha256);
+    if (this.journal?.id === uploadId) this.retain({ ...this.journal, stagedSha256: sha256 });
+  }
   private retain(value: UploadJournal): void {
     if (!this.owner) throw new Error('Upload recovery needs a signed-in account.');
     try { sessionStorage.setItem(this.key(), JSON.stringify(value)); }
@@ -96,18 +111,18 @@ export class TransferApi {
     this.ensureActive();
     return { id: ticket.mutation_id, status_url: `/uploads/${encodeURIComponent(ticket.mutation_id)}` };
   }
-  async send(uploadId: string, bytes: Blob, signal?: AbortSignal, onProgress?: (sent: number, total: number) => void): Promise<UploadContentResult> {
+  async send(uploadId: string, bytes: Blob, signal?: AbortSignal, onProgress?: (sent: number, total: number) => void, onPending?: (message: string) => void): Promise<UploadContentResult> {
     this.ensureActive();
     const ticket = this.tickets.get(uploadId);
     if (!ticket) throw new Error('No active mutation ticket for this upload');
-    let state = await this.status(uploadId);
-    if (state.writer_active) throw new Error('The server is still receiving this upload. Check again shortly.');
+    this.assertUnexpired(uploadId);
+    let state = await this.waitForWriter(uploadId, signal, onPending);
     if (state.state === 'committed' || state.state === 'rejected') throw new Error('This upload is already finished. Check its status.');
     let offset = state.bytes_received;
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > bytes.size) throw new Error('Invalid upload offset');
     onProgress?.(offset, bytes.size);
     if (state.status === 'staged' && state.sha256) {
-      this.stagedDigests.set(uploadId, state.sha256);
+      this.stage(uploadId, state.sha256);
       return { upload_id: uploadId, mutation_id: uploadId, status: 'staged', length: bytes.size, sha256: state.sha256, published: false };
     }
     const chunkSize = this.journal?.chunkSize;
@@ -128,14 +143,16 @@ export class TransferApi {
           break;
         } catch (error) {
           signal?.throwIfAborted(); this.ensureActive();
-          if (error instanceof HttpError && error.status !== 409 && error.status < 500) throw error;
+          // Timeouts, shutdowns and conflicts leave the acknowledged offset in place; status decides where to continue.
+          if (error instanceof HttpError && (error.code === 'upload_canceled' || (error.status !== 408 && error.status !== 409 && error.status < 500))) throw error;
           if (++retries > 3) throw error;
-          await new Promise(resolve => setTimeout(resolve, 500 * retries));
-          state = await this.status(uploadId);
-          if (state.writer_active) continue;
+          await this.pause(500 * retries, signal);
+          state = await this.waitForWriter(uploadId, signal, onPending);
+          this.assertUnexpired(uploadId);
           if (state.bytes_received === offset + chunk.size) {
             if (state.status === 'staged' && state.sha256) result = { upload_id: uploadId, mutation_id: uploadId, status: 'staged', length: bytes.size, sha256: state.sha256, published: false };
-            else result = undefined;
+            else if (state.state === 'admitted') result = undefined;
+            else throw new Error('Upload state changed. Check its status before continuing.');
             break;
           }
           if (state.state !== 'admitted' || state.bytes_received !== offset) throw new Error('Upload state changed. Check its status before continuing.');
@@ -145,22 +162,79 @@ export class TransferApi {
       if (result && (result.upload_id !== uploadId || result.mutation_id !== uploadId || result.published !== false)) throw new Error('Invalid upload checkpoint');
       offset += chunk.size;
       onProgress?.(offset, bytes.size);
-    } while (offset < bytes.size);
+    } while (offset < bytes.size || !result);
     if (!result || result.upload_id !== uploadId || result.mutation_id !== uploadId || result.length !== bytes.size || result.published !== false || !/^[a-f0-9]{64}$/.test(result.sha256) || result.status !== 'staged') throw new Error('Invalid staged upload response');
-    this.stagedDigests.set(uploadId, result.sha256);
+    this.stage(uploadId, result.sha256);
     return result;
   }
+  private async waitForWriter(uploadId: string, signal?: AbortSignal, onPending?: (message: string) => void): Promise<UploadStatus> {
+    let failures = 0;
+    // Covers a proxy timeout during final verification without resending private bytes.
+    for (let polls = 0; polls < 120; polls++) {
+      this.ensureActive(); signal?.throwIfAborted();
+      let state: UploadStatus;
+      try { state = await this.status(uploadId, signal); }
+      catch (error) {
+        this.ensureActive(); signal?.throwIfAborted();
+        if (error instanceof HttpError && error.status < 500 || ++failures > 3) throw error;
+        onPending?.('Connection interrupted. Checking the saved upload offset…');
+        await this.pause(500 * failures, signal);
+        continue;
+      }
+      if (!state.writer_active) return state;
+      onPending?.('The server is receiving or verifying this upload. Waiting for its saved status…');
+      await this.pause(1000, signal);
+    }
+    throw new Error('The server is still receiving or verifying this upload. Check its status shortly; its bytes remain private.');
+  }
+  private async pause(milliseconds: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(signal?.reason ?? new DOMException('Upload aborted', 'AbortError')); };
+      const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, milliseconds);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+    this.ensureActive(); signal?.throwIfAborted();
+  }
   async commit(uploadId: string, sha256 = this.stagedDigests.get(uploadId) ?? ''): Promise<unknown> {
+    if (!this.canCommit(uploadId)) throw new Error('Saving is unconfirmed. Check the original upload status.');
+    return this.save(uploadId, sha256);
+  }
+  // The same staged upload may be saved after status shows no writer; it never re-sends bytes or admits again.
+  finishable(uploadId: string, state: UploadStatus): boolean {
+    const length = this.admissions.get(uploadId)?.body.length;
+    const known = this.journal?.id === uploadId ? this.journal.stagedSha256 : this.stagedDigests.get(uploadId);
+    return length !== undefined && state.upload_id === uploadId && state.mutation_id === uploadId &&
+      state.state === 'publishing' && state.status === 'staged' && !state.writer_active &&
+      state.length === length && state.bytes_received === length && !!state.sha256 && /^[a-f0-9]{64}$/.test(state.sha256) &&
+      (!known || known === state.sha256);
+  }
+  async finish(uploadId: string): Promise<unknown> {
+    this.ensureActive(); this.assertUnexpired(uploadId);
+    const state = await this.status(uploadId);
     this.ensureActive();
+    if (!this.finishable(uploadId, state)) throw new Error('The original upload is no longer ready to save. Check its status before continuing.');
+    this.stage(uploadId, state.sha256!);
+    return this.save(uploadId, state.sha256!);
+  }
+  private async save(uploadId: string, sha256: string): Promise<unknown> {
+    this.ensureActive(); this.assertUnexpired(uploadId);
     const ticket = this.tickets.get(uploadId);
     const parent_etag = this.parentEtags.get(uploadId);
     if (!ticket || !parent_etag) throw new Error('No active mutation ticket for this upload');
     if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('Invalid staged content digest');
-    if (!this.canCommit(uploadId)) throw new Error('Saving is unconfirmed. Check the original upload status.');
     if (this.journal?.id === uploadId) this.retain({ ...this.journal, commitStarted: true });
-    const result = await this.client.request(`/uploads/${encodeURIComponent(uploadId)}/commit`, {
-      method: 'POST', headers: { ...this.precondition(this.admissions.get(uploadId)?.body.replacement), 'X-Mutation-ID': ticket }, body: { sha256, parent_etag },
-    });
+    let result: unknown;
+    try {
+      result = await this.client.request(`/uploads/${encodeURIComponent(uploadId)}/commit`, {
+        method: 'POST', headers: { ...this.precondition(this.admissions.get(uploadId)?.body.replacement), 'X-Mutation-ID': ticket }, body: { sha256, parent_etag },
+      });
+    } catch (error) {
+      if (saveRefused(error) && this.journal?.id === uploadId) {
+        this.retain({ ...this.journal, commitStarted: false });
+      }
+      throw error;
+    }
     this.ensureActive();
     if (this.journal?.id === uploadId) this.clearRecovery();
     this.tickets.delete(uploadId);
@@ -169,9 +243,9 @@ export class TransferApi {
     this.admissions.delete(uploadId);
     return result;
   }
-  status(uploadId: string): Promise<UploadStatus> {
+  status(uploadId: string, signal?: AbortSignal): Promise<UploadStatus> {
     this.ensureActive();
-    return this.client.request(`/uploads/${encodeURIComponent(uploadId)}`);
+    return this.client.request(`/uploads/${encodeURIComponent(uploadId)}`, { signal });
   }
   async retryAdmission(uploadId: string): Promise<void> {
     this.ensureActive();

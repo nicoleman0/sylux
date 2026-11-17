@@ -495,7 +495,7 @@ export class MockTransport implements ApiTransport {
       const committed: UploadStatus = { ...previous, state: 'committed', status: 'committed' };
       if (details.replacement) {
         const existing = this.entries.find((entry) => entry.id === details.replacement?.entry_id);
-        if (!existing || existing.etag !== details.replacement.etag) throw new HttpError(412);
+        if (!existing || existing.etag !== details.replacement.etag) throw this.removalError(412, 'replacement_changed');
         this.entries = this.entries.filter((entry) => entry.id !== existing.id);
         this.deletedEntries = [...this.deletedEntries, existing];
       }

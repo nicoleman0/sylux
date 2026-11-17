@@ -22,6 +22,17 @@ let browser: Browser;
 let context: BrowserContext;
 let page: Page;
 
+// Each 32-byte block is SHA-256 of its index, so a misplaced or replayed chunk changes the digest.
+function patterned(length: number): Buffer {
+  const bytes = Buffer.alloc(length);
+  const counter = Buffer.alloc(8);
+  for (let block = 0; block * 32 < length; block++) {
+    counter.writeBigUInt64LE(BigInt(block));
+    createHash('sha256').update(counter).digest().copy(bytes, block * 32);
+  }
+  return bytes;
+}
+
 async function signIn(): Promise<void> {
   await page.goto(origin);
   await page.getByLabel('Account name').fill(fixtures.handle);
@@ -432,8 +443,9 @@ test('lost commit response is resolved through the original upload status', { an
   await expect.poll(() => statusLookups.at(-1)).toBe(`/uploads/${admittedId}`);
   await expect(page.getByRole('button', { name: 'Check upload status' })).toBeVisible();
   await page.getByRole('button', { name: 'Check upload status' }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Upload is admitted or still processing' })).toBeVisible();
-  await expect(admissionWarning).toBeVisible();
+  // Status shows the admission exists with no bytes; it is resumed from the original file, never re-admitted.
+  await expect(page.getByRole('alert').filter({ hasText: 'Upload paused' })).toBeVisible();
+  await expect(page.getByRole('alert').getByText('Select the original file to resume', { exact: false })).toBeVisible();
   await expect(page.locator('#upload-file')).toBeDisabled();
   expect(ticketRequests).toBe(1);
   expect(admissionRequests).toBe(1);
@@ -467,7 +479,7 @@ test('reload resumes real private chunks after matching file reselect', { annota
   test.setTimeout(60_000);
   await signIn();
   const name = `resume-${phase}.bin`;
-  const original = Buffer.alloc(16 * 1024 * 1024 + 4096, 0x51);
+  const original = patterned(16 * 1024 * 1024 + 4096);
   let paused = true;
   const offsets: number[] = [];
   await page.route('**/uploads/*/content', async route => {
@@ -489,9 +501,12 @@ test('reload resumes real private chunks after matching file reselect', { annota
   await signIn();
   await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Select original file', exact: true })).toBeVisible();
-  const wrong = Buffer.from(original); wrong[9 * 1024 * 1024] = 0x52;
-  await page.getByLabel('Original upload file', { exact: true }).setInputFiles({ name, mimeType: 'application/octet-stream', buffer: wrong });
-  await expect(page.getByText('This file does not match the original upload.', { exact: false })).toBeVisible();
+  const changed = Buffer.from(original); changed[9 * 1024 * 1024] ^= 0xff;
+  const reordered = Buffer.concat([original.subarray(8 * 1024 * 1024, 16 * 1024 * 1024), original.subarray(0, 8 * 1024 * 1024), original.subarray(16 * 1024 * 1024)]);
+  for (const wrong of [changed, reordered]) {
+    await page.getByLabel('Original upload file', { exact: true }).setInputFiles({ name, mimeType: 'application/octet-stream', buffer: wrong });
+    await expect(page.getByText('This file does not match the original upload.', { exact: false })).toBeVisible();
+  }
   paused = false;
   await page.getByLabel('Original upload file', { exact: true }).setInputFiles({ name, mimeType: 'application/octet-stream', buffer: original });
   const row = page.getByRole('row', { name, exact: true });
