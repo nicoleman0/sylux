@@ -220,7 +220,8 @@ test('Unicode, zero-byte, and binary files round-trip through real upload and do
     Object.defineProperty(window, '__s1LargeBlobReads', { configurable: true, writable: true, value: 0 });
     const original = Blob.prototype.arrayBuffer;
     Blob.prototype.arrayBuffer = function() {
-      if (this.size > 64 * 1024) {
+      // Uploads read bounded slices for hashing; no read may exceed the 8 MiB chunk limit.
+      if (this.size > 8 * 1024 * 1024) {
         (window as unknown as { __s1LargeBlobReads: number }).__s1LargeBlobReads += 1;
       }
       return original.call(this);
@@ -338,7 +339,8 @@ test('lost commit response is resolved through the original upload status', { an
     const request = route.request();
     const target = new URL(request.url());
     if (request.method() === 'GET' && /^\/uploads\/[A-Za-z0-9-]+$/.test(target.pathname)) statusLookups.push(target.pathname);
-    if (!firstStatusLookupFailed && request.method() === 'GET' && /^\/uploads\/[A-Za-z0-9-]+$/.test(target.pathname)) {
+    // Fail the outcome check after the lost commit reply, not the status read before sending.
+    if (dropped && !firstStatusLookupFailed && request.method() === 'GET' && /^\/uploads\/[A-Za-z0-9-]+$/.test(target.pathname)) {
       firstStatusLookupFailed = true;
       await route.abort('failed');
       return;
@@ -499,6 +501,15 @@ test('reload resumes real private chunks after matching file reselect', { annota
   }).toBe(8 * 1024 * 1024);
   await page.reload();
   await signIn();
+  await page.evaluate(() => {
+    Object.defineProperty(window, '__s1MaxBlobRead', { configurable: true, writable: true, value: 0 });
+    const original = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = function() {
+      const state = window as unknown as { __s1MaxBlobRead: number };
+      state.__s1MaxBlobRead = Math.max(state.__s1MaxBlobRead, this.size);
+      return original.call(this);
+    };
+  });
   await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Select original file', exact: true })).toBeVisible();
   const changed = Buffer.from(original); changed[9 * 1024 * 1024] ^= 0xff;
@@ -512,6 +523,10 @@ test('reload resumes real private chunks after matching file reselect', { annota
   const row = page.getByRole('row', { name, exact: true });
   await expect(row).toBeVisible({ timeout: 20_000 });
   expect(offsets.filter(offset => offset === 0)).toHaveLength(1);
+  // Reselect hashing and resumed chunks read the 16 MiB file in bounded slices.
+  const maxRead = await page.evaluate(() => (window as unknown as { __s1MaxBlobRead: number }).__s1MaxBlobRead);
+  expect(maxRead).toBeGreaterThan(0);
+  expect(maxRead).toBeLessThanOrEqual(8 * 1024 * 1024);
   // The list API resolves the final entry; the browser remains on the same authenticated origin.
   const listing = await page.evaluate(async () => await (await fetch('/folders/children')).json());
   const entry = listing.items.find((item: { name: string }) => item.name === name);
