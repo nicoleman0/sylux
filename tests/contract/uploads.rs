@@ -4694,6 +4694,132 @@ async fn staged_then_canceled_payloads_are_reclaimed_after_rejection_commits() {
     fixture.close().await;
 }
 
+/// Final payload path from the attempt's staging name, which stays valid
+/// when no completed length was recorded.
+fn payload_at(fixture: &Fixture, id: &str) -> PathBuf {
+    let name: String = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT staging_path FROM upload_attempt WHERE mutation_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let blob = &name[33..];
+    fixture.product.join("payloads").join(&blob[..2]).join(blob)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_canceled_between_publish_and_completion_is_still_reclaimed() {
+    let barrier = Arc::new(UploadCancelTestBarrier::default());
+    let fixture =
+        Fixture::new_with_cancel_barrier("reclaim-put-race", Some(Arc::clone(&barrier))).await;
+    let auth = owner_auth();
+    let bytes = b"published, then canceled before completion".to_vec();
+    let (id, ticket) = fixture
+        .admit(&auth, OWNER_ROOT, 1, "race.bin", &bytes)
+        .await;
+    barrier.arm_publish_pause();
+    let put_path = format!("/uploads/{id}/content");
+    let put_headers = [("Content-Type", "application/octet-stream".to_owned())];
+    let put = fixture.mutate("PUT", &put_path, &auth, Some(&ticket), &put_headers, bytes);
+    let mut put = Box::pin(put);
+    tokio::select! {
+        response = &mut put => panic!("PUT finished before the pause: {}", response.status),
+        () = async {
+            tokio::time::timeout(Duration::from_secs(5), barrier.wait_publish_paused())
+                .await
+                .expect("publish pause timed out");
+        } => {}
+    }
+    let payload = payload_at(&fixture, &id);
+    assert!(payload.exists(), "payload is published before the pause");
+    let cancel = fixture.cancel(&id);
+    let mut cancel = Box::pin(cancel);
+    let committed = async {
+        loop {
+            if fixture.count(&format!(
+                "SELECT count(*) FROM mutation WHERE mutation_id='{id}' AND state='rejected'"
+            )) == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        response = &mut cancel => panic!("cancel returned before the writer finished: {}", response.status),
+        result = tokio::time::timeout(Duration::from_secs(5), committed) => {
+            result.expect("cancel never committed");
+        }
+    }
+    barrier.release_publish();
+    assert_eq!(put.await.status, 409);
+    assert_eq!(cancel.await.status, 204);
+    assert_eq!(
+        fixture.count(&format!(
+            "SELECT count(*) FROM upload_attempt a JOIN mutation m USING(mutation_id) WHERE m.mutation_id='{id}' AND a.completed_length IS NOT NULL AND a.completed_length=m.completed_length AND a.completed_sha256=m.completed_sha256"
+        )),
+        1,
+        "the canceled publication records its length and digest"
+    );
+    assert!(payload.exists());
+    let storage = fixture.storage.clone().unwrap();
+    assert_eq!(fixture.reclaim(storage.clone()).await, Ok(1));
+    assert!(!payload.exists());
+    assert_eq!(fixture.reclaimed_markers(), 1);
+    assert_eq!(fixture.reclaim(storage).await, Ok(0));
+    let report = sylux::persistence::reconcile::reconcile(
+        fixture.workers.as_ref().unwrap(),
+        &fixture.product,
+    )
+    .await
+    .unwrap();
+    assert!(report.ready, "{report:?}");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_staging_path_is_reported_without_starving_other_payloads() {
+    let fixture = Fixture::new("reclaim-malformed").await;
+    let (bad, _, _) = fixture
+        .stage("bad.bin", b"row with an untrusted path")
+        .await;
+    let (good, _, _) = fixture
+        .stage("good.bin", b"row that must be reclaimed")
+        .await;
+    let good_payload = fixture.final_payload(&good);
+    for id in [&bad, &good] {
+        assert_eq!(fixture.cancel(id).await.status, 204);
+    }
+    let corrupted = format!("{}-{}", "a".repeat(32), "Z".repeat(32));
+    assert_eq!(corrupted.len(), 65);
+    fixture
+        .db()
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE upload_attempt SET attempt_id=?2,staging_path=?3 WHERE mutation_id=?1",
+            rusqlite::params![bad, "a".repeat(32), corrupted],
+        )
+        .unwrap();
+    let storage = fixture.storage.clone().unwrap();
+    let mut cursor = String::new();
+    let result = sylux::domain::upload::reclaim_canceled_payloads(
+        fixture.workers.as_ref().unwrap(),
+        storage.clone(),
+        &mut cursor,
+    )
+    .await;
+    assert_eq!(result, Err("payload_reclaim_malformed_path"));
+    assert!(!good_payload.exists(), "the valid row is not starved");
+    assert!(!cursor.is_empty(), "the cursor moves past the bad row");
+    assert_eq!(fixture.reclaimed_markers(), 1);
+    fixture.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn payload_reclaim_keeps_committed_uncertain_recovery_and_referenced_payloads() {
     use std::sync::atomic::{AtomicBool, Ordering};

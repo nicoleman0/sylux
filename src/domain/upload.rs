@@ -621,10 +621,9 @@ pub async fn reclaim_canceled_payloads(
         .read(move |db| CanceledPayload::page(db, &cursor, 32))
         .await
         .map_err(|_| "payload_reclaim_database_unavailable")?;
-    let next = page
-        .last()
-        .map(|payload| payload.attempt_id().to_owned())
-        .unwrap_or_default();
+    let next = page.last.unwrap_or_default();
+    let malformed = page.malformed;
+    let page = page.payloads;
     let (removed, failed) = tokio::task::spawn_blocking(move || {
         let mut removed = Vec::new();
         let mut failed = false;
@@ -674,6 +673,10 @@ pub async fn reclaim_canceled_payloads(
     *after = next;
     if failed {
         return Err("payload_reclaim_failed");
+    }
+    // Skipped, not unlinked: reconciliation refuses readiness for these rows.
+    if malformed != 0 {
+        return Err("payload_reclaim_malformed_path");
     }
     Ok(count)
 }

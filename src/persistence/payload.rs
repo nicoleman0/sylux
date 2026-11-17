@@ -425,6 +425,13 @@ pub(crate) struct CanceledPayload {
     length: u64,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct CanceledPage {
+    pub payloads: Vec<CanceledPayload>,
+    pub malformed: usize,
+    pub last: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CanceledUnlink {
     Removed,
@@ -434,7 +441,10 @@ pub(crate) enum CanceledUnlink {
 
 impl CanceledPayload {
     /// One keyset page of attempts whose final payload the rule authorizes.
-    pub fn page(db: &Connection, after: &str, limit: i64) -> rusqlite::Result<Vec<Self>> {
+    /// A row whose path or length cannot be trusted is counted in `malformed`
+    /// and never unlinked. `last` is the final row seen, so the cursor moves
+    /// past it and later rows are not starved.
+    pub fn page(db: &Connection, after: &str, limit: i64) -> rusqlite::Result<CanceledPage> {
         let mut statement = db.prepare(&format!(
             "SELECT a.attempt_id,a.mutation_id,a.staging_path,a.completed_length {CANCELED_PAYLOAD_RULE} AND a.attempt_id>?1 ORDER BY a.attempt_id LIMIT ?2"
         ))?;
@@ -446,16 +456,19 @@ impl CanceledPayload {
                 row.get::<_, i64>(3)?,
             ))
         })?;
-        let mut page = Vec::new();
+        let mut page = CanceledPage::default();
         for row in rows {
             let (attempt_id, mutation_id, staging_name, length) = row?;
+            page.last = Some(attempt_id.clone());
             // Reconciliation refuses these rows; never guess a path to unlink.
-            let blob_id = staging_ids(&staging_name)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?
-                .1
-                .to_owned();
-            let length = u64::try_from(length).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            page.push(Self {
+            let (Ok((_, blob_id)), Ok(length)) =
+                (staging_ids(&staging_name), u64::try_from(length))
+            else {
+                page.malformed += 1;
+                continue;
+            };
+            let blob_id = blob_id.to_owned();
+            page.payloads.push(Self {
                 attempt_id,
                 mutation_id,
                 staging_name,
