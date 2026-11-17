@@ -31,11 +31,13 @@ The browser refuses to send, resume or commit once the retained ticket's expiry 
 
 A bounded sweep starts when the service begins serving and runs every minute, visiting at most 32 eligible attempts per pass with a cursor. It rejects expired admitted work, unlinks its private partial staging file, then records a durable `partial-cleaned` marker on the attempt so later passes skip it. Failed cleanup is retried on a later sweep. A large backlog can take multiple passes. Startup reconciliation clears interrupted writer state before serving.
 
+The same sweep reclaims the published payload of a staged upload canceled before commit, after the rejection commits. The rule requires a `rejected` mutation with no result, a completed attempt with outcome `canceled`, no active or registered writer and no `blob` row for the payload. After the unlink and directory sync it records a durable `payload-reclaimed` marker.
+
 What is kept:
 
 - Active writers, committed results and completed candidates are outside partial cleanup.
 - A fully staged or uncertain publication candidate stays for reconciliation and is not exposed as a file.
-- A staged upload that is later rejected, for example canceled before commit, keeps its staged payload. No cleanup rule exists for it yet.
+- A canceled upload whose body never left staging, a canceled recovery-required attempt and a staged upload rejected by expiry but never canceled keep their bytes.
 
 ## Verification
 

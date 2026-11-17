@@ -1,5 +1,6 @@
 //! Private resumable staging and create-only final payload publication.
 
+use rusqlite::{Connection, params};
 use rustix::fs::{self, FileType, Mode, OFlags, RenameFlags};
 use sha2::{Digest, Sha256};
 use std::{
@@ -121,11 +122,31 @@ impl PayloadStore {
 
     /// The caller must hold durable removal authorization and exclude retained references.
     pub(crate) fn unlink_authorized(&self, blob_id: &str) -> Result<(), PayloadError> {
-        self.unlink_final(blob_id)
+        self.unlink_final(blob_id, None)
+    }
+
+    /// Unlink a canceled upload's final payload. A body still in staging never
+    /// finished publication and is left in place.
+    pub(crate) fn unlink_canceled(
+        &self,
+        payload: &CanceledPayload,
+    ) -> Result<CanceledUnlink, PayloadError> {
+        staging_ids(&payload.staging_name)?;
+        match fs::statat(
+            &self.staging,
+            payload.staging_name.as_str(),
+            fs::AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(_) => return Ok(CanceledUnlink::Unpublished),
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => return Err(PayloadError::Io("staging_stat_failed")),
+        }
+        self.unlink_final(&payload.blob_id, Some(payload.length))?;
+        Ok(CanceledUnlink::Removed)
     }
 
     /// Durably unlink one private final payload; an absent file is already done.
-    fn unlink_final(&self, blob_id: &str) -> Result<(), PayloadError> {
+    fn unlink_final(&self, blob_id: &str, length: Option<u64>) -> Result<(), PayloadError> {
         #[cfg(feature = "test-harness")]
         self.cleanup_boundary("cleanup.before_unlink")?;
         validate_id(blob_id)?;
@@ -142,6 +163,7 @@ impl PayloadStore {
                 if !FileType::from_raw_mode(stat.st_mode).is_file()
                     || stat.st_nlink != 1
                     || stat.st_mode & 0o777 != 0o600
+                    || length.is_some_and(|length| u64::try_from(stat.st_size).ok() != Some(length))
                 {
                     return Err(PayloadError::Integrity);
                 }
@@ -376,6 +398,95 @@ impl PayloadStore {
             file,
             length: expected_length,
         })
+    }
+}
+
+/// Deletion rule for the final payload of an upload canceled before commit.
+/// Cancel commits `rejected`, which is terminal, and only a `publishing`
+/// mutation can insert a blob row, so a payload matching every clause has no
+/// reference and can never gain one. Recovery-required attempts keep outcome
+/// `rejected` and committed or uncertain mutations are not `rejected`.
+const CANCELED_PAYLOAD_RULE: &str = "FROM upload_attempt a JOIN mutation m ON m.mutation_id=a.mutation_id \
+    WHERE m.state='rejected' AND m.result_revision_id IS NULL \
+    AND a.outcome='canceled' AND a.writer_active=0 \
+    AND a.completed_length=m.completed_length AND a.completed_sha256=m.completed_sha256 \
+    AND length(a.staging_path)=65 AND substr(a.staging_path,1,33)=a.attempt_id||'-' \
+    AND NOT EXISTS(SELECT 1 FROM upload_attempt w WHERE w.mutation_id=m.mutation_id AND w.writer_active=1) \
+    AND NOT EXISTS(SELECT 1 FROM blob b WHERE b.blob_id=substr(a.staging_path,34))";
+
+/// Authority to unlink one canceled upload's final payload. Only
+/// `CanceledPayload::page` creates it, from rows matching the deletion rule.
+#[derive(Debug)]
+pub(crate) struct CanceledPayload {
+    attempt_id: String,
+    mutation_id: String,
+    staging_name: String,
+    blob_id: String,
+    length: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanceledUnlink {
+    Removed,
+    /// The body is still in staging, so there is no final payload to remove.
+    Unpublished,
+}
+
+impl CanceledPayload {
+    /// One keyset page of attempts whose final payload the rule authorizes.
+    pub fn page(db: &Connection, after: &str, limit: i64) -> rusqlite::Result<Vec<Self>> {
+        let mut statement = db.prepare(&format!(
+            "SELECT a.attempt_id,a.mutation_id,a.staging_path,a.completed_length {CANCELED_PAYLOAD_RULE} AND a.attempt_id>?1 ORDER BY a.attempt_id LIMIT ?2"
+        ))?;
+        let rows = statement.query_map(params![after, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut page = Vec::new();
+        for row in rows {
+            let (attempt_id, mutation_id, staging_name, length) = row?;
+            // Reconciliation refuses these rows; never guess a path to unlink.
+            let blob_id = staging_ids(&staging_name)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?
+                .1
+                .to_owned();
+            let length = u64::try_from(length).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            page.push(Self {
+                attempt_id,
+                mutation_id,
+                staging_name,
+                blob_id,
+                length,
+            });
+        }
+        Ok(page)
+    }
+
+    /// Recheck the rule for this exact attempt and path.
+    pub fn still_authorized(&self, db: &Connection) -> rusqlite::Result<bool> {
+        db.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 {CANCELED_PAYLOAD_RULE} AND a.attempt_id=?1 AND a.staging_path=?2)"
+            ),
+            params![self.attempt_id, self.staging_name],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+
+    pub fn mutation_id(&self) -> &str {
+        &self.mutation_id
+    }
+
+    pub fn staging_name(&self) -> &str {
+        &self.staging_name
     }
 }
 
@@ -844,6 +955,51 @@ mod tests {
             store
                 .open_verified_unless(blob, bytes.len() as u64, digest, &cancelled)
                 .is_ok()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn canceled_unlink_skips_unpublished_bodies_and_checks_the_recorded_length() {
+        use super::{CanceledPayload, CanceledUnlink};
+        let root = root();
+        let store = PayloadStore::open(&root).unwrap();
+        let attempt = "0000000000000000000000000000000a";
+        let blob = "1000000000000000000000000000000a";
+        let bytes = b"canceled final payload";
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        let canceled = |length| CanceledPayload {
+            attempt_id: attempt.to_owned(),
+            mutation_id: "2000000000000000000000000000000a".to_owned(),
+            staging_name: format!("{attempt}-{blob}"),
+            blob_id: blob.to_owned(),
+            length,
+        };
+        let length = bytes.len() as u64;
+        let mut staging = store.start(&format!("{attempt}-{blob}"), length).unwrap();
+        staging.write_chunk(bytes).unwrap();
+        assert_eq!(
+            store.unlink_canceled(&canceled(length)),
+            Ok(CanceledUnlink::Unpublished)
+        );
+        staging.publish(digest).unwrap();
+        assert_eq!(
+            store.unlink_canceled(&canceled(length + 1)),
+            Err(PayloadError::Integrity)
+        );
+        assert!(store.open_verified(blob, length, digest).is_ok());
+        assert_eq!(
+            store.unlink_canceled(&canceled(length)),
+            Ok(CanceledUnlink::Removed)
+        );
+        assert!(matches!(
+            store.open_verified(blob, length, digest),
+            Err(PayloadError::Missing)
+        ));
+        // A retry after an unrecorded unlink finds nothing and still succeeds.
+        assert_eq!(
+            store.unlink_canceled(&canceled(length)),
+            Ok(CanceledUnlink::Removed)
         );
         fs::remove_dir_all(root).unwrap();
     }
