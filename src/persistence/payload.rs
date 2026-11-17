@@ -121,6 +121,11 @@ impl PayloadStore {
 
     /// The caller must hold durable removal authorization and exclude retained references.
     pub(crate) fn unlink_authorized(&self, blob_id: &str) -> Result<(), PayloadError> {
+        self.unlink_final(blob_id)
+    }
+
+    /// Durably unlink one private final payload; an absent file is already done.
+    fn unlink_final(&self, blob_id: &str) -> Result<(), PayloadError> {
         #[cfg(feature = "test-harness")]
         self.cleanup_boundary("cleanup.before_unlink")?;
         validate_id(blob_id)?;
