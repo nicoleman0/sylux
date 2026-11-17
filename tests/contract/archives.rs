@@ -160,6 +160,10 @@ impl Fixture {
     }
 
     async fn send(&self, request: String, body: &[u8]) -> Reply {
+        parse_reply(&self.send_raw(request, body).await)
+    }
+
+    async fn send_raw(&self, request: String, body: &[u8]) -> Vec<u8> {
         let mut stream = self.connect().await;
         stream.write_all(request.as_bytes()).await.unwrap();
         stream.write_all(body).await.unwrap();
@@ -172,7 +176,7 @@ impl Fixture {
                 Ok(read) => bytes.extend_from_slice(&buffer[..read]),
             }
         }
-        parse_reply(&bytes)
+        bytes
     }
 
     async fn issue(&self, ids: &[&str], actor: &Actor) -> Reply {
@@ -213,7 +217,9 @@ impl Fixture {
 }
 
 fn parse_reply(bytes: &[u8]) -> Reply {
-    let split = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let split = bytes.windows(4).position(|w| w == b"\r\n\r\n").expect(
+        "expected HTTP response headers; connection closed before a complete response head",
+    );
     let head = String::from_utf8_lossy(&bytes[..split]);
     let mut lines = head.lines();
     let status = lines.next().unwrap().split_whitespace().nth(1).unwrap();
@@ -689,34 +695,88 @@ async fn name_conflicts_and_entry_limit_are_refused_before_streaming() {
 
 #[tokio::test]
 async fn corrupted_or_missing_payload_fails_the_transfer_without_a_central_directory() {
-    let f = Fixture::new("integrity", tree).await;
+    const PREFIX: &str = "00000000000000000000000000000602";
+    let prefix = pattern(1 << 20, 4);
+    let f = Fixture::new("integrity", |c, product| {
+        tree(c, product);
+        // Exceed HTTP buffering so the mid-transfer case must flush before failure.
+        file(c, product, OWNER, ROOT, PREFIX, "Before.bin", &prefix);
+    })
+    .await;
+    let healthy = f.download(&[PREFIX, ONE, TWO]).await;
+    assert!(healthy.complete);
+    assert_eq!(
+        extract(&healthy.body),
+        BTreeMap::from([
+            ("Before.bin".to_owned(), Member::File(prefix.clone())),
+            ("one.bin".to_owned(), Member::File(pattern(1 << 20, 2))),
+            ("two.txt".to_owned(), Member::File(Vec::new())),
+        ])
+    );
+
     let path = f.blob_path(&blob_of(ONE));
     let mut bytes = fs::read(&path).unwrap();
     bytes[1000] ^= 0xff;
     fs::write(&path, &bytes).unwrap();
-    // DOCS streams first (path order), then the corrupted file.
-    let reply = f.download(&[DOCS, ONE]).await;
-    assert_eq!(reply.status, 200, "headers were sent before the failure");
+    fs::remove_file(f.blob_path(&blob_of(TWO))).unwrap();
+
+    for (invalid, name) in [(ONE, "one.bin"), (TWO, "two.txt")] {
+        let issued = f.issue(&[invalid], &OWNER_ACTOR).await;
+        assert_eq!(issued.status, 201);
+        let url = issued.json()["url"].as_str().unwrap().to_owned();
+        let request = format!("{}\r\n", f.head("GET", &url, Some(&OWNER_ACTOR)));
+        let raw = f.send_raw(request, &[]).await;
+        // A body error may close the connection before buffered headers are flushed.
+        if !raw.is_empty() {
+            let reply = parse_reply(&raw);
+            assert_failed_archive(&reply);
+            assert!(
+                reply.body.is_empty(),
+                "unverified member must not be emitted"
+            );
+        }
+
+        let reply = f.download(&[PREFIX, invalid]).await;
+        assert_failed_archive(&reply);
+        assert!(
+            reply.body.starts_with(&0x0403_4b50_u32.to_le_bytes()),
+            "earlier verified member must reach the client"
+        );
+        let name_end = 30 + usize::from(u16_at(&reply.body, 26));
+        assert_eq!(&reply.body[30..name_end], b"Before.bin");
+        let data_start = name_end + usize::from(u16_at(&reply.body, 28));
+        assert!(
+            reply.body.len() > data_start,
+            "verified file bytes must arrive"
+        );
+        let received = (reply.body.len() - data_start).min(prefix.len());
+        assert_eq!(
+            &reply.body[data_start..data_start + received],
+            &prefix[..received]
+        );
+        assert!(
+            !reply
+                .body
+                .windows(name.len())
+                .any(|window| window == name.as_bytes()),
+            "unverified member header must not be emitted"
+        );
+    }
+    f.close().await;
+}
+
+fn assert_failed_archive(reply: &Reply) {
+    assert_eq!(reply.status, 200);
     assert!(!reply.complete, "chunked body must not terminate cleanly");
-    assert!(
-        reply.body.starts_with(&0x0403_4b50_u32.to_le_bytes()),
-        "earlier members were streamed"
-    );
-    for signature in [0x0201_4b50_u32, 0x0605_4b50] {
+    for signature in [0x0201_4b50_u32, 0x0605_4b50, 0x0606_4b50, 0x0706_4b50] {
         assert!(
             !reply
                 .body
                 .windows(4)
                 .any(|window| window == signature.to_le_bytes()),
-            "no central directory may follow a failure"
+            "no central directory or end records may follow a failure"
         );
     }
-
-    fs::remove_file(f.blob_path(&blob_of(TWO))).unwrap();
-    let reply = f.download(&[DOCS, TWO]).await;
-    assert_eq!(reply.status, 200);
-    assert!(!reply.complete);
-    f.close().await;
 }
 
 const LARGE: &str = "00000000000000000000000000000601";
