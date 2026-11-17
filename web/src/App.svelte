@@ -2130,11 +2130,12 @@
           replacementPrompt = { file, folder, target };
           uploadNotice = 'A file already has this name. Confirm replacement to continue.';
         } else uploadNotice = 'A folder already has this name. Rename the upload or the folder and try again.';
-      } else if (error instanceof HttpError && error.status >= 400 && error.status < 500 && !uploadCancelable && transferPhase === 'uploading') {
+      } else if (error instanceof HttpError && error.status >= 400 && error.status < 500 && !uploadCancelable && (transferPhase === 'checking' || transferPhase === 'uploading')) {
         if (uploadId) activeTransfers.forget(uploadId);
         uploadId = '';
         uploadNotice = replacement ? 'Replacement was not admitted. The file or folder changed. Refresh and try again.' : 'Upload was not admitted. Refresh the folder and try again.';
       } else if (error instanceof DOMException && error.name === 'AbortError') {
+        if (!uploadId) { uploadNotice = 'Upload canceled before sending bytes.'; return committed; }
         try {
           if (!uploadId) throw new Error('Upload was not admitted');
           await activeTransfers.cancel(uploadId);

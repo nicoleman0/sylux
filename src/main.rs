@@ -234,9 +234,9 @@ async fn serve_listener(
     .with_storage_root(&configuration.root)
     .map_err(|_| "payload_storage_unavailable")?;
     let mut terminate = signal(SignalKind::terminate()).map_err(|_| "signal_setup_failed")?;
-    let cleanup = auth.start_cleanup();
     let cleanup_storage = auth.storage.clone().ok_or("payload_storage_unavailable")?;
     let cleanup_workers = workers.clone();
+    let cleanup = auth.start_cleanup();
     let app = http::router(auth)
         .route("/healthz", get(|| async { "ok" }))
         .fallback(http::assets::serve);
@@ -290,7 +290,9 @@ async fn serve_listener(
         }
     };
     cleanup_stop.send_replace(true);
-    let _ = cleanup_task.await;
+    if cleanup_task.await.is_err() {
+        eprintln!("partial upload cleanup task failed");
+    }
     if server_joined {
         // The select consumed this JoinHandle; polling it again would panic.
         if let Some(cleanup) = cleanup {

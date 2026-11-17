@@ -485,9 +485,9 @@ pub async fn cleanup_expired_partials(
     let rows = workers.transact(move |tx| {
         let rows = {
             let mut statement = tx.prepare(
-                "SELECT a.attempt_id,a.staging_path,a.mutation_id FROM upload_attempt a JOIN mutation m USING(mutation_id) WHERE a.attempt_id>?1 AND a.writer_active=0 AND a.completed_length IS NULL AND a.completed_sha256 IS NULL AND m.result_revision_id IS NULL AND m.state IN ('admitted','rejected') AND m.expires_at<=?2 ORDER BY a.attempt_id LIMIT 32"
+                "SELECT a.attempt_id,a.staging_path,a.mutation_id FROM upload_attempt a JOIN mutation m USING(mutation_id) WHERE a.attempt_id>?1 AND m.scope=?3 AND m.completed_length IS NULL AND m.completed_sha256 IS NULL AND NOT EXISTS(SELECT 1 FROM upload_attempt active WHERE active.mutation_id=m.mutation_id AND active.writer_active=1) AND a.writer_active=0 AND a.completed_length IS NULL AND a.completed_sha256 IS NULL AND m.result_revision_id IS NULL AND m.state IN ('admitted','rejected') AND m.expires_at<=?2 ORDER BY a.attempt_id LIMIT 32"
             )?;
-            statement.query_map(params![cursor,at], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+            statement.query_map(params![cursor,at,UPLOAD_SCOPE], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (_,_,mutation) in &rows {
             tx.execute("UPDATE mutation SET state='rejected' WHERE mutation_id=?1 AND state='admitted'", [mutation])?;
@@ -496,17 +496,20 @@ pub async fn cleanup_expired_partials(
     }).await.map_err(|_| "partial_cleanup_database_unavailable")?;
     let count = rows.len();
     let next = rows.last().map(|row| row.0.clone()).unwrap_or_default();
-    tokio::task::spawn_blocking(move || {
+    let cleanup = tokio::task::spawn_blocking(move || {
+        let mut failed = false;
         for (_, name, _) in rows {
-            storage
-                .payloads
-                .remove_partial(&name)
-                .map_err(|_| "partial_cleanup_failed")?;
+            failed |= storage.payloads.remove_partial(&name).is_err();
         }
-        Ok::<_, &'static str>(())
+        if failed {
+            Err("partial_cleanup_failed")
+        } else {
+            Ok(())
+        }
     })
     .await
-    .map_err(|_| "partial_cleanup_worker_failed")??;
+    .map_err(|_| "partial_cleanup_worker_failed")?;
     *after = next;
+    cleanup?;
     Ok(count)
 }

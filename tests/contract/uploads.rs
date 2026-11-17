@@ -3631,6 +3631,18 @@ async fn sequential_append_resumes_acknowledged_prefix_and_rejects_stale_offsets
         422
     );
     assert_eq!(fixture.upload_status(&id).await["bytes_received"], 9);
+    let legacy = fixture
+        .mutate(
+            "PUT",
+            &format!("/uploads/{id}/content"),
+            &owner_auth(),
+            Some(&ticket),
+            &[("Content-Type", "application/octet-stream".into())],
+            bytes.to_vec(),
+        )
+        .await;
+    assert_eq!(legacy.status, 409);
+    assert_eq!(legacy.json()["code"], "upload_requires_resume");
     // Simulate an unacknowledged tail left after a write but before SQL checkpoint.
     let name: String = fixture
         .db()
@@ -3703,6 +3715,13 @@ async fn interrupted_append_preserves_offset_isolation_checksum_and_expiry() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(fixture.upload_status(&id).await["writer_active"], true);
+    assert_eq!(
+        fixture
+            .append_chunk(&id, &ticket, 4, &bytes[4..])
+            .await
+            .status,
+        409
+    );
     stream.shutdown().await.unwrap();
     drop(stream);
     for _ in 0..100 {
@@ -3851,4 +3870,86 @@ async fn restart_recovers_prepared_partial_before_and_after_publication() {
         assert_eq!(replay["state"], "committed");
         fixture.close().await;
     }
+}
+
+#[tokio::test]
+async fn empty_append_commits_and_wrong_declared_digest_rejects_without_visibility() {
+    let fixture = Fixture::new("append-empty").await;
+    let (id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "empty.bin", b"")
+        .await;
+    assert_eq!(fixture.append_chunk(&id, &ticket, 0, b"").await.status, 200);
+    assert_eq!(fixture.commit_staged(&id, &ticket, b"").await.status, 201);
+    fixture.close().await;
+    let fixture = Fixture::new("append-final-digest").await;
+    let (id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "wrong.bin", b"expected")
+        .await;
+    assert_eq!(
+        fixture
+            .append_chunk(&id, &ticket, 0, b"wrong___")
+            .await
+            .status,
+        422
+    );
+    assert_eq!(fixture.upload_status(&id).await["state"], "rejected");
+    let visible: i64 = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM entry WHERE kind='file'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(visible, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn expired_partial_cleanup_continues_past_an_invalid_candidate() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("partial-cleanup-failure").await;
+    for name in ["one.bin", "two.bin"] {
+        let (id, ticket) = fixture
+            .admit(&owner_auth(), OWNER_ROOT, 1, name, b"abcdef")
+            .await;
+        assert_eq!(
+            fixture.append_chunk(&id, &ticket, 0, b"abc").await.status,
+            200
+        );
+    }
+    let db = fixture.db();
+    let mut paths: Vec<_> = fs::read_dir(fixture.product.join("staging"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    fs::set_permissions(&paths[0], fs::Permissions::from_mode(0o644)).unwrap();
+    db.lock()
+        .unwrap()
+        .execute("UPDATE mutation SET issued_at=0,expires_at=0", [])
+        .unwrap();
+    let storage = Arc::new(sylux::domain::upload::UploadStorage::open(&fixture.product).unwrap());
+    let workers = fixture.workers.as_ref().unwrap();
+    let mut cursor = String::new();
+    assert_eq!(
+        sylux::domain::upload::cleanup_expired_partials(workers, storage.clone(), &mut cursor, 1)
+            .await,
+        Err("partial_cleanup_failed")
+    );
+    assert!(paths[0].exists());
+    assert!(!paths[1].exists());
+    assert!(!cursor.is_empty());
+    assert_eq!(
+        sylux::domain::upload::cleanup_expired_partials(workers, storage.clone(), &mut cursor, 1)
+            .await
+            .unwrap(),
+        0
+    );
+    fs::set_permissions(&paths[0], fs::Permissions::from_mode(0o600)).unwrap();
+    sylux::domain::upload::cleanup_expired_partials(workers, storage, &mut cursor, 1)
+        .await
+        .unwrap();
+    assert!(!paths[0].exists());
+    fixture.close().await;
 }
