@@ -43,6 +43,9 @@ use tokio::sync::mpsc;
 pub struct UploadCancelTestBarrier {
     cancel_paused: tokio::sync::Notify,
     cancel_release: tokio::sync::Notify,
+    publish_armed: std::sync::atomic::AtomicBool,
+    publish_paused: tokio::sync::Notify,
+    publish_release: tokio::sync::Notify,
 }
 
 #[cfg(feature = "test-harness")]
@@ -53,6 +56,30 @@ impl UploadCancelTestBarrier {
 
     pub fn release_cancel(&self) {
         self.cancel_release.notify_one();
+    }
+
+    /// Pause the next PUT between payload publication and its cancel check.
+    pub fn arm_publish_pause(&self) {
+        self.publish_armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub async fn wait_publish_paused(&self) {
+        self.publish_paused.notified().await;
+    }
+
+    pub fn release_publish(&self) {
+        self.publish_release.notify_one();
+    }
+
+    async fn pause_publish(&self) {
+        if self
+            .publish_armed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.publish_paused.notify_one();
+            self.publish_release.notified().await;
+        }
     }
 
     async fn pause_cancel(&self) {
@@ -507,7 +534,9 @@ enum WorkerMessage {
 #[derive(Clone)]
 enum WorkerOutcome {
     Published(PublishedPayload),
-    Canceled,
+    /// Canceled; carries the payload if it was already published to its final
+    /// path, so its metadata can still be recorded for reclamation.
+    Canceled(Option<PublishedPayload>),
     Failed(PayloadError),
 }
 
@@ -522,7 +551,7 @@ fn run_worker(
     let mut total = 0u64;
     loop {
         if writer.is_cancelled() {
-            return WorkerOutcome::Canceled;
+            return WorkerOutcome::Canceled(None);
         }
         match messages.blocking_recv() {
             Some(WorkerMessage::Data(bytes)) => {
@@ -542,7 +571,7 @@ fn run_worker(
         }
     }
     if writer.is_cancelled() {
-        return WorkerOutcome::Canceled;
+        return WorkerOutcome::Canceled(None);
     }
     if total != declared_length {
         return WorkerOutcome::Failed(PayloadError::LengthMismatch);
@@ -722,10 +751,18 @@ fn finish_attempt(
                 params![attempt.attempt_id,published.length as i64,published.sha256.as_slice()],
             )?;
             if mutation_changed != 1 || attempt_changed != 1 {
+                // A cancel that committed first leaves a published payload
+                // that only this metadata lets the sweep reclaim.
+                record_canceled_publication(
+                    transaction,
+                    &ticket.mutation_id,
+                    &attempt.attempt_id,
+                    published,
+                )?;
                 return Ok(Err(error(StatusCode::CONFLICT, "upload_state_changed")));
             }
         }
-        WorkerOutcome::Canceled => {
+        WorkerOutcome::Canceled(published) => {
             transaction.execute(
                 "UPDATE mutation SET state='rejected' WHERE mutation_id=?1 AND state='admitted'",
                 [ticket.mutation_id.as_str()],
@@ -734,6 +771,14 @@ fn finish_attempt(
                 "UPDATE upload_attempt SET writer_active=0,outcome='canceled' WHERE attempt_id=?1 AND writer_active=1",
                 [attempt.attempt_id.as_str()],
             )?;
+            if let Some(published) = published {
+                record_canceled_publication(
+                    transaction,
+                    &ticket.mutation_id,
+                    &attempt.attempt_id,
+                    published,
+                )?;
+            }
         }
         WorkerOutcome::Failed(_) => {
             transaction.execute(
@@ -743,6 +788,28 @@ fn finish_attempt(
         }
     }
     Ok(Ok(()))
+}
+
+/// Record the length and digest of a payload published for an upload that was
+/// already rejected, so `CANCELED_PAYLOAD_RULE` can match it. Does nothing
+/// unless the mutation is rejected with no result and the attempt is canceled.
+fn record_canceled_publication(
+    transaction: &rusqlite::Transaction<'_>,
+    mutation_id: &str,
+    attempt_id: &str,
+    published: &PublishedPayload,
+) -> rusqlite::Result<()> {
+    let length = published.length as i64;
+    let digest = published.sha256.as_slice();
+    transaction.execute(
+        "UPDATE mutation SET completed_length=?2,completed_sha256=?3 WHERE mutation_id=?1 AND state='rejected' AND result_revision_id IS NULL AND completed_length IS NULL AND completed_sha256 IS NULL",
+        params![mutation_id, length, digest],
+    )?;
+    transaction.execute(
+        "UPDATE upload_attempt SET writer_active=0,bytes_received=?2,completed_length=?2,completed_sha256=?3 WHERE attempt_id=?1 AND outcome='canceled' AND completed_length IS NULL AND EXISTS(SELECT 1 FROM mutation m WHERE m.mutation_id=upload_attempt.mutation_id AND m.state='rejected' AND m.completed_length=?2 AND m.completed_sha256=?3)",
+        params![attempt_id, length, digest],
+    )?;
+    Ok(())
 }
 
 async fn finish_attempt_owned(
@@ -871,7 +938,7 @@ pub async fn content(
             &state,
             &ticket,
             &attempt,
-            &WorkerOutcome::Canceled,
+            &WorkerOutcome::Canceled(None),
             &principal,
             csrf_secret,
         )
@@ -967,8 +1034,15 @@ pub async fn content(
         Ok(outcome) => outcome,
         Err(_) => WorkerOutcome::Failed(PayloadError::Io("payload_worker_failed")),
     };
+    #[cfg(feature = "test-harness")]
+    if let Some(barrier) = &state.upload_cancel_test_barrier {
+        barrier.pause_publish().await;
+    }
     let outcome = if writer.is_cancelled() {
-        WorkerOutcome::Canceled
+        match outcome {
+            WorkerOutcome::Published(published) => WorkerOutcome::Canceled(Some(published)),
+            _ => WorkerOutcome::Canceled(None),
+        }
     } else {
         outcome
     };
@@ -993,7 +1067,7 @@ pub async fn content(
             )
                 .into_response(),
         ),
-        WorkerOutcome::Canceled => error(StatusCode::CONFLICT, "upload_canceled"),
+        WorkerOutcome::Canceled(_) => error(StatusCode::CONFLICT, "upload_canceled"),
         WorkerOutcome::Failed(payload_error) => worker_error(payload_error),
     }
 }
@@ -1694,7 +1768,7 @@ async fn append_owned(
     match outcome {
         WorkerOutcome::Published(published) => finish(Json(json!({"upload_id":upload_id,"mutation_id":upload_id,"status":"staged","bytes_received":total,"length":total,"sha256":hex(&published.sha256),"published":false})).into_response()),
         WorkerOutcome::Failed(error) => worker_error(error),
-        WorkerOutcome::Canceled => error(StatusCode::CONFLICT, "upload_canceled"),
+        WorkerOutcome::Canceled(_) => error(StatusCode::CONFLICT, "upload_canceled"),
     }
 }
 

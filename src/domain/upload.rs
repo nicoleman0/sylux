@@ -603,7 +603,86 @@ pub async fn cleanup_expired_partials(
     Ok(count)
 }
 
-/// The periodic expired-partial sweep. Its first pass runs at start.
+/// Staging path recorded once a canceled upload's final payload unlink is
+/// durable. Like `CLEANED_PARTIAL`, it never names a file.
+pub const RECLAIMED_PAYLOAD: &str = "payload-reclaimed";
+
+/// One bounded pass that unlinks final payloads authorized by
+/// `CanceledPayload`, after their rejection committed. Returns how many were
+/// reclaimed.
+pub async fn reclaim_canceled_payloads(
+    workers: &crate::persistence::sqlite::SqliteWorkers,
+    storage: Arc<UploadStorage>,
+    after: &mut String,
+) -> Result<usize, &'static str> {
+    use crate::persistence::payload::{CanceledPayload, CanceledUnlink};
+    let cursor = after.clone();
+    let page = workers
+        .read(move |db| CanceledPayload::page(db, &cursor, 32))
+        .await
+        .map_err(|_| "payload_reclaim_database_unavailable")?;
+    let next = page.last.unwrap_or_default();
+    let malformed = page.malformed;
+    let page = page.payloads;
+    let (removed, failed) = tokio::task::spawn_blocking(move || {
+        let mut removed = Vec::new();
+        let mut failed = false;
+        for payload in page {
+            // A writer registered before the rejection may still be publishing.
+            // One registered after it cannot activate, so this check is stable.
+            if storage.writer_registered(payload.mutation_id()) {
+                continue;
+            }
+            let unlinked = storage.payloads.unlink_canceled(&payload);
+            #[cfg(feature = "test-harness")]
+            let unlinked = unlinked.and_then(|outcome| {
+                storage
+                    .payloads
+                    .cleanup_boundary("cleanup.before_finalize")
+                    .map(|()| outcome)
+            });
+            match unlinked {
+                Ok(CanceledUnlink::Removed) => removed.push(payload),
+                Ok(CanceledUnlink::Unpublished) => {}
+                Err(_) => failed = true,
+            }
+        }
+        (removed, failed)
+    })
+    .await
+    .map_err(|_| "payload_reclaim_worker_failed")?;
+    let count = removed.len();
+    if count != 0 {
+        workers
+            .transact(move |tx| {
+                for payload in removed {
+                    // The rule cannot stop holding after rejection; fail loudly if it did.
+                    if !payload.still_authorized(tx)? {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    tx.execute(
+                        "UPDATE upload_attempt SET staging_path=?3 WHERE attempt_id=?1 AND staging_path=?2",
+                        rusqlite::params![payload.attempt_id(), payload.staging_name(), RECLAIMED_PAYLOAD],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|_| "payload_reclaim_database_unavailable")?;
+    }
+    *after = next;
+    if failed {
+        return Err("payload_reclaim_failed");
+    }
+    // Skipped, not unlinked: reconciliation refuses readiness for these rows.
+    if malformed != 0 {
+        return Err("payload_reclaim_malformed_path");
+    }
+    Ok(count)
+}
+
+/// The periodic sweep of expired partials and canceled final payloads. Its
+/// first pass runs at start.
 pub struct PartialCleanup {
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
@@ -618,6 +697,7 @@ impl PartialCleanup {
         let (stop, mut stopped) = watch::channel(false);
         let task = tokio::spawn(async move {
             let mut cursor = String::new();
+            let mut reclaim_cursor = String::new();
             let mut interval = tokio::time::interval(period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -636,6 +716,12 @@ impl PartialCleanup {
                     .is_err()
                 {
                     eprintln!("partial upload cleanup failed; retrying next pass");
+                }
+                if reclaim_canceled_payloads(&workers, Arc::clone(&storage), &mut reclaim_cursor)
+                    .await
+                    .is_err()
+                {
+                    eprintln!("canceled upload payload cleanup failed; retrying next pass");
                 }
             }
         });

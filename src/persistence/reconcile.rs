@@ -66,6 +66,7 @@ struct AttemptRow {
     writer_active: bool,
     completed_length: Option<i64>,
     completed_sha256: Option<Vec<u8>>,
+    outcome: Option<String>,
 }
 
 #[derive(Debug)]
@@ -296,10 +297,10 @@ async fn read_attempts(
     workers
         .read(move |db| {
             let mut statement = db.prepare(
-                "SELECT attempt_id,staging_path,writer_active,completed_length,completed_sha256 FROM upload_attempt WHERE mutation_id=?1 ORDER BY attempt_no LIMIT ?2",
+                "SELECT attempt_id,staging_path,writer_active,completed_length,completed_sha256,outcome FROM upload_attempt WHERE mutation_id=?1 ORDER BY attempt_no LIMIT ?2",
             )?;
             let rows = statement.query_map(params![id, PAGE], |row| {
-                Ok(AttemptRow { id: row.get(0)?, path: row.get(1)?, writer_active: row.get::<_, i64>(2)? != 0, completed_length: row.get(3)?, completed_sha256: row.get(4)? })
+                Ok(AttemptRow { id: row.get(0)?, path: row.get(1)?, writer_active: row.get::<_, i64>(2)? != 0, completed_length: row.get(3)?, completed_sha256: row.get(4)?, outcome: row.get(5)? })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
@@ -339,6 +340,20 @@ async fn reconcile_mutation(
             && mutation.result_revision.is_none()
             && mutation.completed_length.is_none()
             && mutation.completed_sha256.is_none()
+        {
+            continue;
+        }
+        // Mirrors the canceled-payload deletion rule; elsewhere the marker fails closed.
+        if attempt.path == crate::domain::upload::RECLAIMED_PAYLOAD
+            && valid_id(&attempt.id)
+            && mutation.state == "rejected"
+            && !attempt.writer_active
+            && attempt.outcome.as_deref() == Some("canceled")
+            && attempt.completed_length.is_some()
+            && attempt.completed_sha256.is_some()
+            && attempt.completed_length == mutation.completed_length
+            && attempt.completed_sha256 == mutation.completed_sha256
+            && mutation.result_revision.is_none()
         {
             continue;
         }
@@ -557,7 +572,8 @@ async fn reconcile_mutation(
             }
         }
         "rejected" => {
-            // Recovery preserves candidates; expiry cleanup handles incomplete staging.
+            // Recovery preserves candidates; the runtime sweep reclaims incomplete
+            // staging and canceled final payloads.
             if mutation.result_revision.is_some() {
                 fail(report, RecoveryDisposition::RecoveryRequired);
             } else if candidates.iter().any(|c| c.attempt.writer_active) {

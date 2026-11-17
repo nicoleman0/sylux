@@ -4591,3 +4591,381 @@ async fn storage_shutdown_releases_and_joins_an_in_flight_append() {
     assert_eq!(refused.status, 503, "{}", refused.text());
     fixture.close().await;
 }
+
+impl Fixture {
+    async fn cancel(&self, id: &str) -> Response {
+        self.mutate(
+            "DELETE",
+            &format!("/uploads/{id}"),
+            &owner_auth(),
+            None,
+            &[],
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Path of the upload's completed payload, read before any reclaim marker.
+    fn final_payload(&self, id: &str) -> PathBuf {
+        let name: String = self
+            .db()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT staging_path FROM upload_attempt WHERE mutation_id=?1 AND completed_length IS NOT NULL",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let blob = &name[33..];
+        self.product.join("payloads").join(&blob[..2]).join(blob)
+    }
+
+    async fn reclaim(
+        &self,
+        storage: Arc<sylux::domain::upload::UploadStorage>,
+    ) -> Result<usize, &'static str> {
+        sylux::domain::upload::reclaim_canceled_payloads(
+            self.workers.as_ref().unwrap(),
+            storage,
+            &mut String::new(),
+        )
+        .await
+    }
+
+    fn reclaimed_markers(&self) -> i64 {
+        self.count(&format!(
+            "SELECT count(*) FROM upload_attempt WHERE staging_path='{}'",
+            sylux::domain::upload::RECLAIMED_PAYLOAD
+        ))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_then_canceled_payloads_are_reclaimed_after_rejection_commits() {
+    let fixture = Fixture::new("reclaim-canceled").await;
+    let (put_id, _, _) = fixture.stage("put.bin", b"put staged then canceled").await;
+    let bytes = varied(24);
+    let (append_id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "append.bin", &bytes)
+        .await;
+    for (offset, chunk) in [(0, &bytes[..10]), (10, &bytes[10..])] {
+        let response = fixture
+            .append_chunk(&append_id, &ticket, offset, chunk)
+            .await;
+        assert_eq!(response.status, 200, "{}", response.text());
+    }
+    // Committed last: each commit advances the parent generation the helpers sign.
+    let kept = fixture.upload("kept.bin", b"committed bytes stay").await;
+    assert_eq!(fixture.upload_status(&append_id).await["status"], "staged");
+    let finals = [
+        fixture.final_payload(&put_id),
+        fixture.final_payload(&append_id),
+    ];
+    let storage = fixture.storage.clone().unwrap();
+    assert_eq!(fixture.reclaim(storage.clone()).await, Ok(0));
+    for id in [&put_id, &append_id] {
+        let canceled = fixture.cancel(id).await;
+        assert_eq!(canceled.status, 204, "{}", canceled.text());
+        assert_eq!(fixture.upload_status(id).await["status"], "canceled");
+    }
+    // Cancel commits the rejection; bytes go only when the sweep applies the rule.
+    assert!(finals.iter().all(|path| path.exists()));
+    // A registered writer may still be publishing, so its payload waits.
+    let writer = storage.register_writer(&put_id).unwrap();
+    assert_eq!(fixture.reclaim(storage.clone()).await, Ok(1));
+    assert!(finals[0].exists() && !finals[1].exists());
+    storage.finish_writer(&put_id, &writer);
+    assert_eq!(fixture.reclaim(storage.clone()).await, Ok(1));
+    assert!(finals.iter().all(|path| !path.exists()));
+    assert_eq!(fixture.reclaimed_markers(), 2);
+    assert_eq!(fixture.reclaim(storage).await, Ok(0));
+    for id in [&put_id, &append_id] {
+        assert_eq!(fixture.upload_status(id).await["status"], "canceled");
+    }
+    assert_eq!(fixture.download(&kept).await, b"committed bytes stay");
+    let report = sylux::persistence::reconcile::reconcile(
+        fixture.workers.as_ref().unwrap(),
+        &fixture.product,
+    )
+    .await
+    .unwrap();
+    assert!(report.ready, "{report:?}");
+    fixture.close().await;
+}
+
+/// Final payload path from the attempt's staging name, which stays valid
+/// when no completed length was recorded.
+fn payload_at(fixture: &Fixture, id: &str) -> PathBuf {
+    let name: String = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT staging_path FROM upload_attempt WHERE mutation_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let blob = &name[33..];
+    fixture.product.join("payloads").join(&blob[..2]).join(blob)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_canceled_between_publish_and_completion_is_still_reclaimed() {
+    let barrier = Arc::new(UploadCancelTestBarrier::default());
+    let fixture =
+        Fixture::new_with_cancel_barrier("reclaim-put-race", Some(Arc::clone(&barrier))).await;
+    let auth = owner_auth();
+    let bytes = b"published, then canceled before completion".to_vec();
+    let (id, ticket) = fixture
+        .admit(&auth, OWNER_ROOT, 1, "race.bin", &bytes)
+        .await;
+    barrier.arm_publish_pause();
+    let put_path = format!("/uploads/{id}/content");
+    let put_headers = [("Content-Type", "application/octet-stream".to_owned())];
+    let put = fixture.mutate("PUT", &put_path, &auth, Some(&ticket), &put_headers, bytes);
+    let mut put = Box::pin(put);
+    tokio::select! {
+        response = &mut put => panic!("PUT finished before the pause: {}", response.status),
+        () = async {
+            tokio::time::timeout(Duration::from_secs(5), barrier.wait_publish_paused())
+                .await
+                .expect("publish pause timed out");
+        } => {}
+    }
+    let payload = payload_at(&fixture, &id);
+    assert!(payload.exists(), "payload is published before the pause");
+    let cancel = fixture.cancel(&id);
+    let mut cancel = Box::pin(cancel);
+    let committed = async {
+        loop {
+            if fixture.count(&format!(
+                "SELECT count(*) FROM mutation WHERE mutation_id='{id}' AND state='rejected'"
+            )) == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        response = &mut cancel => panic!("cancel returned before the writer finished: {}", response.status),
+        result = tokio::time::timeout(Duration::from_secs(5), committed) => {
+            result.expect("cancel never committed");
+        }
+    }
+    barrier.release_publish();
+    assert_eq!(put.await.status, 409);
+    assert_eq!(cancel.await.status, 204);
+    assert_eq!(
+        fixture.count(&format!(
+            "SELECT count(*) FROM upload_attempt a JOIN mutation m USING(mutation_id) WHERE m.mutation_id='{id}' AND a.completed_length IS NOT NULL AND a.completed_length=m.completed_length AND a.completed_sha256=m.completed_sha256"
+        )),
+        1,
+        "the canceled publication records its length and digest"
+    );
+    assert!(payload.exists());
+    let storage = fixture.storage.clone().unwrap();
+    assert_eq!(fixture.reclaim(storage.clone()).await, Ok(1));
+    assert!(!payload.exists());
+    assert_eq!(fixture.reclaimed_markers(), 1);
+    assert_eq!(fixture.reclaim(storage).await, Ok(0));
+    let report = sylux::persistence::reconcile::reconcile(
+        fixture.workers.as_ref().unwrap(),
+        &fixture.product,
+    )
+    .await
+    .unwrap();
+    assert!(report.ready, "{report:?}");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_staging_path_is_reported_without_starving_other_payloads() {
+    let fixture = Fixture::new("reclaim-malformed").await;
+    let (bad, _, _) = fixture
+        .stage("bad.bin", b"row with an untrusted path")
+        .await;
+    let (good, _, _) = fixture
+        .stage("good.bin", b"row that must be reclaimed")
+        .await;
+    let good_payload = fixture.final_payload(&good);
+    for id in [&bad, &good] {
+        assert_eq!(fixture.cancel(id).await.status, 204);
+    }
+    let corrupted = format!("{}-{}", "a".repeat(32), "Z".repeat(32));
+    assert_eq!(corrupted.len(), 65);
+    fixture
+        .db()
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE upload_attempt SET attempt_id=?2,staging_path=?3 WHERE mutation_id=?1",
+            rusqlite::params![bad, "a".repeat(32), corrupted],
+        )
+        .unwrap();
+    let storage = fixture.storage.clone().unwrap();
+    let mut cursor = String::new();
+    let result = sylux::domain::upload::reclaim_canceled_payloads(
+        fixture.workers.as_ref().unwrap(),
+        storage.clone(),
+        &mut cursor,
+    )
+    .await;
+    assert_eq!(result, Err("payload_reclaim_malformed_path"));
+    assert!(!good_payload.exists(), "the valid row is not starved");
+    assert!(!cursor.is_empty(), "the cursor moves past the bad row");
+    assert_eq!(fixture.reclaimed_markers(), 1);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn payload_reclaim_keeps_committed_uncertain_recovery_and_referenced_payloads() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut fixture = Fixture::new("reclaim-keeps").await;
+    let armed = Arc::new(AtomicBool::new(true));
+    let hook_armed = Arc::clone(&armed);
+    fixture.cleanup_fault = Some(Arc::new(move |at| {
+        if at == "publish.before_final_dir_sync" && hook_armed.swap(false, Ordering::SeqCst) {
+            Err(sylux::persistence::payload::PayloadError::Io(
+                "injected_publish_fault",
+            ))
+        } else {
+            Ok(())
+        }
+    }));
+    fixture.restart().await;
+    // Recovery required: published, then its publication outcome was lost.
+    let bytes = varied(16);
+    let (recovery_id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "recovery.bin", &bytes)
+        .await;
+    let last = fixture.append_chunk(&recovery_id, &ticket, 0, &bytes).await;
+    assert_eq!(last.status, 500, "{}", last.text());
+    assert!(!armed.load(Ordering::SeqCst));
+    assert_eq!(
+        fixture.upload_status(&recovery_id).await["status"],
+        "recovery_required"
+    );
+    assert_eq!(fixture.cancel(&recovery_id).await.status, 204);
+
+    let staged_bytes = b"staged and still uncertain";
+    let (staged_id, staged_ticket, _) = fixture.stage("staged.bin", staged_bytes).await;
+    // A blob row for a canceled attempt's payload is a reference the rule must honor.
+    let (referenced_id, _, _) = fixture.stage("referenced.bin", b"referenced").await;
+    assert_eq!(fixture.cancel(&referenced_id).await.status, 204);
+    let referenced = fixture.final_payload(&referenced_id);
+    fixture
+        .db()
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO blob(blob_id,shard,length,sha256,lifecycle) SELECT substr(staging_path,34),substr(staging_path,34,2),completed_length,completed_sha256,'live' FROM upload_attempt WHERE mutation_id=?1",
+            [&referenced_id],
+        )
+        .unwrap();
+    let finals = [
+        fixture.final_payload(&recovery_id),
+        fixture.final_payload(&staged_id),
+        referenced,
+    ];
+    let storage = fixture.storage.clone().unwrap();
+    let set_outcome = |outcome: Option<&str>| {
+        fixture
+            .db()
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE upload_attempt SET outcome=?2 WHERE mutation_id=?1",
+                params![staged_id, outcome],
+            )
+            .unwrap();
+    };
+    // Only the rejected state, not the attempt outcome alone, authorizes removal.
+    set_outcome(Some("canceled"));
+    assert_eq!(fixture.reclaim(storage.clone()).await, Ok(0));
+    set_outcome(None);
+    assert!(finals.iter().all(|path| path.exists()));
+
+    // The uncertain candidate still commits, and a later cancel cannot undo it.
+    let commit = fixture
+        .commit_staged(&staged_id, &staged_ticket, staged_bytes)
+        .await;
+    assert_eq!(commit.status, 201, "{}", commit.text());
+    assert_eq!(fixture.cancel(&staged_id).await.status, 409);
+    assert_eq!(fixture.reclaim(storage).await, Ok(0));
+    assert!(finals.iter().all(|path| path.exists()));
+    assert_eq!(fixture.reclaimed_markers(), 0);
+    assert_eq!(fixture.download(&commit.json()).await, staged_bytes);
+    let report = sylux::persistence::reconcile::reconcile(
+        fixture.workers.as_ref().unwrap(),
+        &fixture.product,
+    )
+    .await
+    .unwrap();
+    assert!(report.ready, "{report:?}");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn payload_reclaim_resumes_after_restart_at_each_cleanup_boundary() {
+    use sylux::{domain::upload::UploadStorage, persistence::payload::PayloadError};
+    for boundary in [
+        "cleanup.before_unlink",
+        "cleanup.before_directory_sync",
+        "cleanup.before_finalize",
+    ] {
+        let mut fixture =
+            Fixture::new(&format!("reclaim-{}", boundary.replace(['.', '_'], "-"))).await;
+        let (id, _, _) = fixture.stage("canceled.bin", b"canceled bytes").await;
+        let kept = fixture
+            .upload("kept.bin", b"referenced bytes survive")
+            .await;
+        let path = fixture.final_payload(&id);
+        assert_eq!(fixture.cancel(&id).await.status, 204);
+
+        let mut faulted = UploadStorage::open(&fixture.product).unwrap();
+        Arc::get_mut(&mut faulted.payloads)
+            .unwrap()
+            .set_publish_fault_hook(Some(Arc::new(move |at| {
+                if at == boundary {
+                    Err(PayloadError::Io("injected_cleanup_fault"))
+                } else {
+                    Ok(())
+                }
+            })));
+        assert_eq!(
+            fixture.reclaim(Arc::new(faulted)).await,
+            Err("payload_reclaim_failed"),
+            "{boundary}"
+        );
+        assert_eq!(path.exists(), boundary == "cleanup.before_unlink");
+        assert_eq!(fixture.reclaimed_markers(), 0);
+
+        fixture.restart().await;
+        let report = sylux::persistence::reconcile::reconcile(
+            fixture.workers.as_ref().unwrap(),
+            &fixture.product,
+        )
+        .await
+        .unwrap();
+        assert!(report.ready, "{boundary}: {report:?}");
+        assert_eq!(
+            fixture.reclaim(fixture.storage.clone().unwrap()).await,
+            Ok(1)
+        );
+        assert!(!path.exists());
+        assert_eq!(fixture.reclaimed_markers(), 1);
+        assert_eq!(fixture.upload_status(&id).await["status"], "canceled");
+        assert_eq!(fixture.download(&kept).await, b"referenced bytes survive");
+        let report = sylux::persistence::reconcile::reconcile(
+            fixture.workers.as_ref().unwrap(),
+            &fixture.product,
+        )
+        .await
+        .unwrap();
+        assert!(report.ready, "{boundary}: {report:?}");
+        fixture.close().await;
+    }
+}
