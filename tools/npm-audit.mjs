@@ -3,7 +3,19 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-// Private S1 build-only exception. See docs/dependency-notices.md; not a clean audit.
+// Each exception expires on its own date; deepmerge is only checked when reported.
+const PICOMATCH = {
+  id: 'GHSA-fc5q-39xc-vjpf', expires: '2026-12-01T00:00:00Z', severity: 'high', range: '<=4.0.7',
+  versions: { picomatch: '4.0.7', fdir: '6.5.0', tinyglobby: '0.2.17', vite: '8.3.6', 'svelte-check': '4.7.8',
+    '@sveltejs/vite-plugin-svelte': '7.3.1' },
+  viaPicomatch: ['fdir', 'tinyglobby', 'vite', 'svelte-check', '@sveltejs/vite-plugin-svelte'],
+};
+const DEEPMERGE = {
+  id: 'GHSA-gcqx-w48m-w2h4', expires: '2026-11-22T00:00:00Z', severity: 'low', range: '>=4.2.0 <=4.3.1',
+  versions: { deepmerge: '4.3.1' },
+};
+
+// Private S1 build-only exceptions. See docs/dependency-notices.md; not a clean audit.
 export function validateAudit(report, lock, now = new Date()) {
   assert.equal(report.auditReportVersion, 2);
   assert.equal(report.error, undefined);
@@ -16,28 +28,45 @@ export function validateAudit(report, lock, now = new Date()) {
   const names = Object.keys(report.vulnerabilities).sort();
   assert.equal(names.length, counts.total);
   if (names.length === 0) return { status: 'no reported npm advisories', exception: null };
-  assert.ok(Number.isFinite(now.valueOf()) && now < new Date('2026-11-22T00:00:00Z'), 'S1 exception expired');
-  assert.deepEqual(names, ['@sveltejs/vite-plugin-svelte', 'deepmerge']);
-  assert.equal(lock.packages['node_modules/deepmerge']?.version, '4.3.1');
-  assert.equal(lock.packages['node_modules/@sveltejs/vite-plugin-svelte']?.version, '7.3.1');
-  assert.deepEqual(counts, { info: 0, low: 2, moderate: 0, high: 0, critical: 0, total: 2 });
+  assert.ok(Number.isFinite(now.valueOf()), 'invalid date');
+  const vulns = report.vulnerabilities;
+  const withDeepmerge = 'deepmerge' in vulns;
+  const used = [PICOMATCH, ...(withDeepmerge ? [DEEPMERGE] : [])];
+  for (const exception of used) {
+    assert.ok(now < new Date(exception.expires), `${exception.id} exception expired`);
+  }
+  assert.deepEqual(names, [...PICOMATCH.viaPicomatch, 'picomatch', ...(withDeepmerge ? ['deepmerge'] : [])].sort());
+  for (const [name, version] of Object.entries({ ...PICOMATCH.versions, ...(withDeepmerge ? DEEPMERGE.versions : {}) })) {
+    assert.equal(lock.packages[`node_modules/${name}`]?.version, version, `${name} lock version`);
+  }
+  assert.deepEqual(counts, withDeepmerge
+    ? { info: 0, low: 1, moderate: 0, high: 6, critical: 0, total: 7 }
+    : { info: 0, low: 0, moderate: 0, high: 6, critical: 0, total: 6 });
   for (const name of names) {
-    const finding = report.vulnerabilities[name];
+    const finding = vulns[name];
     assert.equal(finding.name, name);
-    assert.equal(finding.severity, 'low');
-    assert.equal(finding.fixAvailable, false);
+    assert.equal(finding.severity, name === 'deepmerge' ? 'low' : 'high');
     assert.deepEqual(finding.nodes, [`node_modules/${name}`]);
   }
-  assert.deepEqual(report.vulnerabilities['@sveltejs/vite-plugin-svelte'].via, ['deepmerge']);
-  const via = report.vulnerabilities.deepmerge.via;
-  assert.equal(via.length, 1);
-  assert.equal(via[0].name, 'deepmerge');
-  assert.equal(via[0].dependency, 'deepmerge');
-  assert.equal(via[0].severity, 'low');
-  assert.equal(via[0].range, '>=4.2.0 <=4.3.1');
-  assert.equal(via[0].url, 'https://github.com/advisories/GHSA-gcqx-w48m-w2h4');
+  const advisory = (name, spec) => {
+    const via = vulns[name].via;
+    assert.equal(via.length, 1);
+    assert.equal(via[0].name, name);
+    assert.equal(via[0].dependency, name);
+    assert.equal(via[0].severity, spec.severity);
+    assert.equal(via[0].range, spec.range);
+    assert.equal(via[0].url, `https://github.com/advisories/${spec.id}`);
+  };
+  advisory('picomatch', PICOMATCH);
+  const sorted = via => [...via].sort();
+  assert.deepEqual(sorted(vulns.fdir.via), ['picomatch']);
+  assert.deepEqual(sorted(vulns['svelte-check'].via), ['fdir']);
+  assert.deepEqual(sorted(vulns.tinyglobby.via), ['fdir', 'picomatch']);
+  assert.deepEqual(sorted(vulns.vite.via), ['picomatch', 'tinyglobby']);
+  assert.deepEqual(sorted(vulns['@sveltejs/vite-plugin-svelte'].via), withDeepmerge ? ['deepmerge', 'vite'] : ['vite']);
+  if (withDeepmerge) advisory('deepmerge', DEEPMERGE);
   return { status: 'accepted private S1 build-time risk; NOT a clean audit',
-    exception: 'GHSA-gcqx-w48m-w2h4', expires: '2026-11-22T00:00:00Z' };
+    exceptions: used.map(({ id, expires }) => ({ id, expires })) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
