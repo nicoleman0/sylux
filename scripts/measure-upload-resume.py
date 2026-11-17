@@ -165,6 +165,30 @@ class Client:
             cursor = page.get('next_cursor')
             require(page.get('has_more') and cursor, f'Seeded folder {entry_id} not found in root listing')
 
+    def append(self, upload_id, offset, data, extra, interruptions):
+        # A killed request can still be claiming the writer when the next PATCH arrives.
+        # Follow the client protocol: confirm the offset from status, wait for release, retry.
+        for attempt in range(4):
+            try:
+                return self.request('PATCH', f'/uploads/{upload_id}/content', data, extra)
+            except RuntimeError as error:
+                require(attempt < 3, f'PATCH at {offset} kept failing: {error}')
+                self.api.close()
+                deadline = time.monotonic() + 30
+                while True:
+                    state = self.request('GET', f'/uploads/{upload_id}')
+                    if not state['writer_active']:
+                        break
+                    require(time.monotonic() < deadline, f'Writer did not release: {state}')
+                    time.sleep(0.05)
+                if state['bytes_received'] == offset + len(data) and state['state'] in ('admitted', 'publishing'):
+                    interruptions.append({'case': 'acknowledgement-lost-on-retry', 'offset': offset})
+                    return {'status': state['status'], 'sha256': state.get('sha256'),
+                            'bytes_received': state['bytes_received']}
+                require(state['state'] == 'admitted' and state['bytes_received'] == offset,
+                        f'Upload changed while retrying PATCH at {offset}: {state}')
+                interruptions.append({'case': 'writer-busy-retry', 'offset': offset, 'error': str(error)[:120]})
+
     def run(self, source, length, expected, mode, name, sampler, interrupt=False, barrier=None, own_folder=False):
         if own_folder:
             parent = self.root_child(self.folder)
@@ -250,7 +274,7 @@ class Client:
                         interruptions.append({'case': 'response-discarded-after-checkpoint',
                                               'offset': state['bytes_received']})
                     else:
-                        staged = self.request('PATCH', f'/uploads/{upload_id}/content', data, extra)
+                        staged = self.append(upload_id, offset, data, extra, interruptions)
                     offset += len(data)
         elapsed = time.monotonic() - start
         sampler.take()
