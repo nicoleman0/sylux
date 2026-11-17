@@ -11,7 +11,7 @@ class RecordingTransport implements ApiTransport {
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     this.requests.push({ path, options });
     if (path === '/mutation-tickets') {
-      return { mutation_id: 'mutation-1', ticket: 'mock-mutation-ticket', expires_at: '2030-01-01T00:00:00Z' } as T;
+      return { mutation_id: 'mutation-1', ticket: 'mock-mutation-ticket', expires_at: 1893456000, max_chunk_length: 8 * 1024 * 1024 } as T;
     }
     if (path.startsWith('/folders/children')) {
       if (options.method === 'POST') return { id: 'folder-created', parent_id: 'root', name: 'Research', kind: 'folder', generation: 1, etag: '"g1"' } as T;

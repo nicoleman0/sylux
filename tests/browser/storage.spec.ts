@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import https from 'node:https';
 import { createRequire } from 'node:module';
@@ -460,4 +461,52 @@ test('uploaded PDF renders and changes pages over real TLS', { annotation: { typ
   await preview.getByRole('button', { name: 'Close preview', exact: true }).click();
   await expect(preview).toHaveCount(0);
   await expect(trigger).toBeFocused();
+});
+
+test('reload resumes real private chunks after matching file reselect', { annotation: { type: 'harness_case', description: 'storage_upload_resume' } }, async () => {
+  test.setTimeout(60_000);
+  await signIn();
+  const name = `resume-${phase}.bin`;
+  const original = Buffer.alloc(16 * 1024 * 1024 + 4096, 0x51);
+  let paused = true;
+  const offsets: number[] = [];
+  await page.route('**/uploads/*/content', async route => {
+    const offset = Number(route.request().headers()['upload-offset']);
+    offsets.push(offset);
+    if (paused && offset >= 8 * 1024 * 1024) await route.abort('connectionreset');
+    else await route.continue();
+  });
+  await chooseUpload({ name, mimeType: 'application/octet-stream', buffer: original });
+  await expect.poll(async () => {
+    const id = await page.evaluate(() => {
+      const key = Object.keys(sessionStorage).find(key => key.startsWith('sylux-upload-v1:'));
+      return key ? JSON.parse(sessionStorage.getItem(key)!).id : null;
+    });
+    if (!id) return 0;
+    return page.evaluate(async (id) => (await (await fetch(`/uploads/${id}`)).json()).bytes_received, id);
+  }).toBe(8 * 1024 * 1024);
+  await page.reload();
+  await signIn();
+  await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Select original file', exact: true })).toBeVisible();
+  const wrong = Buffer.from(original); wrong[9 * 1024 * 1024] = 0x52;
+  await page.getByLabel('Original upload file', { exact: true }).setInputFiles({ name, mimeType: 'application/octet-stream', buffer: wrong });
+  await expect(page.getByText('This file does not match the original upload.', { exact: false })).toBeVisible();
+  paused = false;
+  await page.getByLabel('Original upload file', { exact: true }).setInputFiles({ name, mimeType: 'application/octet-stream', buffer: original });
+  const row = page.getByRole('row', { name, exact: true });
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  expect(offsets.filter(offset => offset === 0)).toHaveLength(1);
+  // The list API resolves the final entry; the browser remains on the same authenticated origin.
+  const listing = await page.evaluate(async () => await (await fetch('/folders/children')).json());
+  const entry = listing.items.find((item: { name: string }) => item.name === name);
+  expect(entry).toBeTruthy();
+  const download = await page.evaluate(async (id) => {
+    const response = await fetch(`/entries/${id}/content`);
+    const bytes = await response.arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return { status: response.status, length: bytes.byteLength, sha256: [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('') };
+  }, entry.id);
+  expect(download.status).toBe(200); expect(download.length).toBe(original.length);
+  expect(download.sha256).toBe(createHash('sha256').update(original).digest('hex'));
 });

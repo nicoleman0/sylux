@@ -531,6 +531,11 @@ async fn reconcile_mutation(
                 fail(report, RecoveryDisposition::RecoveryRequired);
                 return Ok(());
             }
+            let mutation_id = mutation.id.clone();
+            workers.transact(move |tx| {
+                tx.execute("UPDATE upload_attempt SET writer_active=0,outcome=NULL WHERE mutation_id=?1", [mutation_id])?;
+                Ok(())
+            }).await.map_err(|_| ReconcileError::Unavailable)?;
             if expired {
                 let mutation_id = mutation.id.clone();
                 workers.transact(move |tx| {
@@ -540,8 +545,7 @@ async fn reconcile_mutation(
             }
         }
         "rejected" => {
-            // A durable rejection never licenses deletion. Unexpected or
-            // conflicting candidates are caught by the bounded inventory walk.
+            // Recovery preserves candidates; expiry cleanup handles incomplete staging.
             if mutation.result_revision.is_some() {
                 fail(report, RecoveryDisposition::RecoveryRequired);
             } else if candidates.iter().any(|c| c.attempt.writer_active) {

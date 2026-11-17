@@ -62,7 +62,7 @@ async function backend(page: Page, fault?: { name: string; outcome: 'failed' | '
     if (path === '/mutation-tickets') {
       const body = request.postDataJSON() as Admission;
       const id = `upload-${++sequence}`; tickets.set(id, body);
-      return json({ mutation_id: id, ticket: id, expires_at: '2030-01-01' }, 201);
+      return json({ mutation_id: id, ticket: id, expires_at: 1893456000, max_chunk_length: 8 * 1024 * 1024 }, 201);
     }
     if (path === '/uploads') {
       const body = request.postDataJSON() as Admission;
@@ -99,7 +99,7 @@ async function backend(page: Page, fault?: { name: string; outcome: 'failed' | '
     if (/^\/uploads\/[^/]+$/.test(path)) {
       const id = path.split('/')[2]!;
       if (request.method() === 'DELETE') { states.set(id, 'rejected'); active--; return route.fulfill({ status: 204 }); }
-      return json({ state: states.get(id), status: states.get(id) });
+      return json({ state: states.get(id), status: states.get(id), bytes_received: 0, writer_active: false });
     }
     return route.continue();
   });
@@ -604,7 +604,7 @@ test('navigation retains unknown results and global reconciliation controls', as
   await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toContainText('Upload status is unavailable. Try checking again before starting another upload.');
   unavailable = false;
   await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toContainText('Upload is admitted or still processing.');
+  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toContainText('The server is still processing this upload.');
   store.resolve('unknown.txt', 'committed');
   await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
   await expect(page.getByText('Upload status needs checking')).toHaveCount(0);

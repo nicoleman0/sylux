@@ -176,13 +176,14 @@ test.describe('upload date revalidation', () => {
     let sequence = 0;
     await page.route('**/mutation-tickets', route => {
       replacing = !!route.request().postDataJSON().replacement;
-      return route.fulfill({ status: 201, json: { mutation_id: `upload-${++sequence}`, ticket: `ticket-${sequence}`, expires_at: '2030-01-01' } });
+      return route.fulfill({ status: 201, json: { mutation_id: `upload-${++sequence}`, ticket: `ticket-${sequence}`, expires_at: 1893456000, max_chunk_length: 8 * 1024 * 1024 } });
     });
     await page.route('**/uploads', route => route.fulfill(replacing ? { status: 201, json: { upload_id: `upload-${sequence}` } } : { status: 409, json: { code: 'name_collision', existing: { id: 'old', parent_id: 'root', name: 'same.txt', kind: 'file', size: 3, etag: '"old:1"' } } }));
     await page.route('**/uploads/*/content', route => {
       const bytes = route.request().postDataBuffer()!;
       return route.fulfill({ json: { upload_id: `upload-${sequence}`, mutation_id: `upload-${sequence}`, status: 'staged', length: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), published: false } });
     });
+    await page.route('**/uploads/*', route => route.fulfill({ json: { state: 'admitted', status: 'admitted', bytes_received: 0, writer_active: false } }));
     await page.route('**/uploads/*/commit', route => { committed = true; return route.fulfill({ status: 201, json: { status: 'committed' } }); });
     await page.getByLabel('Choose files to upload').setInputFiles({ name: 'same.txt', mimeType: 'text/plain', buffer: Buffer.from('new') });
     await page.getByRole('button', { name: 'Replace file', exact: true }).click();

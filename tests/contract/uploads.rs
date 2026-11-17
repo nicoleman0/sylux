@@ -3576,3 +3576,279 @@ async fn permanent_removal_confirmation_rejects_changed_ancestor_path() {
     );
     fixture.close().await;
 }
+
+impl Fixture {
+    async fn append_chunk(&self, id: &str, ticket: &str, offset: u64, bytes: &[u8]) -> Response {
+        self.mutate(
+            "PATCH",
+            &format!("/uploads/{id}/content"),
+            &owner_auth(),
+            Some(ticket),
+            &[
+                ("Content-Type", "application/octet-stream".into()),
+                ("Upload-Offset", offset.to_string()),
+                ("Upload-Checksum", hex(&Sha256::digest(bytes))),
+            ],
+            bytes.to_vec(),
+        )
+        .await
+    }
+    async fn upload_status(&self, id: &str) -> Value {
+        self.request(
+            "GET",
+            &format!("/uploads/{id}"),
+            Some(&owner_auth()),
+            &[],
+            vec![],
+        )
+        .await
+        .json()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sequential_append_resumes_acknowledged_prefix_and_rejects_stale_offsets() {
+    let mut fixture = Fixture::new("append-resume").await;
+    let bytes = b"original bytes across chunks";
+    let (id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "resume.bin", bytes)
+        .await;
+    let first = fixture.append_chunk(&id, &ticket, 0, &bytes[..9]).await;
+    assert_eq!(first.status, 200, "{}", first.text());
+    assert_eq!(first.json()["bytes_received"], 9);
+    assert_eq!(
+        fixture
+            .append_chunk(&id, &ticket, 0, &bytes[..9])
+            .await
+            .status,
+        409
+    );
+    assert_eq!(
+        fixture
+            .append_chunk(&id, &ticket, 10, &bytes[9..])
+            .await
+            .status,
+        422
+    );
+    assert_eq!(fixture.upload_status(&id).await["bytes_received"], 9);
+    // Simulate an unacknowledged tail left after a write but before SQL checkpoint.
+    let name: String = fixture
+        .db()
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT staging_path FROM upload_attempt WHERE mutation_id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.product.join("staging").join(name))
+        .unwrap()
+        .write_all(b"discard this tail")
+        .unwrap();
+    fixture.restart().await;
+    assert_eq!(fixture.upload_status(&id).await["bytes_received"], 9);
+    let last = fixture.append_chunk(&id, &ticket, 9, &bytes[9..]).await;
+    assert_eq!(last.status, 200, "{}", last.text());
+    assert_eq!(last.json()["sha256"], hex(&Sha256::digest(bytes)));
+    assert_eq!(last.json()["status"], "staged");
+    let committed = fixture.commit_staged(&id, &ticket, bytes).await;
+    assert_eq!(committed.status, 201, "{}", committed.text());
+    let entry = committed.json()["id"].as_str().unwrap().to_owned();
+    let download = fixture
+        .request(
+            "GET",
+            &format!("/entries/{entry}/content"),
+            Some(&owner_auth()),
+            &[],
+            vec![],
+        )
+        .await;
+    assert_eq!(download.body.as_ref(), bytes);
+    assert_eq!(fixture.upload_status(&id).await["state"], "committed");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_append_preserves_offset_isolation_checksum_and_expiry() {
+    let fixture = Fixture::new("append-interrupt").await;
+    let bytes = b"abcdefghijklmno";
+    let (id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "partial.bin", bytes)
+        .await;
+    assert_eq!(
+        fixture
+            .append_chunk(&id, &ticket, 0, &bytes[..4])
+            .await
+            .status,
+        200
+    );
+    let mut stream = TcpStream::connect(&fixture.address).await.unwrap();
+    let request = format!(
+        "PATCH /uploads/{id}/content HTTP/1.1\r\nHost: {}\r\nOrigin: {}\r\nCookie: {}\r\nX-CSRF-Token: {}\r\nX-Mutation-ID: {ticket}\r\nUpload-Offset: 4\r\nUpload-Checksum: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: 11\r\n\r\nef",
+        fixture.address,
+        fixture.origin,
+        owner_auth().cookie,
+        owner_auth().csrf,
+        hex(&Sha256::digest(&bytes[4..]))
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    for _ in 0..100 {
+        if fixture.upload_status(&id).await["writer_active"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(fixture.upload_status(&id).await["writer_active"], true);
+    stream.shutdown().await.unwrap();
+    drop(stream);
+    for _ in 0..100 {
+        if fixture.upload_status(&id).await["writer_active"] == false {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(fixture.upload_status(&id).await["bytes_received"], 4);
+    let other = fixture
+        .mutate(
+            "PATCH",
+            &format!("/uploads/{id}/content"),
+            &other_auth(),
+            Some(&ticket),
+            &[
+                ("Upload-Offset", "4".into()),
+                ("Content-Type", "application/octet-stream".into()),
+                ("Upload-Checksum", hex(&Sha256::digest(&bytes[4..]))),
+            ],
+            bytes[4..].to_vec(),
+        )
+        .await;
+    assert_eq!(other.status, 401);
+    let bad = fixture
+        .mutate(
+            "PATCH",
+            &format!("/uploads/{id}/content"),
+            &owner_auth(),
+            Some(&ticket),
+            &[
+                ("Upload-Offset", "4".into()),
+                ("Content-Type", "application/octet-stream".into()),
+                ("Upload-Checksum", "0".repeat(64)),
+            ],
+            bytes[4..].to_vec(),
+        )
+        .await;
+    assert_eq!(bad.status, 422);
+    assert_eq!(fixture.upload_status(&id).await["bytes_received"], 4);
+    let db = fixture.db();
+    db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE mutation SET issued_at=0,expires_at=0 WHERE mutation_id=?1",
+            [&id],
+        )
+        .unwrap();
+    let storage = Arc::new(sylux::domain::upload::UploadStorage::open(&fixture.product).unwrap());
+    let mut cursor = String::new();
+    assert_eq!(
+        sylux::domain::upload::cleanup_expired_partials(
+            fixture.workers.as_ref().unwrap(),
+            storage,
+            &mut cursor,
+            1
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        fs::read_dir(fixture.product.join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(fixture.upload_status(&id).await["state"], "rejected");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn upload_limit_accepts_64_gib_and_rejects_one_byte_over() {
+    let fixture = Fixture::new("large-admission-cap").await;
+    for (length, expected) in [(64 * 1024u64.pow(3), 201), (64 * 1024u64.pow(3) + 1, 413)] {
+        let response = fixture.mutate("POST", "/mutation-tickets", &owner_auth(), None, &[("Content-Type", "application/json".into())], serde_json::to_vec(&serde_json::json!({"scope":"upload_create","parent_id":OWNER_ROOT,"parent_etag":folder_etag(OWNER_ROOT,1),"name":"large.bin","length":length})).unwrap()).await;
+        assert_eq!(response.status, expected, "{}", response.text());
+        if expected == 201 {
+            assert_eq!(response.json()["max_upload_length"], length);
+            assert_eq!(response.json()["max_chunk_length"], 8 * 1024 * 1024);
+        }
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn restart_recovers_prepared_partial_before_and_after_publication() {
+    use sylux::persistence::payload::{PayloadError, PayloadStore};
+    for boundary in ["publish.before_noreplace", "publish.before_final_dir_sync"] {
+        let fixture = Fixture::new("append-publication-fault").await;
+        let bytes = b"a partial with its final publication interrupted";
+        let (id, ticket) = fixture
+            .admit(&owner_auth(), OWNER_ROOT, 1, "recover.bin", bytes)
+            .await;
+        assert_eq!(
+            fixture
+                .append_chunk(&id, &ticket, 0, &bytes[..4])
+                .await
+                .status,
+            200
+        );
+        let db = fixture.db();
+        let name: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT staging_path FROM upload_attempt WHERE mutation_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut store = PayloadStore::open(&fixture.product).unwrap();
+        store
+            .append_at(&name, 4, bytes.len() as u64, &bytes[4..])
+            .unwrap();
+        store.set_publish_fault_hook(Some(Arc::new(move |at| {
+            if at == boundary {
+                Err(PayloadError::Io("injected_publish_fault"))
+            } else {
+                Ok(())
+            }
+        })));
+        let staging = store
+            .prepare_partial(&name, bytes.len() as u64, None, || false)
+            .unwrap();
+        let digest = staging.summary().sha256;
+        db.lock().unwrap().execute("UPDATE mutation SET state='publishing',completed_length=?2,completed_sha256=?3 WHERE mutation_id=?1", params![id,bytes.len() as i64,digest.as_slice()]).unwrap();
+        db.lock().unwrap().execute("UPDATE upload_attempt SET bytes_received=?2,completed_length=?2,completed_sha256=?3,writer_active=1 WHERE mutation_id=?1", params![id,bytes.len() as i64,digest.as_slice()]).unwrap();
+        assert_eq!(
+            staging.publish(digest).unwrap_err(),
+            PayloadError::Io("injected_publish_fault")
+        );
+        assert_eq!(fixture.commit_staged(&id, &ticket, bytes).await.status, 409);
+        let report = sylux::persistence::reconcile::reconcile(
+            fixture.workers.as_ref().unwrap(),
+            &fixture.product,
+        )
+        .await
+        .unwrap();
+        assert!(report.ready, "{boundary}: {report:?}");
+        assert_eq!(fixture.upload_status(&id).await["writer_active"], false);
+        let commit = fixture.commit_staged(&id, &ticket, bytes).await;
+        assert_eq!(commit.status, 201, "{}", commit.text());
+        let replay = fixture.upload_status(&id).await;
+        assert_eq!(replay["sha256"], hex(&digest));
+        assert_eq!(replay["state"], "committed");
+        fixture.close().await;
+    }
+}

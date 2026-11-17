@@ -235,6 +235,8 @@ async fn serve_listener(
     .map_err(|_| "payload_storage_unavailable")?;
     let mut terminate = signal(SignalKind::terminate()).map_err(|_| "signal_setup_failed")?;
     let cleanup = auth.start_cleanup();
+    let cleanup_storage = auth.storage.clone().ok_or("payload_storage_unavailable")?;
+    let cleanup_workers = workers.clone();
     let app = http::router(auth)
         .route("/healthz", get(|| async { "ok" }))
         .fallback(http::assets::serve);
@@ -262,6 +264,22 @@ async fn serve_listener(
         return Err("listener_start_failed");
     }
     contract_event("listener.bind");
+    let (cleanup_stop, mut cleanup_stopping) = tokio::sync::watch::channel(false);
+    let cleanup_task = tokio::spawn(async move {
+        let mut cursor = String::new();
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = cleanup_stopping.changed() => break,
+                _ = interval.tick() => {
+                    if sylux::domain::upload::cleanup_expired_partials(&cleanup_workers, cleanup_storage.clone(), &mut cursor,
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64).await.is_err() {
+                        eprintln!("partial upload cleanup failed; retrying next pass");
+                    }
+                }
+            }
+        }
+    });
 
     let server_joined = tokio::select! {
         _ = tokio::signal::ctrl_c() => false,
@@ -271,6 +289,8 @@ async fn serve_listener(
             true
         }
     };
+    cleanup_stop.send_replace(true);
+    let _ = cleanup_task.await;
     if server_joined {
         // The select consumed this JoinHandle; polling it again would panic.
         if let Some(cleanup) = cleanup {

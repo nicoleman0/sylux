@@ -27,9 +27,9 @@ async function replacementBackend(page: Page, outcome: 'confirmed' | 'lost-respo
     if (path === '/mutation-tickets') {
       const body = request.postDataJSON();
       replacement = !!body.replacement;
-      uploadedName = body.name;
+      uploadedName = body.name; uploadedBytes = Buffer.alloc(0);
       if (replacement) expect(body.replacement).toEqual({ entry_id: 'old', etag: '"old:1"' });
-      return json({ mutation_id: `upload-${++issued}`, ticket: `ticket-${issued}`, expires_at: '2030-01-01' }, 201);
+      return json({ mutation_id: `upload-${++issued}`, ticket: `ticket-${issued}`, expires_at: 1893456000, max_chunk_length: 8 * 1024 * 1024 }, 201);
     }
     if (path === '/uploads') {
       if (!replacement && uploadedName === original.name) return json({ code: 'name_collision', message: 'Name conflict', request_id: 'test', existing: original }, 409);
@@ -39,7 +39,7 @@ async function replacementBackend(page: Page, outcome: 'confirmed' | 'lost-respo
       }
       return json({ upload_id: `upload-${issued}` }, 201);
     }
-    if (path.endsWith('/content') && request.method() === 'PUT') {
+    if (path.endsWith('/content') && request.method() === 'PATCH') {
       sent++;
       uploadedBytes = request.postDataBuffer()!;
       if (replacement) expect(uploadedBytes).toEqual(bytes);
@@ -61,7 +61,7 @@ async function replacementBackend(page: Page, outcome: 'confirmed' | 'lost-respo
       return outcome === 'confirmed' ? json({ status: 'committed' }, 201) : route.abort('failed');
     }
     if (/^\/uploads\/upload-\d+$/.test(path) && request.method() === 'DELETE') return route.fulfill({ status: 204 });
-    if (/^\/uploads\/upload-\d+$/.test(path)) return json({ state: committed ? 'committed' : 'publishing', status: committed ? 'committed' : 'staged' });
+    if (/^\/uploads\/upload-\d+$/.test(path)) return json({ state: committed ? 'committed' : uploadedBytes.length ? 'publishing' : 'admitted', status: committed ? 'committed' : uploadedBytes.length ? 'staged' : 'admitted', bytes_received: uploadedBytes.length, writer_active: false });
     return route.continue();
   });
   await page.goto('/');

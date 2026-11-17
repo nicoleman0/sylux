@@ -37,7 +37,7 @@ export class HttpTransport implements ApiTransport {
       headers.set('Content-Type', 'application/json');
       body = JSON.stringify(options.body);
     }
-    if (method === 'PUT' && body instanceof Blob && options.onUploadProgress) {
+    if ((method === 'PUT' || method === 'PATCH') && body instanceof Blob && options.onUploadProgress) {
       return new Promise<T>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         const signal = options.signal;
@@ -159,7 +159,7 @@ export class ApiClient {
   }
 }
 
-export type MutationTicket = { mutation_id: string; ticket: string; expires_at: string };
+export type MutationTicket = { mutation_id: string; ticket: string; expires_at: number; max_chunk_length: number };
 
 export class MutationApi {
   constructor(private readonly client: ApiClient) {}

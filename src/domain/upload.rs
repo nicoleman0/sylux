@@ -20,7 +20,8 @@ use tokio::sync::watch;
 use unicode_normalization::UnicodeNormalization;
 
 pub const UPLOAD_SCOPE: &str = "upload_create";
-pub const MAX_UPLOAD_LENGTH: u64 = 1024 * 1024 * 1024;
+pub const MAX_UPLOAD_LENGTH: u64 = 64 * 1024 * 1024 * 1024;
+pub const MAX_CHUNK_LENGTH: u64 = 8 * 1024 * 1024;
 pub const TICKET_SECONDS: i64 = 24 * 60 * 60;
 const MAX_TICKET_LENGTH: usize = 4096;
 
@@ -470,4 +471,42 @@ fn read_mutation_key(root: &Path) -> Result<[u8; 32], StorageOpenError> {
         .read_exact(&mut key)
         .map_err(|_| StorageOpenError::MutationKey)?;
     Ok(key)
+}
+
+/// One bounded sweep; rejection commits before private bytes are unlinked.
+pub async fn cleanup_expired_partials(
+    workers: &crate::persistence::sqlite::SqliteWorkers,
+    storage: Arc<UploadStorage>,
+    after: &mut String,
+    at: i64,
+) -> Result<usize, &'static str> {
+    use rusqlite::params;
+    let cursor = after.clone();
+    let rows = workers.transact(move |tx| {
+        let rows = {
+            let mut statement = tx.prepare(
+                "SELECT a.attempt_id,a.staging_path,a.mutation_id FROM upload_attempt a JOIN mutation m USING(mutation_id) WHERE a.attempt_id>?1 AND a.writer_active=0 AND a.completed_length IS NULL AND a.completed_sha256 IS NULL AND m.result_revision_id IS NULL AND m.state IN ('admitted','rejected') AND m.expires_at<=?2 ORDER BY a.attempt_id LIMIT 32"
+            )?;
+            statement.query_map(params![cursor,at], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (_,_,mutation) in &rows {
+            tx.execute("UPDATE mutation SET state='rejected' WHERE mutation_id=?1 AND state='admitted'", [mutation])?;
+        }
+        Ok(rows)
+    }).await.map_err(|_| "partial_cleanup_database_unavailable")?;
+    let count = rows.len();
+    let next = rows.last().map(|row| row.0.clone()).unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        for (_, name, _) in rows {
+            storage
+                .payloads
+                .remove_partial(&name)
+                .map_err(|_| "partial_cleanup_failed")?;
+        }
+        Ok::<_, &'static str>(())
+    })
+    .await
+    .map_err(|_| "partial_cleanup_worker_failed")??;
+    *after = next;
+    Ok(count)
 }

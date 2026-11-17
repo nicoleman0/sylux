@@ -47,6 +47,7 @@ fn safe_reporter_events(log: &str) -> Vec<Value> {
         "storage_listing_states",
         "storage_upload_download_roundtrip",
         "storage_delayed_upload_browsing",
+        "storage_upload_resume",
         "storage_upload_cancel",
         "storage_lost_commit_response",
         "storage_pdf_preview",
