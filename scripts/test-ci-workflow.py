@@ -19,7 +19,8 @@ class RequiredChecks(unittest.TestCase):
     def run_gate(self, **overrides):
         env = dict(os.environ, SELECTION='success', FULL='true', AUTHORITY='true',
                    RUSTDOC='false', NATIVE_RESULT='success', WEB_RESULT='success',
-                   TLS_RESULT='success', MODEL_RESULT='success', DOC_RESULT='skipped')
+                   TLS_RESULT='success', MODEL_RESULT='success', DOC_RESULT='skipped',
+                   SEMGREP_RESULT='success')
         env.update(overrides)
         return subprocess.run(['bash', '-e', '-c', gate_script()], env=env,
                               capture_output=True, text=True)
@@ -51,6 +52,13 @@ class RequiredChecks(unittest.TestCase):
         self.assertEqual(self.run_gate(FULL='false', AUTHORITY='false',
                                       NATIVE_RESULT='skipped', WEB_RESULT='skipped',
                                       TLS_RESULT='skipped', MODEL_RESULT='skipped').returncode, 0)
+
+    def test_semgrep_is_required_for_every_change(self):
+        for full, authority in (('true', 'true'), ('false', 'false')):
+            for result in ('failure', 'cancelled', 'skipped', ''):
+                with self.subTest(full=full, result=result):
+                    self.assertNotEqual(self.run_gate(FULL=full, AUTHORITY=authority,
+                                                     SEMGREP_RESULT=result).returncode, 0)
 
     def test_rust_documentation_requires_its_selected_check(self):
         for result in ('failure', 'cancelled', 'skipped', ''):

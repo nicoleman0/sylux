@@ -445,6 +445,7 @@ impl CanceledPayload {
     /// and never unlinked. `last` is the final row seen, so the cursor moves
     /// past it and later rows are not starved.
     pub fn page(db: &Connection, after: &str, limit: i64) -> rusqlite::Result<CanceledPage> {
+        // nosemgrep: sylux.rust.sql-built-with-format -- interpolates a constant SQL fragment
         let mut statement = db.prepare(&format!(
             "SELECT a.attempt_id,a.mutation_id,a.staging_path,a.completed_length {CANCELED_PAYLOAD_RULE} AND a.attempt_id>?1 ORDER BY a.attempt_id LIMIT ?2"
         ))?;
@@ -481,6 +482,7 @@ impl CanceledPayload {
 
     /// Recheck the rule for this exact attempt and path.
     pub fn still_authorized(&self, db: &Connection) -> rusqlite::Result<bool> {
+        // nosemgrep: sylux.rust.sql-built-with-format -- interpolates a constant SQL fragment
         db.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 {CANCELED_PAYLOAD_RULE} AND a.attempt_id=?1 AND a.staging_path=?2)"
