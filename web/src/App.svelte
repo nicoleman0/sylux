@@ -794,7 +794,14 @@
     try {
       if (bulkNeedsRefresh) await reconcileBulk();
       else await refresh();
-    } finally { if (generation === sessionGeneration && request === workspaceRefreshRequest) workspaceRefreshing = false; }
+    } finally {
+      if (generation === sessionGeneration && request === workspaceRefreshRequest) {
+        workspaceRefreshing = false;
+        // Rows are disabled while loading, which drops a focused row to body. Put it back.
+        await tick();
+        if (generation === sessionGeneration && request === workspaceRefreshRequest && (!document.activeElement || document.activeElement === document.body)) listItemFor(listFocusId)?.focus({ preventScroll: true });
+      }
+    }
   }
 
   async function retryFolder(): Promise<void> {
