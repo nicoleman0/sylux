@@ -309,8 +309,11 @@
             // A row removed mid-load drops focus to body; put it back on the same entry if it survived.
             const rowItem = !active || active === document.body ? listItemFor(listFocusId) : null;
             if (!rowItem) listFocusId = null;
+            const items = listItems();
+            const moved = pendingMove && active === heading ? items[moveIndex(-1, items.length, pendingMove)] : null;
+            pendingMove = null;
             if (!interacting) {
-              (rowItem ?? heading)?.focus({ preventScroll: true });
+              (rowItem ?? moved ?? heading)?.focus({ preventScroll: true });
               const samePage = context && (searchQuery ? context.searchPage === searchPageIndex : context.page === pageIndex);
               window.scrollTo(0, samePage ? context.scroll : 0);
             }
@@ -389,6 +392,8 @@
 
   let shortcutsOpen = $state(false);
   let listFocusId: string | null = null;
+  // A move key pressed on the heading while rows are disabled by a load; applied when the load ends.
+  let pendingMove: 'next' | 'previous' | 'first' | 'last' | null = null;
   const itemSelector = '.item-name, .entry-selection input';
   function listItems(): HTMLElement[] { return [...document.querySelectorAll<HTMLElement>('.files-content .file-row .item-name')]; }
   function listItemFor(id: string | null): HTMLElement | null {
@@ -397,6 +402,7 @@
   function trackListFocus(event: FocusEvent): void {
     const target = event.target instanceof HTMLElement ? event.target : null;
     listFocusId = target?.matches(itemSelector) ? target.closest<HTMLElement>('.file-row')?.dataset.entryId ?? null : null;
+    if (target?.id !== 'folder-title') pendingMove = null;
   }
   function extendSelection(fromId: string, toId: string): void {
     const anchor = activeEntries.some((entry) => entry.id === selectionAnchor) ? selectionAnchor! : fromId;
@@ -426,6 +432,10 @@
       const id = row?.dataset.entryId;
       const current = row ? items.findIndex((item) => item.closest('.file-row') === row) : -1;
       const next = moveIndex(current, items.length, intent.to);
+      if (onHeading && (next < 0 || items[next].matches(':disabled'))) {
+        if (loading) { event.preventDefault(); pendingMove = intent.to; }
+        return;
+      }
       if (next < 0) return;
       event.preventDefault();
       if (intent.extend && id && !fileMutationBusy) extendSelection(id, items[next].closest<HTMLElement>('.file-row')!.dataset.entryId!);
