@@ -53,6 +53,8 @@ rules:
       - metavariable-regex:
           metavariable: $SQL
           regex: (?i)"[^"]*\b(select|insert|update|delete|pragma|create|drop|alter)\b
+      # PRAGMA cannot bind parameters; the value is an i64 (src/persistence/sqlite.rs).
+      - pattern-not: $C.query_row(&format!("PRAGMA busy_timeout = {busy_ms}"), ...)
 
   - id: sylux.ts.code-evaluation
     languages: [typescript, javascript]

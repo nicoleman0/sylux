@@ -121,7 +121,6 @@ fn configure_and_verify(
     connection
         .execute("PRAGMA foreign_keys = ON", [])
         .map_err(|error| ConnectionError::Open(error.to_string()))?;
-    // nosemgrep: sylux.rust.sql-built-with-format -- PRAGMA cannot bind; value is an integer
     connection
         .query_row(&format!("PRAGMA busy_timeout = {busy_ms}"), [], |row| {
             row.get::<_, i64>(0)

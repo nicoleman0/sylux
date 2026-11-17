@@ -1,0 +1,9 @@
+# Replaces Semgrep's built-in default (which also skips tests/ and web/tests/).
+# Test code is excluded on purpose: it spawns the server binary and builds
+# fixture SQL, which the product rules flag as noise (13 findings at SYL-93).
+.git/
+node_modules/
+target/
+web/dist/
+tests/
+web/tests/
