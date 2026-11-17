@@ -159,12 +159,33 @@ pub async fn reconcile(
     }
 
     let store = match PayloadStore::open(root_path) {
-        Ok(store) => store,
+        Ok(store) => std::sync::Arc::new(store),
         Err(_) => {
             fail(&mut report, RecoveryDisposition::RecoveryRequired);
             return Ok(report);
         }
     };
+
+    let removal_metadata_valid = workers
+        .read(|db| {
+            let inconsistent: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM removal_cleanup c JOIN blob b ON b.blob_id=c.blob_id WHERE (c.state='complete') != (b.lifecycle='deleted') OR b.lifecycle='live')", [], |r| r.get(0))?;
+            if inconsistent { return Ok(false); }
+            let mut stmt = db.prepare("SELECT blob_id FROM blob WHERE lifecycle!='live'")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let blob: String = row.get(0)?;
+                if !super::cleanup::authorized(db, &blob)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+        .await
+        .map_err(|_| ReconcileError::Unavailable)?;
+    if !removal_metadata_valid || super::cleanup::resume(workers, &store).await.is_err() {
+        fail(&mut report, RecoveryDisposition::RecoveryRequired);
+        return Ok(report);
+    }
 
     // Verify all authoritative blob references in keyset pages. Each page is
     // bounded; each referenced payload is opened no-follow and streamed once.
@@ -174,7 +195,7 @@ pub async fn reconcile(
         let page = workers
             .read(move |db| {
                 let mut statement = db.prepare(
-                    "SELECT blob_id,shard,length,sha256 FROM blob WHERE blob_id>?1 ORDER BY blob_id LIMIT ?2",
+                    "SELECT blob_id,shard,length,sha256 FROM blob WHERE blob_id>?1 AND lifecycle='live' ORDER BY blob_id LIMIT ?2",
                 )?;
                 let rows = statement.query_map(params![cursor, PAGE], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Vec<u8>>(3)?))
@@ -363,11 +384,16 @@ async fn reconcile_mutation(
                     return Ok(());
                 }
             };
+            let checked_blob = blob_id.clone();
+            let removed = workers
+                .read(move |db| super::cleanup::authorized(db, &checked_blob))
+                .await
+                .map_err(|_| ReconcileError::Unavailable)?;
             let committed_attempt = candidates.iter().any(|candidate| {
                 candidate.blob_id == blob_id
                     && candidate.attempt.completed_length == Some(length)
                     && candidate.attempt.completed_sha256.as_deref() == Some(digest.as_slice())
-                    && candidate.final_file
+                    && (candidate.final_file || removed)
             });
             if revision_id != linked
                 || entry_id.is_empty()

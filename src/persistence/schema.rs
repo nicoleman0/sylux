@@ -6,7 +6,7 @@ use super::{root::InstallationIdentity, sqlite};
 
 /// Versions this build understands and serves. A bound database reporting
 /// anything else refuses startup instead of migrating guesses.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 1;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
 pub const SUPPORTED_LAYOUT_VERSION: i64 = 1;
 pub const SUPPORTED_NAME_KEY_VERSION: i64 = 1;
 pub const SUPPORTED_KEY_VERSION: i64 = 1;
@@ -24,6 +24,10 @@ const CORE_TABLES: &[&str] = &[
     "mutation",
     "upload_attempt",
     "event",
+    "removal",
+    "removal_member",
+    "removal_cleanup",
+    "binding_transition",
 ];
 const CORE_INDEXES: &[&str] = &[
     "entry_active_sibling",
@@ -34,6 +38,9 @@ const CORE_INDEXES: &[&str] = &[
     "session_account",
     "mutation_principal",
     "upload_attempt_one_active",
+    "removal_cleanup_pending",
+    "removal_member_operation",
+    "removal_cleanup_operation",
 ];
 const CORE_TRIGGERS: &[&str] = &[
     "entry_insert_parent_active_folder",
@@ -44,6 +51,20 @@ const CORE_TRIGGERS: &[&str] = &[
     "entry_update_current_same_entry",
     "revision_rows_are_immutable",
     "revision_rows_cannot_be_deleted",
+    "removal_immutable_update",
+    "removal_immutable_delete",
+    "removal_member_immutable_update",
+    "removal_member_immutable_delete",
+    "removal_member_owner",
+    "revision_requires_live_blob",
+    "removed_entry_stays_removed",
+    "blob_delete_authorization",
+    "blob_no_resurrection",
+    "removed_parent_rejects_insert",
+    "removed_parent_rejects_move",
+    "removal_cleanup_immutable_delete",
+    "removal_cleanup_only_completion",
+    "removal_cleanup_requires_members",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +119,9 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
             verify_core_schema(connection)?;
             Ok(MigrationOutcome::AlreadyCurrent)
         }
+        1 => Err(SchemaError::Inconsistent(
+            "v1 requires verified binding upgrade through serve",
+        )),
         0 => {
             let tables: i64 = connection
                 .query_row(
@@ -114,7 +138,7 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
             connection
                 .execute_batch(MIGRATION_0001_S1)
                 .map_err(sql_error)?;
-            verify_core_schema(connection)?;
+            migrate_v1(connection, None)?;
             Ok(MigrationOutcome::Applied)
         }
         _ => Err(SchemaError::Inconsistent("unsupported user_version")),
@@ -190,4 +214,23 @@ pub fn insert_installation_row(
         )
         .map_err(sql_error)?;
     transaction.commit().map_err(sql_error)
+}
+
+/// Upgrade metadata atomically, optionally recording the sole permitted binding transition.
+pub fn migrate_v1(
+    connection: &Connection,
+    manifest_hash: Option<&[u8]>,
+) -> Result<(), SchemaError> {
+    let tx = connection.unchecked_transaction().map_err(sql_error)?;
+    tx.execute_batch(include_str!("../../migrations/sqlite/0002_removal.sql"))
+        .map_err(sql_error)?;
+    if let Some(hash) = manifest_hash {
+        tx.execute(
+            "INSERT INTO binding_transition(singleton,legacy_manifest_hash) VALUES(1,?1)",
+            [hash],
+        )
+        .map_err(sql_error)?;
+    }
+    verify_core_schema(&tx)?;
+    tx.commit().map_err(sql_error)
 }

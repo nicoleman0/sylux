@@ -119,6 +119,47 @@ impl PayloadStore {
         })
     }
 
+    /// The caller must hold durable removal authorization and exclude retained references.
+    pub(crate) fn unlink_authorized(&self, blob_id: &str) -> Result<(), PayloadError> {
+        #[cfg(feature = "test-harness")]
+        self.cleanup_boundary("cleanup.before_unlink")?;
+        validate_id(blob_id)?;
+        let shard = match open_directory(&self.payloads, &blob_id[..2]) {
+            Ok(shard) => shard,
+            Err(PayloadError::Missing) => {
+                return fs::fsync(&self.payloads)
+                    .map_err(|_| PayloadError::Io("payload_directory_sync_failed"));
+            }
+            Err(error) => return Err(error),
+        };
+        match fs::statat(&shard, blob_id, fs::AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => {
+                if !FileType::from_raw_mode(stat.st_mode).is_file()
+                    || stat.st_nlink != 1
+                    || stat.st_mode & 0o777 != 0o600
+                {
+                    return Err(PayloadError::Integrity);
+                }
+                fs::unlinkat(&shard, blob_id, fs::AtFlags::empty())
+                    .map_err(|_| PayloadError::Io("payload_unlink_failed"))?;
+            }
+            Err(error) if std::io::Error::from(error).kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(PayloadError::Io("payload_stat_failed")),
+        }
+        #[cfg(feature = "test-harness")]
+        self.cleanup_boundary("cleanup.before_directory_sync")?;
+        fs::fsync(&shard).map_err(|_| PayloadError::Io("payload_directory_sync_failed"))
+    }
+
+    #[cfg(feature = "test-harness")]
+    #[inline(never)]
+    pub(crate) fn cleanup_boundary(&self, boundary: &'static str) -> Result<(), PayloadError> {
+        if let Some(hook) = &self.publish_fault_hook {
+            hook(boundary)?;
+        }
+        Ok(())
+    }
+
     /// Verify a referenced blob without following links before exposing it.
     pub fn open_verified(
         &self,

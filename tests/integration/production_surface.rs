@@ -56,18 +56,14 @@ fn default_release_excludes_test_only_seed_and_fault_control_symbols() {
     let test_harness = target.join("sylux");
     let test_symbols = function_symbols(&test_harness);
 
-    // These fragments are taken from actual `nm -C` FUNCTION records in the
-    // optimized feature build: the setup pause function, each test barrier's
-    // monomorphized drop function, and the payload fault-hook closure type.
-    // PublishFaultHook is a type alias (not a symbol), so assert its emitted
-    // closure/drop function rather than searching stripped string literals.
+    // Named test seams survive optimization without relying on an Arc drop instantiation.
     let expected_test_only = [
         "sylux::http::setup::pause_at_setup_commit",
         "coordinator_test_support::Fixture>::create",
         "Arc<sylux::domain::coordinator::FinalCommitTestBarrier>>::drop_slow",
         "Arc<sylux::http::setup::SetupCommitTestBarrier>>::drop_slow",
         "Arc<sylux::http::uploads::UploadCancelTestBarrier>>::drop_slow",
-        "Weak<dyn core::ops::function::Fn<(&str,), Output = core::result::Result<(), sylux::persistence::payload::PayloadError>>",
+        "sylux::persistence::payload::PayloadStore>::cleanup_boundary",
     ];
     for symbol in expected_test_only {
         assert!(

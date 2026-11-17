@@ -653,3 +653,92 @@ fn hex(bytes: &[u8]) -> String {
     }
     out
 }
+
+/// Complete the only supported schema/binding transition under the startup writer lock.
+pub fn upgrade_binding(
+    bound: &BoundDatabase,
+    root: &Path,
+    manifest: &InstallationIdentity,
+) -> Result<InstallationIdentity, BindingError> {
+    if manifest.schema_version != 1 {
+        verify_binding(bound, root, manifest)?;
+        super::contract_event("binding.verified");
+        super::contract_event("migration.start");
+        return Ok(manifest.clone());
+    }
+    verify_protected_material(root)?;
+    let row = read_installation_row(&bound.connection)?;
+    let mut expected = manifest.clone();
+    expected.schema_version = row.schema_version;
+    if expected != row {
+        return Err(BindingError::IdentityMismatch("schema_version"));
+    }
+    if !row.initialized
+        || row.layout_version != schema::SUPPORTED_LAYOUT_VERSION
+        || row.name_key_version != schema::SUPPORTED_NAME_KEY_VERSION
+        || row.key_version != schema::SUPPORTED_KEY_VERSION
+    {
+        return Err(BindingError::UnsupportedVersion("schema_version"));
+    }
+    let version: i64 = bound
+        .connection
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|_| BindingError::DatabaseInvalid("schema_version_unreadable"))?;
+    let bytes =
+        serde_json::to_vec(manifest).map_err(|_| BindingError::Io("manifest_encode_failed"))?;
+    let hash = Sha256::digest(&bytes);
+    if row.schema_version == 1 && version == 1 {
+        super::contract_event("binding.verified");
+        super::contract_event("migration.start");
+        schema::migrate_v1(&bound.connection, Some(hash.as_slice()))
+            .map_err(|_| BindingError::DatabaseInvalid("schema_migration_failed"))?;
+    } else if row.schema_version == 2 && version == 2 {
+        let recorded: Vec<u8> = bound
+            .connection
+            .query_row(
+                "SELECT legacy_manifest_hash FROM binding_transition WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| BindingError::IdentityMismatch("schema_version"))?;
+        if recorded != hash.as_slice() {
+            return Err(BindingError::IdentityMismatch("schema_version"));
+        }
+        schema::verify_core_schema(&bound.connection)
+            .map_err(|_| BindingError::DatabaseInvalid("schema_invalid"))?;
+    } else {
+        return Err(BindingError::UnsupportedVersion("schema_version"));
+    }
+    if row.schema_version == 2 {
+        super::contract_event("binding.verified");
+        super::contract_event("migration.start");
+    }
+    let mut upgraded = manifest.clone();
+    upgraded.schema_version = 2;
+    let bytes =
+        serde_json::to_vec(&upgraded).map_err(|_| BindingError::Io("manifest_encode_failed"))?;
+    let root_fd = open_root_directory(root)?;
+    // An interrupted exclusive temporary publication may leave only our fixed temp name.
+    match fs::statat(&root_fd, MANIFEST_TMP_NAME, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => {
+            validate_private_regular(
+                &stat,
+                "manifest_not_regular",
+                "manifest_aliased",
+                "manifest_mode_not_0600",
+            )
+            .map_err(BindingError::ManifestInvalid)?;
+            fs::unlinkat(&root_fd, MANIFEST_TMP_NAME, AtFlags::empty())
+                .map_err(|_| BindingError::Io("manifest_temp_remove_failed"))?;
+        }
+        Err(error) if std::io::Error::from(error).kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(BindingError::Io("manifest_stat_failed")),
+    }
+    write_exclusive(&root_fd, MANIFEST_TMP_NAME, &bytes)
+        .map_err(|_| BindingError::Io("manifest_write_failed"))?;
+    fs::renameat(&root_fd, MANIFEST_TMP_NAME, &root_fd, MANIFEST_NAME)
+        .map_err(|_| BindingError::Io("manifest_publish_failed"))?;
+    fs::fsync(&root_fd).map_err(|_| BindingError::Io("manifest_sync_failed"))?;
+    verify_binding(bound, root, &upgraded)?;
+    Ok(upgraded)
+}

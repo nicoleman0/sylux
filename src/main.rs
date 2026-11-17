@@ -142,21 +142,20 @@ async fn run_serve(configuration: CliConfig) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(error) = root::verify_binding(&bound, &configuration.root, &manifest) {
-        // Let SQLite checkpoint and remove its WAL files before reporting refusal.
-        drop(bound);
-        contract_event_reason("binding.refused", error.reason());
-        return ExitCode::FAILURE;
-    }
-    contract_event("binding.verified");
-
-    contract_event("migration.start");
+    let _manifest = match root::upgrade_binding(&bound, &configuration.root, &manifest) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            drop(bound);
+            contract_event_reason("binding.refused", error.reason());
+            return ExitCode::FAILURE;
+        }
+    };
     if let Err(error) = schema::apply_migrations(&bound.connection) {
         drop(bound);
         contract_event_reason("startup.failed", &error.reason());
         return ExitCode::FAILURE;
     }
-
+    contract_event("migration.complete");
     contract_event("recovery.start");
     if let Err(error) = schema::recovery_checks(&bound.connection) {
         drop(bound);
@@ -234,11 +233,11 @@ async fn serve_listener(
     )
     .with_storage_root(&configuration.root)
     .map_err(|_| "payload_storage_unavailable")?;
+    let mut terminate = signal(SignalKind::terminate()).map_err(|_| "signal_setup_failed")?;
+    let cleanup = auth.start_cleanup();
     let app = http::router(auth)
         .route("/healthz", get(|| async { "ok" }))
         .fallback(http::assets::serve);
-    // Signal setup must succeed before spawning tasks that could outlive an error.
-    let mut terminate = signal(SignalKind::terminate()).map_err(|_| "signal_setup_failed")?;
     let handle = axum_server::Handle::new();
     let server_handle = handle.clone();
     let mut task = tokio::spawn(async move {
@@ -251,6 +250,13 @@ async fn serve_listener(
     let listening = tokio::time::timeout(Duration::from_secs(5), handle.listening()).await;
     if !matches!(listening, Ok(Some(_))) {
         let _ = task.await;
+        if let Some(cleanup) = cleanup {
+            cleanup
+                .shutdown()
+                .await
+                .map_err(|_| "cleanup_shutdown_failed")?;
+        }
+        let _ = workers.shutdown().await;
         drop(bound);
         retain_guard_until_process_exit(guard);
         return Err("listener_start_failed");
@@ -267,13 +273,27 @@ async fn serve_listener(
     };
     if server_joined {
         // The select consumed this JoinHandle; polling it again would panic.
+        if let Some(cleanup) = cleanup {
+            cleanup
+                .shutdown()
+                .await
+                .map_err(|_| "cleanup_shutdown_failed")?;
+        }
         let _ = workers.shutdown().await;
         drop(bound);
         retain_guard_until_process_exit(guard);
         return Ok(());
     }
     handle.graceful_shutdown(Some(Duration::from_secs(5)));
-    drain_server_task(task, bound, guard, Some(workers), Duration::from_secs(6)).await;
+    drain_server_task(
+        task,
+        bound,
+        guard,
+        Some(workers),
+        cleanup,
+        Duration::from_secs(6),
+    )
+    .await;
     Ok(())
 }
 
@@ -282,12 +302,18 @@ async fn drain_server_task(
     bound: root::BoundDatabase,
     guard: ownership::OwnershipGuard,
     workers: Option<SqliteWorkers>,
+    cleanup: Option<sylux::persistence::cleanup::Runner>,
     join_timeout: Duration,
 ) {
     if tokio::time::timeout(join_timeout, &mut task).await.is_err() {
         // Dropping the handle would detach a task that still uses the root.
         task.abort();
         let _ = task.await;
+    }
+    if let Some(cleanup) = cleanup
+        && cleanup.shutdown().await.is_err()
+    {
+        contract_event_reason("removal.cleanup_pending", "cleanup_shutdown_failed");
     }
     if let Some(workers) = workers {
         let _ = workers.shutdown().await;
@@ -379,7 +405,7 @@ mod tests {
             std::future::pending::<std::io::Result<()>>().await
         });
 
-        drain_server_task(task, bound, guard, None, Duration::from_millis(20)).await;
+        drain_server_task(task, bound, guard, None, None, Duration::from_millis(20)).await;
 
         assert!(
             dropped_rx.try_recv().is_ok(),

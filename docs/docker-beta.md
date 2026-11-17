@@ -214,3 +214,12 @@ If the new image fails before it starts, restore the prior image ID in `.env` an
 Send beta feedback and the host, Docker Engine/Compose versions, image ID, and a brief reproduction to **hello@corvus-dev.com**. Remove setup tokens, passwords, private keys, and file contents before sharing logs.
 
 Docker reference: [Compose bind mounts](https://docs.docker.com/reference/compose-file/services/#volumes), [variable interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/), [`docker compose run`](https://docs.docker.com/reference/cli/docker/compose/run/), and [pull policy](https://docs.docker.com/reference/compose-file/services/#pull_policy).
+
+## Schema v2 upgrade
+
+`serve` upgrades a v1 root to v2 once, with recovery for an interrupted manifest
+write. Take a complete stopped-service backup first; rollback needs that full
+backup and its matching release. Offline admin commands require the upgrade to
+finish first and report `*_schema_upgrade_required_run_serve` for a v1 manifest.
+See [Trash upgrade and recovery](trash.md#schema-upgrade-and-offline-admin) before
+upgrading or using offline password recovery or payload verification.

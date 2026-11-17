@@ -1,7 +1,7 @@
 import { defaultAppearance, type Appearance, type AppearanceUpdate } from './appearance';
 import { HttpError, type ApiTransport, type RequestOptions } from './api';
 import type { User, Account } from './session';
-import type { Entry, Folder, ResultSort, SearchHit } from './listing';
+import type { Entry, Folder, ResultSort, SearchHit, RemovalSelection, RemovalResult } from './listing';
 import type { UploadStatus } from './transfers';
 
 const root: Folder = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root-1"' };
@@ -73,6 +73,33 @@ export class MockTransport implements ApiTransport {
   private entries = seed.map((entry) => ({ ...entry }));
   private deletedEntries: Entry[] = [];
   private sequence = 0;
+  private removalError(status: number, code: string): HttpError {
+    return new HttpError(status, { code, message: code, request_id: 'mock' });
+  }
+  private removalFingerprint(ids: string[], all: boolean): number {
+    const roots = all ? this.deletedEntries.map(entry => entry.id).sort() : [...ids].sort();
+    const members = new Set(roots);
+    const inventory = [this.root, ...this.entries, ...this.deletedEntries, ...this.removedEntries];
+    const pending = inventory.filter(entry => members.has(entry.id) && entry.kind === 'folder').map(entry => entry.id);
+    while (pending.length) {
+      const parent = pending.pop();
+      for (const entry of this.entries) if (entry.parent_id === parent && !members.has(entry.id)) { members.add(entry.id); if (entry.kind === 'folder') pending.push(entry.id); }
+    }
+    const ancestors = new Map<string, unknown>();
+    for (const id of roots) {
+      let parent = inventory.find(entry => entry.id === id)?.parent_id;
+      while (parent) {
+        const entry = inventory.find(entry => entry.id === parent);
+        if (!entry || ancestors.has(entry.id)) break;
+        ancestors.set(entry.id, { id: entry.id, parent_id: entry.parent_id, name: entry.name, kind: entry.kind });
+        parent = entry.parent_id;
+      }
+    }
+    return fingerprintOf([roots, inventory.filter(entry => members.has(entry.id)).sort((a,b) => a.id.localeCompare(b.id)), [...ancestors].sort()]);
+  }
+  private removalPreviews = new Map<string, { owner: string; fingerprint: number; ids: string[]; all: boolean; expires: number }>();
+  private removalResults = new Map<string, RemovalResult & { owner: string; confirmation: string }>();
+  private removedEntries: Entry[] = [];
   private uploads = new Map<string, UploadStatus>();
   private committedUploads = new Map<string, { id: string; name: string; status: UploadStatus }>();
   private uploadNames = new Map<string, { parentId: string; parentEtag: string; name: string; replacement?: { entry_id: string; etag: string } }>();
@@ -286,6 +313,57 @@ export class MockTransport implements ApiTransport {
       this.entries = [...this.entries, folder]; this.bump(parentId);
       return folder as T;
     }
+    if (route === '/trash/removals/preview' && method === 'POST') {
+      if (!this.user) throw this.removalError(401, 'unauthorized');
+      const selection = (options.body as { selection: RemovalSelection }).selection;
+      let selected: Entry[];
+      if (selection?.kind === 'all') selected = [...this.deletedEntries];
+      else if (selection?.kind === 'selected' && Array.isArray(selection.items) && selection.items.length && selection.items.length <= 200 && new Set(selection.items.map(item => item.id)).size === selection.items.length) {
+        selected = selection.items.map(item => {
+          const entry = this.deletedEntries.find(entry => entry.id === item.id);
+          if (!entry) throw this.removalError(404, 'not_found');
+          if (entry.etag !== item.etag) throw this.removalError(409, 'listing_changed');
+          return entry;
+        });
+      } else throw this.removalError(400, 'invalid_confirmation');
+      if (!selected.length) throw this.removalError(404, 'not_found');
+      const confirmation = `removal-${++this.sequence}`;
+      this.removalPreviews.set(confirmation, { owner: this.user.id, fingerprint: this.removalFingerprint(selected.map(entry => entry.id), selection.kind === 'all'), ids: selected.map(entry => entry.id), all: selection.kind === 'all', expires: Date.now() + 600_000 });
+      return { confirmation, count: selected.length } as T;
+    }
+    if (route === '/trash/removals' && method === 'POST') {
+      if (!this.user) throw this.removalError(401, 'unauthorized');
+      const body = options.body as { operation_id: string; confirmation: string };
+      const existing = this.removalResults.get(body.operation_id);
+      if (existing) {
+        if (existing.owner !== this.user.id) return { operation_id: body.operation_id, state: 'unknown' } as T;
+        if (existing.confirmation !== body.confirmation) throw this.removalError(409, 'operation_conflict');
+        return { operation_id: existing.operation_id, state: existing.state, count: existing.count, cleanup: existing.cleanup } as T;
+      }
+      const preview = this.removalPreviews.get(body.confirmation);
+      if (!body.operation_id || !preview || preview.owner !== this.user.id || preview.expires <= Date.now()) throw this.removalError(400, 'invalid_confirmation');
+      if (preview.fingerprint !== this.removalFingerprint(preview.ids, preview.all)) throw this.removalError(409, 'listing_changed');
+      const removed = new Set(preview.ids);
+      const pending = this.deletedEntries.filter(entry => removed.has(entry.id) && entry.kind === 'folder').map(entry => entry.id);
+      while (pending.length) {
+        const parent = pending.pop();
+        for (const entry of this.entries) if (entry.parent_id === parent && !removed.has(entry.id)) { removed.add(entry.id); if (entry.kind === 'folder') pending.push(entry.id); }
+      }
+      this.removedEntries.push(...[...this.entries, ...this.deletedEntries].filter(entry => removed.has(entry.id)));
+      this.entries = this.entries.filter(entry => !removed.has(entry.id));
+      this.deletedEntries = this.deletedEntries.filter(entry => !removed.has(entry.id));
+      const result = { operation_id: body.operation_id, state: 'committed' as const, count: preview.ids.length, cleanup: 'complete' as const, owner: this.user.id, confirmation: body.confirmation };
+      this.removalResults.set(body.operation_id, result);
+      this.removalPreviews.delete(body.confirmation);
+      return { operation_id: result.operation_id, state: result.state, count: result.count, cleanup: result.cleanup } as T;
+    }
+    if (route.startsWith('/trash/removals/') && method === 'GET') {
+      if (!this.user) throw this.removalError(401, 'unauthorized');
+      const result = this.removalResults.get(decodeURIComponent(route.split('/')[3]));
+      if (!result) return { operation_id: decodeURIComponent(route.split('/')[3]), state: 'unknown' } as T;
+      if (result.owner !== this.user.id) return { operation_id: decodeURIComponent(route.split('/')[3]), state: 'unknown' } as T;
+      return { operation_id: result.operation_id, state: result.state, count: result.count, cleanup: result.cleanup } as T;
+    }
     if (route === '/trash' && method === 'GET') {
       if (!this.user) throw new HttpError(401);
       const params = new URLSearchParams(path.split('?')[1]);
@@ -299,7 +377,7 @@ export class MockTransport implements ApiTransport {
         while (parentId && parentId !== root.id) {
           if (seen.has(parentId)) throw new Error('Folder cycle');
           seen.add(parentId);
-          const parent = [...this.entries, ...this.deletedEntries].find(item => item.id === parentId);
+          const parent = [...this.entries, ...this.deletedEntries, ...this.removedEntries].find(item => item.id === parentId);
           if (!parent) throw new Error('Missing parent');
           parts.unshift(parent.name); parentId = parent.parent_id;
         }

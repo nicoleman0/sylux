@@ -24,3 +24,27 @@ Or run the full [storage suite](README.md) to include the related upload, privat
 Contract checks verify replaced bytes remain in Trash, restore conflicts are visible, successful restore recovers the original bytes, and folder totals reflect trash/restore. The restart integration drops the mutation reply, restarts and reconciles the owned fixture, then verifies content is hidden after trash and exact again after restore.
 
 The browser Trash tests in `web/tests/trash.spec.ts` use mocked API responses. They cover presentation, paging, and feedback behavior; they do not verify persisted Trash state. Do not automatically retry an uncertain trash or restore request; inspect fresh Files and Trash as documented in [`docs/trash.md`](../../../../docs/trash.md).
+
+## Permanent removal
+
+Run the real HTTP/storage removal matrix and binding migration checks:
+
+```sh
+cargo test --locked --features test-harness --test contract_uploads permanent_removal --no-fail-fast
+cargo test --locked --features test-harness --test integration_schema --test integration_binding --no-fail-fast
+```
+
+The removal cases cover same-operation replay after a dropped real socket reply,
+CSRF/Origin, foreign ownership, changed confirmation, expiry, stale previews,
+effect-scoped fingerprints, hidden descendant content/search/archive denial,
+shared references after a real fixture restart, and restored active bytes after
+each cleanup fault. Runtime retry and shutdown tests join blocking cleanup before
+closing SQLite. The commit-fault case also runs the real offline payload verifier
+CLI after cleanup. Mocked browser recovery includes reload and deliberate exact
+replay; it is separate from those persistence checks.
+
+The binding suite starts the real `serve` process from v1, after the database
+transition, and with a partial private manifest temporary file. It checks event
+order and retained identity/data. Schema checks reject unbound migration and
+unrecorded transitions. These are disposable-root functional checks; they do not
+qualify Linux, container recovery, physical durability or production upgrades.

@@ -41,7 +41,7 @@ impl From<PayloadError> for StorageOpenError {
 /// is still backed by `upload_attempt_one_active`; this map only propagates
 /// cancellation and lets DELETE join an active worker.
 pub struct UploadStorage {
-    pub payloads: PayloadStore,
+    pub payloads: Arc<PayloadStore>,
     mutation_key: [u8; 32],
     active: Mutex<HashMap<String, Arc<ActiveUpload>>>,
 }
@@ -86,10 +86,14 @@ impl UploadStorage {
         let mutation_key = read_mutation_key(root)?;
         let payloads = PayloadStore::open(root)?;
         Ok(Self {
-            payloads,
+            payloads: Arc::new(payloads),
             mutation_key,
             active: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub(crate) fn removal_signing_key(&self) -> [u8; 32] {
+        self.mutation_key
     }
 
     pub fn register_writer(&self, upload_id: &str) -> Result<Arc<ActiveUpload>, WorkerError> {

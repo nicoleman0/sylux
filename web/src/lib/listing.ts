@@ -6,6 +6,10 @@ export type Entry = Folder | FileEntry;
 export type FolderSort = 'name_asc' | 'name_desc' | 'size_asc' | 'size_desc' | 'modified_asc' | 'modified_desc';
 export type ResultSort = FolderSort | 'location_asc' | 'location_desc';
 export type DeletedEntry = Entry & { original_path: string[]; needs_reference?: boolean };
+export type RemovalSelection = { kind: 'all' } | { kind: 'selected'; items: { id: string; etag: string }[] };
+export type RemovalPreview = { confirmation: string; count: number };
+export type RemovalResult = { operation_id: string; state: 'committed'; count: number; cleanup: 'pending' | 'complete' };
+export type RemovalStatus = RemovalResult | { operation_id: string; state: 'unknown' };
 export type TrashPage = { items: DeletedEntry[]; next_cursor: string | null; has_more: boolean };
 
 export function compareDeleted(left: DeletedEntry, right: DeletedEntry, sort: ResultSort = 'name_asc'): number {
@@ -111,6 +115,22 @@ export class ListingApi {
       if (found.size === requested.size) return [...found.values()];
     } while (cursor);
     return [...found.values()];
+  }
+  async removalPreview(selection: RemovalSelection): Promise<RemovalPreview> {
+    const result = await this.client.request<RemovalPreview>('/trash/removals/preview', { method: 'POST', body: { selection } });
+    if (!result || typeof result.confirmation !== 'string' || !result.confirmation || !Number.isSafeInteger(result.count) || result.count <= 0) throw new Error('Invalid removal preview');
+    return result;
+  }
+  private validateRemoval(result: RemovalStatus, operationId: string): RemovalStatus {
+    if (!result || result.operation_id !== operationId || (result.state !== 'unknown' && (result.state !== 'committed' || !Number.isSafeInteger(result.count) || result.count <= 0 || !['pending', 'complete'].includes(result.cleanup)))) throw new Error('Invalid removal result');
+    return result;
+  }
+  async removePermanently(operationId: string, confirmation: string): Promise<RemovalStatus> {
+    const result = this.validateRemoval(await this.client.request('/trash/removals', { method: 'POST', body: { operation_id: operationId, confirmation } }), operationId);
+    return result;
+  }
+  async removalStatus(operationId: string): Promise<RemovalStatus> {
+    return this.validateRemoval(await this.client.request(`/trash/removals/${encodeURIComponent(operationId)}`), operationId);
   }
   restore(entryId: string, etag: string): Promise<void> {
     return this.client.request(`/trash/${encodeURIComponent(entryId)}/restore`, { method: 'POST', headers: { 'If-Match': etag } });

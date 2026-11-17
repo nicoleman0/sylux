@@ -199,6 +199,7 @@ fn namespace_db() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(include_str!("../../migrations/sqlite/0001_s1.sql"))
         .unwrap();
+    sylux::persistence::schema::migrate_v1(&db, None).unwrap();
     db.execute(
         "INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES(?1,'fixture-owner','user',1,0)",
         [OWNER],

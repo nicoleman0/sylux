@@ -201,3 +201,7 @@ incremental = false
 [profile.test]
 debug = 0
 incremental = false
+
+# Multi-GiB integrity contracts must not benchmark unoptimized SHA-256.
+[profile.test.package.sha2]
+opt-level = 3
