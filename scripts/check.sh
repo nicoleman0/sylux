@@ -15,6 +15,13 @@ for tool in cargo npm node python3; do
   command -v "$tool" >/dev/null 2>&1 || { printf 'required tool not found: %s\n' "$tool" >&2; exit 127; }
 done
 
+# Ignored files must not be tracked (force-added files slip past .gitignore).
+tracked_ignored="$(git ls-files -i -c --exclude-standard)"
+if [[ -n "$tracked_ignored" ]]; then
+  printf 'Tracked files match .gitignore. Remove them from the index with `git rm --cached <path>`:\n%s\n' "$tracked_ignored" >&2
+  exit 1
+fi
+
 # build.rs embeds web/dist, so build assets before Cargo checks.
 run python3 scripts/test-ci-changes.py
 run python3 scripts/test-ci-workflow.py

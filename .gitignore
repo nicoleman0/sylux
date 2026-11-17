@@ -35,3 +35,7 @@ BUILD-HANDOFF.md
 .impeccable/review/
 .impeccable/critique/
 /test-results/
+
+# Local agent tooling state
+/.codex/
+/.ua/
