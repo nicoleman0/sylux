@@ -216,7 +216,7 @@
     if (record) saveNavigation();
     const generation = sessionGeneration;
     const request = ++navigationRequest;
-    listingRequest++; loading = false; trashRequest++; trashLoading = false; trashPaging = null;
+    pendingMove = null; listingRequest++; loading = false; trashRequest++; trashLoading = false; trashPaging = null;
     if (clearFeedback) clearCompletedFeedback();
     clearSelection(); closeBulk();
     if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
@@ -260,7 +260,7 @@
     changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null;
     resetId = ''; resetPassword = ''; accountHandle = ''; clearCreateAccountSecrets(); currentPassword = ''; newPassword = ''; accountNotice = '';
     accountView = location.destination === 'account'; settingsView = location.destination === 'settings' && user.role === 'administrator'; showTrash = location.destination === 'trash';
-    entries = []; entriesFolderId = ''; listingError = ''; loading = true;
+    entries = []; entriesFolderId = ''; listingError = ''; pendingMove = null; loading = true;
     folderSort = location.sort;
     searchSort = location.searchSort ?? 'name_asc'; trashSort = location.trashSort ?? 'name_asc'; accountSort = location.accountSort ?? 'name_asc';
     try {
@@ -316,6 +316,7 @@
               (rowItem ?? moved ?? heading)?.focus({ preventScroll: true });
               const samePage = context && (searchQuery ? context.searchPage === searchPageIndex : context.page === pageIndex);
               window.scrollTo(0, samePage ? context.scroll : 0);
+              if (moved) moved.scrollIntoView({ block: 'nearest' });
             }
             if (!restorationFailed) { restorationPending = false; historyReady = true; saveNavigation(); }
           }
@@ -895,7 +896,7 @@
     let folderId = currentFolder.id;
     const requestId = ++listingRequest;
     clearSelection();
-    loading = true;
+    pendingMove = null; loading = true;
     listingError = '';
     try {
       if (!folderId) {
@@ -959,7 +960,7 @@
     const target = pageIndex;
     const cursor = pageCursors[target];
     const request = ++listingRequest;
-    loading = true; listingError = '';
+    pendingMove = null; loading = true; listingError = '';
     try {
       const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || request !== listingRequest || searchQuery || currentFolder.id !== folderId) return;
@@ -979,7 +980,7 @@
   function searchChanged(): void {
     if (bulkBusy || restorationPending) return;
     if (loading || entriesFolderId !== currentFolder.id) browseDirty = true;
-    navigationRequest++; historyReady = true; loading = false; listingRequest++;
+    navigationRequest++; historyReady = true; pendingMove = null; loading = false; listingRequest++;
 
     clearCompletedFeedback();
     clearSelection();
@@ -1130,7 +1131,7 @@
     const cursor = nextCursor;
     const requestId = ++listingRequest;
     const isCurrent = () => generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest && !searchQuery && !accountView && !settingsView && !showTrash;
-    loading = true; listingError = '';
+    pendingMove = null; loading = true; listingError = '';
     try {
       const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || nextCursor !== cursor || requestId !== listingRequest) return;
@@ -1168,7 +1169,7 @@
     const folderId = currentFolder.id;
     const requestId = ++listingRequest;
     const isCurrent = () => generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest && !searchQuery && !accountView && !settingsView && !showTrash;
-    loading = true; listingError = '';
+    pendingMove = null; loading = true; listingError = '';
     const target = pageIndex - 1;
     try {
       const page = await listing.children(folderId, pageCursors[target], folderSort);

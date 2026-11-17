@@ -111,11 +111,17 @@ test('rename dialog supports Escape and restores focus to its invoking control',
 });
 
 test('file list is operable from the keyboard with visible focus', { annotation: { type: 'harness_case', description: 'accessibility_list_keyboard' } }, async () => {
+  // Hold the first listing so ArrowDown is pressed while rows are still disabled.
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/folders/*/children**', async route => { await held; await route.continue(); }, { times: 1 });
   await signIn();
   const folder = page.getByRole('button', { name: `Open ${fixture.folder}`, exact: true });
   await page.getByRole('heading', { name: 'Files', level: 1 }).focus();
   await page.keyboard.press('ArrowDown');
+  release();
   await expect(folder).toBeFocused();
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
   const outline = await folder.evaluate(element => { const style = getComputedStyle(element); return style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0; });
   expect(outline).toBe(true);
   await page.keyboard.press('?');
