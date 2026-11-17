@@ -64,7 +64,10 @@ test('reload requires matching file and resumes the same admission at server off
   await expect(page.getByText('This file does not match the original upload.', { exact: false })).toBeVisible();
   expect(server.bytes().toString()).toBe('abcd'); expect(server.admissions()).toBe(1);
   server.resume(); server.loseCommit();
-  await page.getByLabel('Original upload file', { exact: true }).setInputFiles({ name: 'video.bin', mimeType: 'application/octet-stream', buffer: server.original });
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Select original file', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await (await chooser).setFiles({ name: 'video.bin', mimeType: 'application/octet-stream', buffer: server.original });
   await expect.poll(() => server.commits()).toBe(1);
   await expect(page.getByRole('row', { name: 'video.bin', exact: true })).toBeVisible();
   expect(server.bytes()).toEqual(server.original); expect(server.admissions()).toBe(1);
@@ -119,4 +122,20 @@ test('expired never-admitted journal is resolved before another upload', async (
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
   expect(await page.evaluate(() => sessionStorage.getItem('sylux-upload-v1:owner'))).toBeNull();
   expect(server.admissions()).toBe(0);
+});
+
+test('reload never replays a previously attempted uncertain commit', async ({ page }) => {
+  const server = await fixture(page); server.resume();
+  let attempted = 0;
+  await page.route('**/uploads/*/commit', async route => { attempted++; await route.abort('connectionreset'); });
+  await page.getByLabel('Choose files to upload').setInputFiles({ name: 'video.bin', mimeType: 'application/octet-stream', buffer: server.original });
+  await expect(page.getByRole('button', { name: 'Check upload status', exact: true })).toBeVisible();
+  expect(attempted).toBe(1);
+  await page.reload(); await server.login();
+  await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
+  await expect(page.getByText('Saving is unconfirmed.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
+  expect(attempted).toBe(1);
+  const journal = await page.evaluate(() => JSON.parse(sessionStorage.getItem('sylux-upload-v1:owner')!));
+  expect(journal.commitStarted).toBe(true); expect(journal.ticket).toBe('original-ticket');
 });

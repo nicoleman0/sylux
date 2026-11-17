@@ -2230,7 +2230,7 @@
       uploadId = '';
       unresolvedCancel = false;
       uploadNotice = outcome === 'canceled' ? 'Upload canceled. No saved file was created.' : 'Upload was rejected. No saved file was created.';
-    } else if (status.status === 'staged' && !status.writer_active && status.sha256) {
+    } else if (status.status === 'staged' && !status.writer_active && status.sha256 && activeTransfers.canCommit(unresolvedUploadId)) {
       try {
         await activeTransfers.commit(unresolvedUploadId, status.sha256);
         if (generation !== sessionGeneration) return;
@@ -2240,7 +2240,7 @@
     } else {
       resumeReady = status.state === 'admitted' && !status.writer_active;
       unresolvedCancel = true;
-      uploadNotice = resumeReady ? `${formatSize(status.bytes_received)} received. ${resumeFile ? 'Resume this upload' : 'Select the original file to resume'}.` : status.status === 'recovery_required' ? 'This upload needs server recovery. Ask the administrator to restart the service, then check again. Its bytes remain private.' : 'The server is still processing this upload. Check again shortly.';
+      uploadNotice = resumeReady ? `${formatSize(status.bytes_received)} received. ${resumeFile ? 'Resume this upload' : 'Select the original file to resume'}.` : !activeTransfers.canCommit(unresolvedUploadId) ? 'Saving is unconfirmed. Check this upload again; its commit will not be replayed.' : status.status === 'recovery_required' ? 'This upload needs server recovery. Ask the administrator to restart the service, then check again. Its bytes remain private.' : 'The server is still processing this upload. Check again shortly.';
     }
     transferBusy = false;
   }

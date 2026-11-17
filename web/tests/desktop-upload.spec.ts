@@ -604,7 +604,7 @@ test('navigation retains unknown results and global reconciliation controls', as
   await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toContainText('Upload status is unavailable. Try checking again before starting another upload.');
   unavailable = false;
   await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toContainText('The server is still processing this upload.');
+  await expect(page.getByRole('region', { name: 'Upload results', exact: true })).toContainText('Saving is unconfirmed.');
   store.resolve('unknown.txt', 'committed');
   await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
   await expect(page.getByText('Upload status needs checking')).toHaveCount(0);

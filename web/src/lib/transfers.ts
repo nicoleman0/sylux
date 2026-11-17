@@ -19,7 +19,7 @@ const IDENTITY_CHUNK = 8 * 1024 * 1024;
 const digestHex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
 export type FileIdentity = { name: string; size: number; fingerprint: string };
 type AdmissionBody = { parent_id: string; parent_etag: string; name: string; length: number; replacement?: Replacement };
-export type UploadJournal = { version: 1; owner: string; id: string; ticket: string; body: AdmissionBody; identity: FileIdentity; expires: number; chunkSize: number };
+export type UploadJournal = { version: 1; owner: string; id: string; ticket: string; body: AdmissionBody; identity: FileIdentity; expires: number; chunkSize: number; commitStarted?: boolean };
 
 // Every byte participates, using at most one file slice and a bounded list of digests.
 export async function identifyFile(file: File, signal?: AbortSignal, progress?: (read: number, total: number) => void): Promise<FileIdentity> {
@@ -48,7 +48,7 @@ export class TransferApi {
     if (value.version !== 1 || value.owner !== owner || !/^[a-f0-9]{32}$/.test(value.id) || typeof value.ticket !== 'string' ||
       !value.body || !value.identity || value.identity.name !== value.body.name || value.identity.size !== value.body.length ||
       !Number.isSafeInteger(value.body.length) || value.body.length < 0 || !/^[a-f0-9]{64}$/.test(value.identity.fingerprint) ||
-      !Number.isSafeInteger(value.expires) || !Number.isSafeInteger(value.chunkSize) || value.chunkSize <= 0 || value.chunkSize > IDENTITY_CHUNK) {
+      (value.commitStarted !== undefined && typeof value.commitStarted !== 'boolean') || !Number.isSafeInteger(value.expires) || !Number.isSafeInteger(value.chunkSize) || value.chunkSize <= 0 || value.chunkSize > IDENTITY_CHUNK) {
       throw new Error('The retained upload record is invalid.');
     }
     this.journal = value;
@@ -57,6 +57,7 @@ export class TransferApi {
     return value;
   }
   pending(): UploadJournal | null { return this.journal; }
+  canCommit(uploadId: string): boolean { return this.journal?.id !== uploadId || this.journal.commitStarted !== true; }
   private retain(value: UploadJournal): void {
     if (!this.owner) throw new Error('Upload recovery needs a signed-in account.');
     try { sessionStorage.setItem(this.key(), JSON.stringify(value)); }
@@ -155,6 +156,8 @@ export class TransferApi {
     const parent_etag = this.parentEtags.get(uploadId);
     if (!ticket || !parent_etag) throw new Error('No active mutation ticket for this upload');
     if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('Invalid staged content digest');
+    if (!this.canCommit(uploadId)) throw new Error('Saving is unconfirmed. Check the original upload status.');
+    if (this.journal?.id === uploadId) this.retain({ ...this.journal, commitStarted: true });
     const result = await this.client.request(`/uploads/${encodeURIComponent(uploadId)}/commit`, {
       method: 'POST', headers: { ...this.precondition(this.admissions.get(uploadId)?.body.replacement), 'X-Mutation-ID': ticket }, body: { sha256, parent_etag },
     });
@@ -194,7 +197,7 @@ export class TransferApi {
     }).then(() => {
       this.ensureActive();
       if (this.journal?.id === uploadId) this.clearRecovery();
-    this.tickets.delete(uploadId);
+      this.tickets.delete(uploadId);
       this.parentEtags.delete(uploadId);
       this.stagedDigests.delete(uploadId);
       this.admissions.delete(uploadId);
