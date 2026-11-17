@@ -43,6 +43,9 @@
 
 ## Build and verification
 
+- Keep Rust module unit tests inline in `#[cfg(test)] mod tests { ... }`.
+  Do not create module-specific `tests.rs` files or test directories.
+  Cross-module contract, integration and fault suites belong in `tests/`.
 - Use the versions declared in `rust-toolchain.toml`, `.nvmrc`
   and `web/package.json`.
 - During iteration, run the smallest checks that exercise the changed
