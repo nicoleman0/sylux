@@ -447,7 +447,9 @@ test('lost commit response is resolved through the original upload status', { an
   await page.getByRole('button', { name: 'Check upload status' }).click();
   // Status shows the admission exists with no bytes; it is resumed from the original file, never re-admitted.
   await expect(page.getByRole('alert').filter({ hasText: 'Upload paused' })).toBeVisible();
-  await expect(page.getByRole('alert').getByText('Select the original file to resume', { exact: false })).toBeVisible();
+  // The tab still holds the selected file, so it offers to resume without reselecting it.
+  await expect(page.getByRole('alert').getByText('Resume this upload', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Resume upload', exact: true })).toBeVisible();
   await expect(page.locator('#upload-file')).toBeDisabled();
   expect(ticketRequests).toBe(1);
   expect(admissionRequests).toBe(1);
