@@ -104,6 +104,18 @@ jobs:
           path: ${{ runner.temp }}/account-authority
           if-no-files-found: ignore
 
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Run Semgrep with vendored rules
+        run: tools/semgrep/run.sh
+
   native:
     name: Rust, storage and dependencies
     needs: changes
@@ -292,7 +304,7 @@ jobs:
 
   check:
     name: Linux x86_64 checks
-    needs: [changes, native, web-smoke, tls-browser, rustdoc, account-authority-model]
+    needs: [changes, native, web-smoke, tls-browser, rustdoc, account-authority-model, semgrep]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 2
@@ -308,8 +320,10 @@ jobs:
           TLS_RESULT: ${{ needs.tls-browser.result }}
           MODEL_RESULT: ${{ needs.account-authority-model.result }}
           DOC_RESULT: ${{ needs.rustdoc.result }}
+          SEMGREP_RESULT: ${{ needs.semgrep.result }}
         run: |
           [[ "$SELECTION" == success ]] || { echo 'Change selection failed'; exit 1; }
+          [[ "$SEMGREP_RESULT" == success ]] || { echo "Required Semgrep scan: $SEMGREP_RESULT"; exit 1; }
           if [[ "$FULL" == true ]]; then
             for result in "$NATIVE_RESULT" "$WEB_RESULT" "$TLS_RESULT"; do
               [[ "$result" == success ]] || { echo "Required runtime check: $result"; exit 1; }

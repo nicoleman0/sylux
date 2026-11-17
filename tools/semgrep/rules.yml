@@ -1,0 +1,114 @@
+# Vendored Semgrep rules. Scans never fetch rules from the registry.
+rules:
+  - id: sylux.rust.unsafe-code
+    languages: [rust]
+    severity: ERROR
+    message: Unsafe Rust needs review. Prefer a safe API, or suppress with a stated reason.
+    pattern-either:
+      - pattern: unsafe { ... }
+      - pattern: unsafe fn $F(...) { ... }
+      - pattern: unsafe impl $T for $S { ... }
+
+  - id: sylux.rust.transmute
+    languages: [rust]
+    severity: ERROR
+    message: mem::transmute bypasses type safety.
+    pattern-either:
+      - pattern: std::mem::transmute(...)
+      - pattern: mem::transmute(...)
+      - pattern: transmute(...)
+
+  - id: sylux.rust.dynamic-command
+    languages: [rust]
+    severity: ERROR
+    message: Command program comes from a non-literal value. Validate it or use a fixed program name.
+    patterns:
+      - pattern-either:
+          - pattern: Command::new($X)
+          - pattern: std::process::Command::new($X)
+      - pattern-not: Command::new("...")
+      - pattern-not: std::process::Command::new("...")
+
+  - id: sylux.rust.tls-verification-disabled
+    languages: [rust]
+    severity: ERROR
+    message: Certificate or hostname verification is disabled.
+    pattern-either:
+      - pattern: $B.danger_accept_invalid_certs(true)
+      - pattern: $B.danger_accept_invalid_hostnames(true)
+
+  - id: sylux.rust.sql-built-with-format
+    languages: [rust]
+    severity: ERROR
+    message: SQL text is built with format!. Bind parameters instead.
+    patterns:
+      - pattern-either:
+          - pattern: $C.execute(format!($SQL, ...), ...)
+          - pattern: $C.execute(&format!($SQL, ...), ...)
+          - pattern: $C.prepare(format!($SQL, ...))
+          - pattern: $C.prepare(&format!($SQL, ...))
+          - pattern: $C.prepare_cached(&format!($SQL, ...))
+          - pattern: $C.query_row(&format!($SQL, ...), ...)
+          - pattern: $C.execute_batch(&format!($SQL, ...))
+      - metavariable-regex:
+          metavariable: $SQL
+          regex: (?i)"[^"]*\b(select|insert|update|delete|pragma|create|drop|alter)\b
+      # PRAGMA cannot bind parameters; the value is an i64 (src/persistence/sqlite.rs).
+      - pattern-not: $C.query_row(&format!("PRAGMA busy_timeout = {busy_ms}"), ...)
+
+  - id: sylux.ts.code-evaluation
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: Evaluating strings as code allows injection.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+      - pattern: setTimeout("...", ...)
+      - pattern: setInterval("...", ...)
+
+  - id: sylux.ts.html-injection
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: Writing HTML from a string enables XSS. Use text nodes or Svelte bindings.
+    pattern-either:
+      - pattern: $E.innerHTML = $X
+      - pattern: $E.outerHTML = $X
+      - pattern: $E.insertAdjacentHTML(...)
+      - pattern: document.write(...)
+
+  - id: sylux.ts.postmessage-any-origin
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: postMessage with target origin "*" sends data to any window.
+    pattern: $W.postMessage($M, "*")
+
+  - id: sylux.node.shell-command
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: Shell execution of a non-literal command allows injection. Use execFile with an argument array.
+    patterns:
+      - pattern-either:
+          - pattern: exec($CMD, ...)
+          - pattern: execSync($CMD, ...)
+          - pattern: child_process.exec($CMD, ...)
+          - pattern: child_process.execSync($CMD, ...)
+      - pattern-not: exec("...", ...)
+      - pattern-not: execSync("...", ...)
+      - pattern-not: child_process.exec("...", ...)
+      - pattern-not: child_process.execSync("...", ...)
+
+  - id: sylux.svelte.raw-html
+    languages: [generic]
+    paths:
+      include: ["*.svelte"]
+    severity: ERROR
+    message: "{@html} renders unescaped markup. Sanitize it or render text."
+    pattern: "{@html ...}"
+
+  - id: sylux.any.private-key
+    languages: [generic]
+    severity: ERROR
+    message: A private key is committed.
+    pattern-regex: -----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----
+    paths:
+      exclude: ["*.md"]

@@ -667,6 +667,7 @@ pub fn trashed_page_sorted(
         {location_join} WHERE e.owner_account_id=?1 AND e.state='deleted' AND NOT EXISTS(SELECT 1 FROM removal_member rm WHERE rm.entry_id=e.entry_id)
     )");
     let pivot = if let Some(after) = after {
+        // nosemgrep: sylux.rust.sql-built-with-format -- listing is a constant CTE; values bind as ?1/?2
         Some(db.query_row(
             &format!("{listing} SELECT kind_rank,original_name,byte_size,modified_at,location_key FROM listing WHERE entry_id=?2"),
             params![owner, after.id],
@@ -820,6 +821,7 @@ fn mark_deleted_references(
         .map(|item| item.entry.name.clone())
         .collect::<std::collections::BTreeSet<_>>();
     let placeholders = vec!["?"; names.len()].join(",");
+    // nosemgrep: sylux.rust.sql-built-with-format -- only ? placeholders are interpolated
     let mut stmt = db
         .prepare(&format!(
             "SELECT entry_id,parent_id,original_name FROM entry WHERE owner_account_id=?
