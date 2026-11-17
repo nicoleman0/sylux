@@ -33,6 +33,17 @@ hash checks, and the native smoke test draws a synthetic pixel. This binding
 is not copied into the server image or browser assets. Redistributing these
 build tools requires review of the canvas and embedded Skia components too.
 
+## Accepted npm advisory
+
+`npm audit` reports GHSA-fc5q-39xc-vjpf (picomatch ReDoS through single-branch
+repeated extglobs, high, affected <=4.0.7). Locked 4.0.7 is the latest release;
+no patch exists. picomatch is reached only through build tooling (fdir,
+tinyglobby, vite, svelte-check); only static `web/dist` ships, and no
+picomatch runs in the server. `tools/npm-audit.mjs` accepts exactly this
+finding until 2026-12-01T00:00:00Z, then fails. When a patched picomatch is
+published, update the lockfile and delete the exception. If none exists by
+then, the owner decides whether to renew.
+
 Sources: [SPDX license expressions](https://spdx.github.io/spdx-spec/v2.3/SPDX-license-expressions/),
 [SQLite copyright](https://www.sqlite.org/copyright.html),
 [Mozilla MPL FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/).
