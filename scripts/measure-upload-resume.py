@@ -89,13 +89,16 @@ class Sampler:
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.sample)
 
+    def take(self):
+        result = subprocess.run(['ps', '-o', 'rss=', '-p', str(self.pid)],
+                                capture_output=True, text=True, timeout=5)
+        if result.stdout.strip():
+            self.samples.append((time.monotonic(), int(result.stdout.strip())))
+
     def sample(self):
         while not self.stop.is_set():
             try:
-                result = subprocess.run(['ps', '-o', 'rss=', '-p', str(self.pid)],
-                                        capture_output=True, text=True, timeout=5)
-                if result.stdout.strip():
-                    self.samples.append((time.monotonic(), int(result.stdout.strip())))
+                self.take()
             except Exception as error:
                 self.errors.append(str(error))
                 return
@@ -115,6 +118,7 @@ class Client:
         # Fixture CA lacks AKI required by Python 3.15 strict mode; CA and SAN still verify.
         self.context.verify_flags &= ~ssl.VERIFY_X509_STRICT
         session = ready['sessions'][session_index]
+        self.folder = session['folder']
         self.headers = {'Cookie': '__Host-sylux=' + session['cookie'],
                         'Origin': ready['origin'], 'X-CSRF-Token': session['csrf']}
         self.api = self.connection()
@@ -134,15 +138,38 @@ class Client:
         return LocalHTTPS('fixture.test', self.port, context=self.context, timeout=180)
 
     def request(self, method, path, body=None, extra=None):
-        self.api.request(method, path, body, dict(self.headers, **(extra or {})))
-        response = self.api.getresponse()
+        try:
+            self.api.request(method, path, body, dict(self.headers, **(extra or {})))
+        except BrokenPipeError:
+            # The server may answer and close before reading the whole body; report its answer.
+            pass
+        try:
+            response = self.api.getresponse()
+        except (BrokenPipeError, ConnectionError, http.client.HTTPException) as error:
+            self.api.close()
+            raise RuntimeError(f'{method} {path}: connection closed before a response: {error!r}') from error
         data = response.read()
         require(200 <= response.status < 300,
                 f'{method} {path}: HTTP {response.status}: {data[:500]!r}')
         return json.loads(data) if data else None
 
-    def run(self, source, length, expected, mode, name, sampler, interrupt=False, barrier=None):
-        parent = self.request('GET', '/folders/children')['root']
+    def root_child(self, entry_id):
+        cursor = None
+        while True:
+            query = '?limit=500' + (f'&cursor={urllib.parse.quote(cursor)}' if cursor else '')
+            page = self.request('GET', '/folders/children' + query)
+            for item in page['items']:
+                if item.get('id') == entry_id:
+                    require(bool(item.get('etag')), f'Folder has no ETag: {item}')
+                    return item
+            cursor = page.get('next_cursor')
+            require(page.get('has_more') and cursor, f'Seeded folder {entry_id} not found in root listing')
+
+    def run(self, source, length, expected, mode, name, sampler, interrupt=False, barrier=None, own_folder=False):
+        if own_folder:
+            parent = self.root_child(self.folder)
+        else:
+            parent = self.request('GET', '/folders/children')['root']
         body = {'parent_id': parent['id'], 'parent_etag': parent['etag'], 'name': name, 'length': length}
         ticket = self.request('POST', '/mutation-tickets', json.dumps(dict(body, scope='upload_create')),
                               {'Content-Type': 'application/json'})
@@ -211,7 +238,14 @@ class Client:
                             require(bool(connection.sock.recv(1)), 'Checkpoint response did not start')
                         finally:
                             connection.close()
-                        state = self.request('GET', f'/uploads/{upload_id}')
+                        # The checkpoint can land before the writer is released; wait as the browser does.
+                        deadline = time.monotonic() + 30
+                        while True:
+                            state = self.request('GET', f'/uploads/{upload_id}')
+                            if not state['writer_active']:
+                                break
+                            require(time.monotonic() < deadline, f'Writer did not release after checkpoint: {state}')
+                            time.sleep(0.05)
                         require(state['bytes_received'] == offset + len(data), f'Lost acknowledgement: {state}')
                         interruptions.append({'case': 'response-discarded-after-checkpoint',
                                               'offset': state['bytes_received']})
@@ -219,6 +253,7 @@ class Client:
                         staged = self.request('PATCH', f'/uploads/{upload_id}/content', data, extra)
                     offset += len(data)
         elapsed = time.monotonic() - start
+        sampler.take()
         upload_rss = rss_summary(sampler.samples[before:])
         committed = self.request('POST', f'/uploads/{upload_id}/commit', json.dumps({
             'sha256': staged['sha256'], 'parent_etag': body['parent_etag']}), mutation_headers)
@@ -377,19 +412,20 @@ def main():
             client = Client(ready, index)
             try:
                 path, digest = concurrent_sources[index]
-                return client.run(path, small, digest, 'append', f'concurrent-{index}.bin', sampler, barrier=barrier)
+                return client.run(path, small, digest, 'append', f'concurrent-{index}.bin', sampler, barrier=barrier,
+                                  own_folder=True)
             finally:
                 client.api.close()
 
         before, started = len(sampler.samples), time.monotonic()
-        # Three accounts avoid parent ETag conflicts; each upload still sends chunks sequentially.
+        # Each session uploads into its own seeded folder so commits do not race on one parent ETag.
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             futures = [pool.submit(concurrent_upload, index) for index in range(3)]
             concurrent_results = [future.result() for future in futures]
         record({'case': 'three-concurrent-distinct-uploads', 'concurrent_uploads': 3,
                 'length_each': small, 'seconds': time.monotonic() - started,
                 'rss_window': 'admission through streamed download verification',
-                **rss_summary(sampler.samples[before:]), 'uploads': concurrent_results})
+                **(sampler.take() or rss_summary(sampler.samples[before:])), 'uploads': concurrent_results})
         require(source_identity() == identity, 'Source changed during measurement; results do not qualify current head')
     except BaseException as error:
         original = error
