@@ -411,7 +411,8 @@
     const target = event.target instanceof HTMLElement ? event.target : null;
     const row = target?.matches(itemSelector) ? target.closest<HTMLElement>('.file-row') : null;
     const onHeading = target?.id === 'folder-title';
-    const intent = listIntent(event, !!row || onHeading);
+    const inList = !!target?.closest('.files-content .file-row') || onHeading;
+    const intent = listIntent(event, !!row || onHeading, inList);
     if (!intent) return;
     if (intent.kind === 'search') {
       const input = document.getElementById('file-search') as HTMLInputElement | null;
@@ -2882,7 +2883,7 @@
     </Dialog.Root>
     <Dialog.Root bind:open={shortcutsOpen}>
       <Dialog.Content>
-        <Dialog.Header><Dialog.Title>Keyboard shortcuts</Dialog.Title><Dialog.Description>Available in the file list. Shortcuts pause while you type or a dialog is open.</Dialog.Description></Dialog.Header>
+        <Dialog.Header><Dialog.Title>Keyboard shortcuts</Dialog.Title><Dialog.Description>Letter and symbol keys work only while focus is in the file list. They pause while you type or a dialog is open.</Dialog.Description></Dialog.Header>
         <dl class="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-2">
           {#each shortcutHelp as shortcut (shortcut.keys)}
             <dt class="flex flex-wrap gap-1">{#each shortcut.keys.split(', ') as key (key)}<kbd class="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">{key}</kbd>{/each}</dt>

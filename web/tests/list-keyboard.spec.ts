@@ -128,6 +128,17 @@ test('slash focuses search, but not while typing; question mark lists shortcuts'
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
+test('slash and question mark do nothing while focus is outside the list', async ({ page }) => {
+  await open(page);
+  const refresh = page.getByRole('button', { name: 'Refresh folder' });
+  await refresh.focus();
+  await page.keyboard.press('/');
+  await page.keyboard.press('Shift+?');
+  await expect(page.getByLabel('Search files and folders')).not.toBeFocused();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(refresh).toBeFocused();
+});
+
 test('question mark opens the shortcut list and Escape returns focus', async ({ page }) => {
   await open(page);
   await item(page, 'alpha').focus();

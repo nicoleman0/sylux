@@ -22,15 +22,20 @@ export const shortcutHelp: ReadonlyArray<{ keys: string; action: string }> = [
   { keys: 'Enter', action: 'Open the focused item' },
   { keys: 'F2', action: 'Rename the focused item' },
   { keys: 'Delete, Backspace', action: 'Move to Trash, after confirmation' },
-  { keys: '/', action: 'Search' },
-  { keys: '?', action: 'Show these shortcuts' },
+  { keys: '/', action: 'Search (in the list)' },
+  { keys: '?', action: 'Show these shortcuts (in the list)' },
 ];
 
 const moves: Record<string, 'next' | 'previous' | 'first' | 'last'> = { ArrowDown: 'next', ArrowUp: 'previous', Home: 'first', End: 'last' };
 
-/** Maps a key press to an intent. `onItem` is true when focus is on a list row's name or checkbox. */
-export function listIntent(event: KeyInput, onItem: boolean): ListIntent | null {
+/**
+ * Maps a key press to an intent. `onItem` is true when focus is on a list row's name or checkbox.
+ * `inList` is true when focus is anywhere in the list (a row or its controls, or the folder heading).
+ * Every single-character key needs `inList`, so none fire elsewhere (WCAG 2.1.4, active only on focus).
+ */
+export function listIntent(event: KeyInput, onItem: boolean, inList: boolean): ListIntent | null {
   if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return null;
+  if (!inList) return null;
   if (event.key === '/' && !event.shiftKey) return { kind: 'search' };
   if (event.key === '?') return { kind: 'help' };
   if (!onItem) return null;
