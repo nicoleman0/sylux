@@ -17,7 +17,7 @@ public sharing links and WebDAV are not included. Text, image and
 
 [Folder listings](docs/folder-listings.md) support name and file-size sorting.
 Folders and selections [download as one ZIP](docs/archives.md).
-[Uploads up to 64 GiB resume](docs/uploads.md) after a connection loss or tab reload.
+[Uploads up to 64 GiB resume](docs/uploads.md) after a connection loss or tab reload, within a 24-hour window.
 
 Keep independent copies of important files. Functional tests do not establish
 physical power-loss durability or schema upgrade/downgrade support.

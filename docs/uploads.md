@@ -11,34 +11,35 @@ Reload recovery uses this tab's session storage. It requires that record to surv
 - `POST /mutation-tickets` returns the signed admission and the server's `max_upload_length` and `max_chunk_length`. The limits are defined in `src/domain/upload.rs`.
 - `POST /uploads` admits the original mutation. Its ticket fixes the account, destination, name, length and any confirmed replacement.
 - `GET /uploads/{id}` reports the acknowledged `bytes_received`, writer state and final outcome. The client uses this offset after an interruption, never its last progress event.
-- `PATCH /uploads/{id}/content` appends a single chunk. Send `Content-Length`, `Content-Type: application/octet-stream`, `Upload-Offset` and `Upload-Checksum` (lowercase SHA-256 of this chunk), plus the original mutation ticket and normal authentication/CSRF headers. Missing length gets 411. Over-limit chunks get 413. Stale offsets or competing writers get 409 without advancing the offset. Incomplete or corrupt chunks get 422.
+- `PATCH /uploads/{id}/content` appends a single chunk. Send `Content-Length`, `Content-Type: application/octet-stream`, `Upload-Offset` and `Upload-Checksum` (lowercase SHA-256 of this chunk), plus the original mutation ticket and normal authentication/CSRF headers. Missing length gets 411. Over-limit chunks get 413. Stale offsets or competing writers get 409 without advancing the offset. Incomplete or corrupt chunks get 422. A canceled upload gets 409 `upload_canceled`. A stalled body gets 408 `chunk_idle_timeout` and a stopping server 503 `server_stopping`; both leave the offset unchanged, so read status and resume.
 - Acknowledgement follows file sync and the SQL offset checkpoint. A request interrupted before acknowledgement can have either the old or the new offset. Read status before sending again. Unacknowledged trailing bytes are truncated at the recorded offset before reuse.
 - The final chunk triggers one bounded streaming hash of the full file. Completed metadata is recorded before create-only payload publication, so restart reconciliation can finish an interrupted publication. The file remains invisible until `POST /uploads/{id}/commit` succeeds.
-- Lost commit responses are resolved with status for the same mutation. Once a commit is attempted, the tab retains that fact across reload and never replays it. A publication fault can report `recovery_required`; restart reconciliation must verify its candidate before commit is allowed.
+- A chunk body that stalls for 30 seconds between frames is abandoned with 408. The limit applies per frame, not to the whole chunk, so slow steady links are unaffected. The server releases the writer without advancing the offset, so status shows `writer_active: false` and the client resumes from the same offset.
+- Lost commit responses are resolved with status for the same mutation. Commit applies at most once: a concurrent or later repeat of the same mutation gets 409 `upload_not_staged` and has no effect. After an uncertain commit the tab checks status first, then finishes a still-`publishing` upload with the same digest. A publication fault can report `recovery_required`; restart reconciliation must verify its candidate before commit is allowed.
 
 The original full-body PUT route remains available. It refuses to restart an upload with an acknowledged nonzero offset; use PATCH to resume it. No chunk parallelism, cross-device resume or instant-upload deduplication is provided.
 
 A replacement still requires the original target ETag and parent ETag at commit. If either changes, cancel and make a fresh, explicitly confirmed upload. Resume never silently changes the signed destination or replacement.
 
+## Time limit
+
+A ticket expires 24 hours after issuance, in absolute time. Progress does not extend it. A 64 GiB upload therefore needs an average of at least about 0.76 MiB/s (6.4 Mbit/s) across the whole window, including pauses, reloads and the browser's full-file identity read. Slower links cannot finish a file of that size.
+
+The browser refuses to send, resume or commit once the retained ticket's expiry has passed, before reading the file again. The user checks the status and starts a new upload after the old attempt is resolved.
+
 ## Abandoned bytes
 
-Tickets expire 24 hours after issuance. A bounded sweep starts when the service begins serving and runs every minute, visiting at most 32 eligible attempts per pass with a cursor. It rejects expired admitted work before unlinking its private staging file. It skips active writers, completed candidates and committed results; failed cleanup is retried on a later sweep. A large backlog can take multiple passes. Startup reconciliation clears interrupted writer state before serving.
+A bounded sweep starts when the service begins serving and runs every minute, visiting at most 32 eligible attempts per pass with a cursor. It rejects expired admitted work, unlinks its private partial staging file, then records a durable `partial-cleaned` marker on the attempt so later passes skip it. Failed cleanup is retried on a later sweep. A large backlog can take multiple passes. Startup reconciliation clears interrupted writer state before serving.
 
-Fully staged or uncertain publication candidates remain preserved for reconciliation. They are not exposed as files. They are deliberately outside partial-byte cleanup, which cannot determine that a completed candidate is safe to delete.
+What is kept:
+
+- Active writers, committed results and completed candidates are outside partial cleanup.
+- A fully staged or uncertain publication candidate stays for reconciliation and is not exposed as a file.
+- A staged upload that is later rejected, for example canceled before commit, keeps its staged payload. No cleanup rule exists for it yet.
 
 ## Verification
 
-- `cargo test --locked --features test-harness --test contract_uploads --no-fail-fast` covers offset conflicts, interruption, unacknowledged tails, account isolation, expiry, publication faults and the 64 GiB admission boundary.
+- `cargo test --locked --features test-harness --test contract_uploads --no-fail-fast` covers offset conflicts, interruption, unacknowledged tails, account isolation, expiry, cleanup, publication faults and the 64 GiB admission boundary.
 - `npm --prefix web run smoke -- resumable-upload.spec.ts desktop-upload.spec.ts replacement.spec.ts` covers the client recovery record, wrong-file rejection, reload, cancellation and replacement UI with mocked APIs.
-- `tests/browser/storage.spec.ts` adds the real TLS reload/reselect/resume journey to the ordinary feature-enabled browser fixture. Report that evidence separately from mocked UI tests and direct HTTP contracts.
-
-Build current web assets, then run `python3 scripts/measure-upload-resume.py` to reproduce the disposable 4 GiB journey and paired throughput/RSS measurements. It streams downloads into a digest and stops/joins its owned fixture before cleaning payloads. Keep enough space for about 6 GiB of temporary payloads.
-
-Local disposable verification on 17 November 2026, after integrating SYL-78, uploaded and streamed back 4 GiB with SHA-256 `8479e43911dc45e89f934fe48d01297e16f51d17aa561d4d1c216b1ae0fcddca`. A local TLS comparison using the Cargo test profile (optimized SHA-256 dependency) measured three 256 MiB PUT samples at 805.0/742.3/615.3 MiB/s and append at 235.0/299.6/308.9 MiB/s, with one persistent API connection. The interrupted 4 GiB append run reached 262.9 MiB/s and 60.9 MiB maximum sampled server RSS. The 256 MiB append samples peaked at 60.5 MiB. These are functional development measurements on a shared host, not release throughput or physical durability qualification. Append pays for each chunk's checksum, file sync, SQL checkpoint and a final full-file verification pass. Browser identity checking is a separate full file read before transmission and again on reselect.
-
-## UI comparison
-
-Inspected 17 November 2026. Primary behavior documentation was read before implementation; the published screenshot comparison was completed during verification. No live Nextcloud or copyparty instance was available.
-
-- [Nextcloud 35 chunk API](https://docs.nextcloud.com/server/stable/developer_manual/client_apis/WebDAV/chunking.html) and its [Files screenshot](https://docs.nextcloud.com/server/stable/user_manual/_images/users-files.png): adopt private temporary chunks and familiar filename/list context. Sylux uses one append file instead of a separate assembly step, and retains its existing quiet controls.
-- [copyparty's current README, uploading section](https://github.com/9001/copyparty#uploading) and its linked [simplified uploader screenshot](https://user-images.githubusercontent.com/241032/118311195-dd6ca380-b4ef-11eb-86f3-75a3ff2e1332.png): adopt distinct checking/sending stages, progress and explicit reselect after browser loss. Reject the parallel-upload selector and advanced controls for this sequential workflow. The screenshot is a published example linked by the README, not a fresh capture of the current release.
+- `tests/browser/storage.spec.ts` adds the real TLS reload/reselect/resume journey to the feature-enabled browser fixture. Report that evidence separately from mocked UI tests and direct HTTP contracts.
+- `python3 scripts/measure-upload-resume.py` runs a disposable TLS journey: paired PUT and append throughput, an interrupted 4 GiB append with a byte-exact streamed download, and three concurrent distinct uploads sampling server RSS. Source data is deterministic and varies by offset, so a misplaced, replayed or reordered chunk changes the digest. Use `--quick` for a small smoke run, which is not large-file evidence. Build current web assets first and keep about 6 GiB free. Results and exact build metadata are written to a temporary directory the script prints. Its owned fixture and payloads are removed on exit.
