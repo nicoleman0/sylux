@@ -100,6 +100,7 @@ export class MockTransport implements ApiTransport {
   private removalPreviews = new Map<string, { owner: string; fingerprint: number; ids: string[]; all: boolean; expires: number }>();
   private removalResults = new Map<string, RemovalResult & { owner: string; confirmation: string }>();
   private removedEntries: Entry[] = [];
+  private uploadChunks = new Map<string, Blob[]>();
   private uploads = new Map<string, UploadStatus>();
   private committedUploads = new Map<string, { id: string; name: string; status: UploadStatus }>();
   private uploadNames = new Map<string, { parentId: string; parentEtag: string; name: string; replacement?: { entry_id: string; etag: string } }>();
@@ -199,7 +200,7 @@ export class MockTransport implements ApiTransport {
       // Mock mode has no archive bytes; the link 404s like mock file downloads.
       return { url: `/archives/mock-${++this.sequence}`, name: roots.length === 1 ? `${roots[0]!.name}.zip` : 'download.zip', entry_count: roots.length } as T;
     }
-    if (route === '/mutation-tickets' && method === 'POST') return { mutation_id: `upload-${++this.sequence}`, ticket: `mock-ticket-${this.sequence}`, expires_at: 'mock-only' } as T;
+    if (route === '/mutation-tickets' && method === 'POST') return { mutation_id: `upload-${++this.sequence}`, ticket: `mock-ticket-${this.sequence}`, expires_at: 1893456000, max_chunk_length: 8 * 1024 * 1024 } as T;
     if (route === '/setup/admin' && method === 'POST') {
       this.setupRequired = false;
       return { id: 'mock-user', handle: 'owner', role: 'administrator' } as T;
@@ -468,16 +469,21 @@ export class MockTransport implements ApiTransport {
       this.uploadNames.set(id, { parentId: body.parent_id, parentEtag: body.parent_etag, name: body.name, replacement: body.replacement });
       return { id, status_url: `/uploads/${id}` } as T;
     }
-    if (route.includes('/content') && method === 'PUT') {
+    if (route.includes('/content') && (method === 'PUT' || method === 'PATCH')) {
       const id = decodeURIComponent(route.split('/')[2]!);
       const details = this.uploadNames.get(id)!;
       this.uploadParent(details.parentId, details.parentEtag);
       const previous = this.uploads.get(id)!;
       const bytes = options.body as Blob;
-      const status: UploadStatus = { ...previous, state: 'publishing', status: 'staged', bytes_received: bytes.size };
+      const offset = method === 'PATCH' ? Number(options.headers?.['Upload-Offset']) : 0;
+      if (offset !== previous.bytes_received) throw new HttpError(409);
+      const chunks = [...(this.uploadChunks.get(id) ?? []), bytes]; this.uploadChunks.set(id, chunks);
+      const received = offset + bytes.size;
+      const complete = received === previous.length;
+      const sha256 = complete ? [...new Uint8Array(await crypto.subtle.digest('SHA-256', await new Blob(chunks).arrayBuffer()))].map(byte => byte.toString(16).padStart(2, '0')).join('') : undefined;
+      const status: UploadStatus = { ...previous, state: complete ? 'publishing' : 'admitted', status: complete ? 'staged' : 'admitted', bytes_received: received, sha256 };
       this.uploads.set(id, status);
-      const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await bytes.arrayBuffer()))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-      return { ...status, length: bytes.size, sha256, published: false } as T;
+      return { ...status, sha256, published: false } as T;
     }
     if (route.endsWith('/commit') && method === 'POST') {
       const id = decodeURIComponent(route.split('/')[2]!);
@@ -489,7 +495,7 @@ export class MockTransport implements ApiTransport {
       const committed: UploadStatus = { ...previous, state: 'committed', status: 'committed' };
       if (details.replacement) {
         const existing = this.entries.find((entry) => entry.id === details.replacement?.entry_id);
-        if (!existing || existing.etag !== details.replacement.etag) throw new HttpError(412);
+        if (!existing || existing.etag !== details.replacement.etag) throw this.removalError(412, 'replacement_changed');
         this.entries = this.entries.filter((entry) => entry.id !== existing.id);
         this.deletedEntries = [...this.deletedEntries, existing];
       }
@@ -497,7 +503,7 @@ export class MockTransport implements ApiTransport {
       this.entries = [...this.entries, { id: `file-${++this.sequence}`, parent_id: details.parentId, name: details.name, kind: 'file', size: previous.length, modified_at: Math.floor(Date.now() / 1000), etag: '"file-new"' }];
       this.bump(details.parentId);
       const result = { id, name: details.name, status: committed };
-      this.committedUploads.set(id, result);
+      this.committedUploads.set(id, result); this.uploadChunks.delete(id);
       return result as T;
     }
     if (route.startsWith('/uploads/') && method === 'DELETE') {

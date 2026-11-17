@@ -1,4 +1,4 @@
-//! Create-only payload publication. Candidate bytes are never deleted or overwritten.
+//! Private resumable staging and create-only final payload publication.
 
 use rustix::fs::{self, FileType, Mode, OFlags, RenameFlags};
 use sha2::{Digest, Sha256};
@@ -158,6 +158,174 @@ impl PayloadStore {
             hook(boundary)?;
         }
         Ok(())
+    }
+
+    /// Reopen only the acknowledged prefix. A lost request may have left a tail.
+    pub fn open_append(
+        &self,
+        staging_name: &str,
+        offset: u64,
+        declared_length: u64,
+        chunk_length: u64,
+    ) -> Result<PartialAppend, PayloadError> {
+        staging_ids(staging_name)?;
+        if offset > declared_length || chunk_length > declared_length - offset {
+            return Err(PayloadError::LengthExceeded);
+        }
+        if offset == 0 {
+            match self.start(staging_name, declared_length) {
+                Ok(staging) => drop(staging),
+                Err(PayloadError::Collision) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let fd = fs::openat(
+            &self.staging,
+            staging_name,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| PayloadError::Missing)?;
+        let mut file = File::from(fd);
+        let stat = fs::fstat(&file).map_err(|_| PayloadError::Integrity)?;
+        if !FileType::from_raw_mode(stat.st_mode).is_file()
+            || stat.st_nlink != 1
+            || stat.st_mode & 0o777 != 0o600
+            || stat.st_size < 0
+            || (stat.st_size as u64) < offset
+        {
+            return Err(PayloadError::Integrity);
+        }
+        file.set_len(offset)
+            .map_err(|_| PayloadError::Io("staging_truncate_failed"))?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| PayloadError::Io("staging_seek_failed"))?;
+        // Once a nonzero prefix is acknowledged, the entry was already synced.
+        let directory = if offset == 0 {
+            Some(
+                self.staging
+                    .try_clone()
+                    .map_err(|_| PayloadError::Io("staging_directory_clone_failed"))?,
+            )
+        } else {
+            None
+        };
+        Ok(PartialAppend {
+            file,
+            offset,
+            remaining: chunk_length,
+            written: 0,
+            hasher: Sha256::new(),
+            directory,
+        })
+    }
+
+    pub fn append_at(
+        &self,
+        staging_name: &str,
+        offset: u64,
+        declared_length: u64,
+        bytes: &[u8],
+    ) -> Result<u64, PayloadError> {
+        let mut append =
+            self.open_append(staging_name, offset, declared_length, bytes.len() as u64)?;
+        append.write(bytes)?;
+        append.commit(Sha256::digest(bytes).into())
+    }
+
+    /// Hash the complete acknowledged file once, with a fixed buffer.
+    pub fn prepare_partial(
+        &self,
+        staging_name: &str,
+        length: u64,
+        expected: Option<[u8; 32]>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<StagingPayload, PayloadError> {
+        let (_, blob_id) = staging_ids(staging_name)?;
+        let fd = fs::openat(
+            &self.staging,
+            staging_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| PayloadError::Missing)?;
+        let mut file = File::from(fd);
+        let stat = fs::fstat(&file).map_err(|_| PayloadError::Integrity)?;
+        if !FileType::from_raw_mode(stat.st_mode).is_file()
+            || stat.st_nlink != 1
+            || stat.st_mode & 0o777 != 0o600
+            || stat.st_size < 0
+            || stat.st_size as u64 != length
+        {
+            return Err(PayloadError::Integrity);
+        }
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            if cancelled() {
+                return Err(PayloadError::Cancelled);
+            }
+            let read = file
+                .read(&mut buffer)
+                .map_err(|_| PayloadError::Io("staging_read_failed"))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let digest: [u8; 32] = hasher.clone().finalize().into();
+        if expected.is_some_and(|expected| expected != digest) {
+            return Err(PayloadError::DigestMismatch);
+        }
+        Ok(StagingPayload {
+            file,
+            staging_name: staging_name.to_owned(),
+            blob_id: blob_id.to_owned(),
+            declared_length: length,
+            written: length,
+            hasher,
+            staging_directory: self
+                .staging
+                .try_clone()
+                .map_err(|_| PayloadError::Io("staging_directory_clone_failed"))?,
+            payloads_directory: self
+                .payloads
+                .try_clone()
+                .map_err(|_| PayloadError::Io("payload_directory_clone_failed"))?,
+            #[cfg(feature = "test-harness")]
+            publish_fault_hook: self.publish_fault_hook.clone(),
+        })
+    }
+
+    /// Delete only a recorded expired partial, never a final payload.
+    pub fn remove_partial(&self, staging_name: &str) -> Result<(), PayloadError> {
+        staging_ids(staging_name)?;
+        let fd = match fs::openat(
+            &self.staging,
+            staging_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            // A prior unlink may not have been synced before its marker was written.
+            Err(rustix::io::Errno::NOENT) => {
+                return fs::fsync(&self.staging)
+                    .map_err(|_| PayloadError::Io("staging_directory_sync_failed"));
+            }
+            Err(_) => return Err(PayloadError::Integrity),
+        };
+        let stat = fs::fstat(&fd).map_err(|_| PayloadError::Integrity)?;
+        if !FileType::from_raw_mode(stat.st_mode).is_file()
+            || stat.st_nlink != 1
+            || stat.st_mode & 0o777 != 0o600
+        {
+            return Err(PayloadError::Integrity);
+        }
+        match fs::unlinkat(&self.staging, staging_name, fs::AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => fs::fsync(&self.staging)
+                .map_err(|_| PayloadError::Io("staging_directory_sync_failed")),
+            Err(_) => Err(PayloadError::Io("staging_cleanup_failed")),
+        }
     }
 
     /// Verify a referenced blob without following links before exposing it.
@@ -328,6 +496,49 @@ fn fault_from_error(error: PayloadError) -> PayloadFault {
     }
 }
 
+/// One chunk written at the acknowledged offset. Dropping it leaves an unsynced
+/// tail that the next `open_append` truncates; only `commit` makes it durable.
+pub struct PartialAppend {
+    file: File,
+    offset: u64,
+    remaining: u64,
+    written: u64,
+    hasher: Sha256,
+    directory: Option<File>,
+}
+
+impl PartialAppend {
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), PayloadError> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(PayloadError::LengthExceeded);
+        }
+        self.file
+            .write_all(bytes)
+            .map_err(|_| PayloadError::Io("staging_write_failed"))?;
+        self.hasher.update(bytes);
+        self.remaining -= bytes.len() as u64;
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Sync only a complete chunk whose digest matches; returns the next offset.
+    pub fn commit(self, expected: [u8; 32]) -> Result<u64, PayloadError> {
+        if self.remaining != 0 {
+            return Err(PayloadError::LengthMismatch);
+        }
+        if <[u8; 32]>::from(self.hasher.finalize()) != expected {
+            return Err(PayloadError::DigestMismatch);
+        }
+        self.file
+            .sync_all()
+            .map_err(|_| PayloadError::Io("staging_sync_failed"))?;
+        if let Some(directory) = self.directory {
+            fs::fsync(&directory).map_err(|_| PayloadError::Io("staging_directory_sync_failed"))?;
+        }
+        Ok(self.offset + self.written)
+    }
+}
+
 pub struct StagingPayload {
     file: File,
     staging_name: String,
@@ -342,6 +553,14 @@ pub struct StagingPayload {
 }
 
 impl StagingPayload {
+    pub fn summary(&self) -> PublishedPayload {
+        PublishedPayload {
+            blob_id: self.blob_id.clone(),
+            length: self.written,
+            sha256: self.hasher.clone().finalize().into(),
+        }
+    }
+
     #[cfg(feature = "test-harness")]
     fn inject_publish_fault(&self, boundary: &'static str) -> Result<(), PayloadError> {
         if let Some(hook) = &self.publish_fault_hook {

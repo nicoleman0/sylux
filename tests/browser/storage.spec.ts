@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import https from 'node:https';
 import { createRequire } from 'node:module';
@@ -20,6 +21,17 @@ const phase = process.env.S1_BROWSER_PHASE ?? 'discovery';
 let browser: Browser;
 let context: BrowserContext;
 let page: Page;
+
+// Each 32-byte block is SHA-256 of its index, so a misplaced or replayed chunk changes the digest.
+function patterned(length: number): Buffer {
+  const bytes = Buffer.alloc(length);
+  const counter = Buffer.alloc(8);
+  for (let block = 0; block * 32 < length; block++) {
+    counter.writeBigUInt64LE(BigInt(block));
+    createHash('sha256').update(counter).digest().copy(bytes, block * 32);
+  }
+  return bytes;
+}
 
 async function signIn(): Promise<void> {
   await page.goto(origin);
@@ -208,7 +220,8 @@ test('Unicode, zero-byte, and binary files round-trip through real upload and do
     Object.defineProperty(window, '__s1LargeBlobReads', { configurable: true, writable: true, value: 0 });
     const original = Blob.prototype.arrayBuffer;
     Blob.prototype.arrayBuffer = function() {
-      if (this.size > 64 * 1024) {
+      // Uploads read bounded slices for hashing; no read may exceed the 8 MiB chunk limit.
+      if (this.size > 8 * 1024 * 1024) {
         (window as unknown as { __s1LargeBlobReads: number }).__s1LargeBlobReads += 1;
       }
       return original.call(this);
@@ -326,7 +339,8 @@ test('lost commit response is resolved through the original upload status', { an
     const request = route.request();
     const target = new URL(request.url());
     if (request.method() === 'GET' && /^\/uploads\/[A-Za-z0-9-]+$/.test(target.pathname)) statusLookups.push(target.pathname);
-    if (!firstStatusLookupFailed && request.method() === 'GET' && /^\/uploads\/[A-Za-z0-9-]+$/.test(target.pathname)) {
+    // Fail the outcome check after the lost commit reply, not the status read before sending.
+    if (dropped && !firstStatusLookupFailed && request.method() === 'GET' && /^\/uploads\/[A-Za-z0-9-]+$/.test(target.pathname)) {
       firstStatusLookupFailed = true;
       await route.abort('failed');
       return;
@@ -431,8 +445,11 @@ test('lost commit response is resolved through the original upload status', { an
   await expect.poll(() => statusLookups.at(-1)).toBe(`/uploads/${admittedId}`);
   await expect(page.getByRole('button', { name: 'Check upload status' })).toBeVisible();
   await page.getByRole('button', { name: 'Check upload status' }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Upload is admitted or still processing' })).toBeVisible();
-  await expect(admissionWarning).toBeVisible();
+  // Status shows the admission exists with no bytes; it is resumed from the original file, never re-admitted.
+  await expect(page.getByRole('alert').filter({ hasText: 'Upload paused' })).toBeVisible();
+  // The tab still holds the selected file, so it offers to resume without reselecting it.
+  await expect(page.getByRole('alert').getByText('Resume this upload', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Resume upload', exact: true })).toBeVisible();
   await expect(page.locator('#upload-file')).toBeDisabled();
   expect(ticketRequests).toBe(1);
   expect(admissionRequests).toBe(1);
@@ -460,4 +477,68 @@ test('uploaded PDF renders and changes pages over real TLS', { annotation: { typ
   await preview.getByRole('button', { name: 'Close preview', exact: true }).click();
   await expect(preview).toHaveCount(0);
   await expect(trigger).toBeFocused();
+});
+
+test('reload resumes real private chunks after matching file reselect', { annotation: { type: 'harness_case', description: 'storage_upload_resume' } }, async () => {
+  test.setTimeout(60_000);
+  await signIn();
+  const name = `resume-${phase}.bin`;
+  const original = patterned(16 * 1024 * 1024 + 4096);
+  let paused = true;
+  const offsets: number[] = [];
+  await page.route('**/uploads/*/content', async route => {
+    const offset = Number(route.request().headers()['upload-offset']);
+    offsets.push(offset);
+    if (paused && offset >= 8 * 1024 * 1024) await route.abort('connectionreset');
+    else await route.continue();
+  });
+  await chooseUpload({ name, mimeType: 'application/octet-stream', buffer: original });
+  await expect.poll(async () => {
+    const id = await page.evaluate(() => {
+      const key = Object.keys(sessionStorage).find(key => key.startsWith('sylux-upload-v1:'));
+      return key ? JSON.parse(sessionStorage.getItem(key)!).id : null;
+    });
+    if (!id) return 0;
+    return page.evaluate(async (id) => (await (await fetch(`/uploads/${id}`)).json()).bytes_received, id);
+  }).toBe(8 * 1024 * 1024);
+  await page.reload();
+  await signIn();
+  await page.evaluate(() => {
+    Object.defineProperty(window, '__s1MaxBlobRead', { configurable: true, writable: true, value: 0 });
+    const original = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = function() {
+      const state = window as unknown as { __s1MaxBlobRead: number };
+      state.__s1MaxBlobRead = Math.max(state.__s1MaxBlobRead, this.size);
+      return original.call(this);
+    };
+  });
+  await page.getByRole('button', { name: 'Check upload status', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Select original file', exact: true })).toBeVisible();
+  const changed = Buffer.from(original); changed[9 * 1024 * 1024] ^= 0xff;
+  const reordered = Buffer.concat([original.subarray(8 * 1024 * 1024, 16 * 1024 * 1024), original.subarray(0, 8 * 1024 * 1024), original.subarray(16 * 1024 * 1024)]);
+  for (const wrong of [changed, reordered]) {
+    await page.getByLabel('Original upload file', { exact: true }).setInputFiles({ name, mimeType: 'application/octet-stream', buffer: wrong });
+    await expect(page.getByText('This file does not match the original upload.', { exact: false })).toBeVisible();
+  }
+  paused = false;
+  await page.getByLabel('Original upload file', { exact: true }).setInputFiles({ name, mimeType: 'application/octet-stream', buffer: original });
+  const row = page.getByRole('row', { name, exact: true });
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  expect(offsets.filter(offset => offset === 0)).toHaveLength(1);
+  // Reselect hashing and resumed chunks read the 16 MiB file in bounded slices.
+  const maxRead = await page.evaluate(() => (window as unknown as { __s1MaxBlobRead: number }).__s1MaxBlobRead);
+  expect(maxRead).toBeGreaterThan(0);
+  expect(maxRead).toBeLessThanOrEqual(8 * 1024 * 1024);
+  // The list API resolves the final entry; the browser remains on the same authenticated origin.
+  const listing = await page.evaluate(async () => await (await fetch('/folders/children')).json());
+  const entry = listing.items.find((item: { name: string }) => item.name === name);
+  expect(entry).toBeTruthy();
+  const download = await page.evaluate(async (id) => {
+    const response = await fetch(`/entries/${id}/content`);
+    const bytes = await response.arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return { status: response.status, length: bytes.byteLength, sha256: [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('') };
+  }, entry.id);
+  expect(download.status).toBe(200); expect(download.length).toBe(original.length);
+  expect(download.sha256).toBe(createHash('sha256').update(original).digest('hex'));
 });

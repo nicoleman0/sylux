@@ -11,6 +11,7 @@ async function installBackend(page: import('@playwright/test').Page): Promise<vo
   ];
   const deleted: Array<Record<string, unknown>> = [];
   let uploadedName = '';
+  let uploadedCommitted = false;
   let instanceName = 'Sylux';
   const accounts = [{ account_id: 'account-1', handle: 'owner', role: 'administrator', enabled: true }];
   await page.route('**/*', async (route) => {
@@ -79,12 +80,14 @@ async function installBackend(page: import('@playwright/test').Page): Promise<vo
       return json(entry ?? {});
     }
     if (path === '/mutation-tickets') {
-      uploadedName = (request.postDataJSON() as { name: string }).name;
-      return json({ mutation_id: 'upload-1', ticket: 'test-ticket', expires_at: '2030-01-01T00:00:00Z' }, 201);
+      uploadedName = (request.postDataJSON() as { name: string }).name; uploadedCommitted = false;
+      return json({ mutation_id: 'upload-1', ticket: 'test-ticket', expires_at: 1893456000, max_chunk_length: 8 * 1024 * 1024 }, 201);
     }
     if (path === '/uploads') return json({ upload_id: 'upload-1', status: 'admitted' }, 201);
-    if (path === '/uploads/upload-1/content') return json({ upload_id: 'upload-1', mutation_id: 'upload-1', status: 'staged', length: 12, sha256: createHash('sha256').update('mock fixture').digest('hex'), published: false });
+    if (path === '/uploads/upload-1') return json({ state: uploadedCommitted ? 'committed' : 'admitted', status: uploadedCommitted ? 'committed' : 'admitted', bytes_received: 0, writer_active: false });
+    if (path === '/uploads/upload-1/content') { const bytes = request.postDataBuffer()!; return json({ upload_id: 'upload-1', mutation_id: 'upload-1', status: 'staged', length: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), published: false }); }
     if (path === '/uploads/upload-1/commit') {
+      uploadedCommitted = true;
       const admission = entries.find((item) => item.id === 'upload-1');
       if (admission) entries.splice(entries.indexOf(admission), 1);
       entries.push({ id: 'upload-1', parent_id: 'root-1', name: uploadedName, kind: 'file', size: 12, generation: 1, etag: '"g1"' });
@@ -936,7 +939,7 @@ test('late upload ticket cannot continue in the next session', async ({ page }) 
   let release!: () => void; let started!: () => void; let admissions = 0;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const waiting = new Promise<void>((resolve) => { started = resolve; });
-  await page.route('**/mutation-tickets', async (route) => { started(); await gate; await route.fulfill({ json: { mutation_id: 'old-upload', ticket: 'old-ticket', expires_at: '2030-01-01T00:00:00Z' }, status: 201 }); });
+  await page.route('**/mutation-tickets', async (route) => { started(); await gate; await route.fulfill({ json: { mutation_id: 'old-upload', ticket: 'old-ticket', expires_at: 1893456000, max_chunk_length: 8 * 1024 * 1024 }, status: 201 }); });
   await page.route('**/uploads', async (route) => { admissions++; await route.fallback(); });
   await page.getByLabel('Choose files to upload').setInputFiles({ name: 'private-old-name.txt', mimeType: 'text/plain', buffer: Buffer.from('old') });
   await waiting;

@@ -34,7 +34,7 @@
   import { modifiedTime } from './lib/modified-time';
   import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort, type ResultSort, type RemovalPreview, type RemovalResult } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
-  import { TransferApi, type Replacement } from './lib/transfers';
+  import { TransferApi, identifyFile, saveRefused, type Replacement } from './lib/transfers';
   import { directoryFilesToUpload, filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
 
   import { parseLocation, locationHash, savedContext, type BrowsingContext, type Destination, type AccountSort } from './lib/browsing-context';
@@ -619,13 +619,27 @@
   let uploadReplacement = $state(false);
   let transferName = $state('');
   let progress = $state(0);
-  let transferPhase = $state<'uploading' | 'saving' | 'complete' | ''>('');
+  let transferPhase = $state<'checking' | 'uploading' | 'saving' | 'complete' | ''>('');
   let transferBusy = $state(false);
   let uploadCancelable = $state(false);
   let uploadId = $state('');
   let unresolvedUploadId = $state('');
   let unresolvedUploadName = $state('');
   let unresolvedCancel = $state(false);
+  let resumeReady = $state(false);
+  let finishReady = $state(false);
+  let cancelPending = $state(false);
+  let uploadExpired = $state(false);
+  // Recovery actions belong to one upload; a newly unresolved upload starts unchecked.
+  function markUnresolved(id: string, name: string) {
+    unresolvedUploadId = id; unresolvedUploadName = name;
+    resumeReady = false; finishReady = false; uploadExpired = false;
+  }
+  let transferWaiting = $state('');
+  const expiredResumeNotice = 'The 24-hour upload window ended before this upload finished, so it cannot be resumed. Cancel it, then upload the file again.';
+  const expiredSaveNotice = 'The 24-hour upload window ended before this upload was saved, so it cannot be saved. Cancel it, then upload the file again.';
+  let resumeFile = $state<File | null>(null);
+  let reselectInput = $state<HTMLInputElement>();
   let controller: AbortController | null = null;
   let uploadBatchBusy = $state(false);
   let uploadBatchStatus = $state('');
@@ -1118,6 +1132,15 @@
       }
       recoverRemoval();
       client.setSessionExpiredHandler(() => expireSession(generation));
+      try {
+        const pending = transfers.restore(user.id);
+        if (pending) {
+          unresolvedUploadId = pending.id; unresolvedUploadName = pending.body.name;
+          uploadReplacement = !!pending.body.replacement;
+          uploadNotice = 'An unfinished upload is retained in this tab. Check its status to continue.';
+          resumeFile = null; resumeReady = false; finishReady = false; uploadExpired = false;
+        }
+      } catch (error) { uploadNotice = error instanceof Error ? error.message : 'Upload recovery could not be loaded.'; }
       await restoreNavigation();
     } catch {
       if (generation !== sessionGeneration) return;
@@ -1212,8 +1235,9 @@
     uploadBatchCanceled = true; uploadBatchBusy = false; uploadBatchStatus = '';
     uploadResults = []; uploadResultsExpanded = false; uploadReportVisible = false; previousUploadReports = []; uploadNotice = ''; unresolvedUploadResult = null;
     transfers.invalidate(); transfers = new TransferApi(client, mutations);
+    resumeReady = false; finishReady = false; uploadExpired = false; transferWaiting = ''; resumeFile = null;
     transferName = ''; progress = 0; transferPhase = ''; transferBusy = false; uploadCancelable = false;
-    uploadId = ''; unresolvedUploadId = ''; unresolvedUploadName = ''; unresolvedCancel = false; notice = '';
+    uploadId = ''; unresolvedUploadId = ''; unresolvedUploadName = ''; unresolvedCancel = false; cancelPending = false; notice = '';
     folderSort = 'name_asc'; searchSort = 'name_asc'; trashSort = 'name_asc'; accountSort = 'name_asc';
     listingRequest++; currentFolder = emptyRoot; folders = []; entries = []; folderPath = [emptyRoot];
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false; loading = false; listingError = '';
@@ -1253,6 +1277,7 @@
 
   async function signOut(): Promise<void> {
     if (loggingOut) return;
+    transfers.clearRecovery();
     loggingOut = true; client.setSessionExpiredHandler(null); sessionGeneration++; clearAccountForms(); clearWorkspace(); accountView = false; settingsView = false; user = null;
     let logoutFailed = false;
     try { await session.logout(); } catch { logoutFailed = true; }
@@ -1975,6 +2000,7 @@
   async function uploadOutcome(id: string): Promise<'committed' | 'canceled' | 'rejected' | 'unknown'> {
     try {
       const status = await transfers.status(id);
+      if (status.state === 'committed' || status.state === 'rejected') transfers.forget(id);
       if (status.state === 'committed') return 'committed';
       if (status.state === 'rejected' && status.status === 'canceled') return 'canceled';
       if (status.state === 'rejected') return 'rejected';
@@ -1984,6 +2010,7 @@
 
   async function showCommittedUpload(): Promise<void> {
     const generation = sessionGeneration;
+    transfers.forget(uploadId || unresolvedUploadId);
     progress = 100; transferPhase = 'complete';
     if (uploadBatchBusy) {
       if (batchActive?.kind === 'file') batchActive.status = 'saved';
@@ -2032,7 +2059,7 @@
     if (transferPhase !== 'complete') { transferPhase = ''; progress = 0; }
   }
 
-  async function startUpload(file: File, input: HTMLInputElement | null, replacement?: Replacement, folder = currentFolder): Promise<boolean> {
+  async function startUpload(file: File, input: HTMLInputElement | null, replacement?: Replacement, folder = currentFolder, resumeId?: string): Promise<boolean> {
     if (namespaceUnknown) return false;
     const generation = sessionGeneration;
     const activeTransfers = transfers;
@@ -2040,14 +2067,24 @@
     transferBusy = true;
     uploadReplacement = !!replacement;
     progress = 0;
-    transferPhase = 'uploading';
+    transferPhase = 'checking';
     transferName = file.name;
     const uploadController = new AbortController();
     controller = uploadController;
     try {
       if (uploadBatchBusy ? uploadBatchCanceled : !await refreshRoot()) return committed;
       const targetFolder = folder;
-      const admission = await activeTransfers.admit(targetFolder.id, file.name, file.size, targetFolder.etag, (id) => { if (generation === sessionGeneration) uploadId = id; }, replacement);
+      if (uploadBatchBusy) uploadBatchStage = 'Checking file';
+      const identity = await identifyFile(file, uploadController.signal, (read, total) => { if (generation === sessionGeneration) progress = total ? Math.floor(read / total * 100) : 100; });
+      if (generation !== sessionGeneration) return committed;
+      const pending = activeTransfers.pending();
+      if (resumeId && (!pending || pending.id !== resumeId || pending.identity.name !== identity.name || pending.identity.size !== identity.size || pending.identity.fingerprint !== identity.fingerprint)) {
+        uploadNotice = 'This file does not match the original upload. Select the original file; its saved offset is unchanged.';
+        return committed;
+      }
+      const admission = resumeId ? { id: resumeId } : await activeTransfers.admit(targetFolder.id, file.name, file.size, targetFolder.etag, (id) => { if (generation === sessionGeneration) uploadId = id; }, replacement, identity);
+      resumeFile = file;
+      transferPhase = 'uploading';
       if (generation !== sessionGeneration) return committed;
       uploadId = admission.id;
       progress = 0;
@@ -2057,9 +2094,11 @@
       await activeTransfers.send(admission.id, file, uploadController.signal, (sent, total) => {
         if (generation !== sessionGeneration) return;
         progress = total ? Math.floor((sent / total) * 100) : 0;
+        transferWaiting = sent >= total ? 'All bytes sent. The server is verifying the upload…' : '';
         if (batchActive?.kind === 'file') batchActive.sent = Math.max(batchActive.sent, Math.min(file.size, sent));
-      });
+      }, (message) => { if (generation === sessionGeneration) transferWaiting = message; });
       if (generation !== sessionGeneration) return committed;
+      transferWaiting = '';
       if (uploadBatchBusy && uploadBatchCanceled) throw new DOMException('Upload canceled', 'AbortError');
       uploadCancelable = false;
       progress = 100;
@@ -2069,7 +2108,7 @@
       try { await activeTransfers.commit(admission.id); }
       catch (error) {
         if (generation !== sessionGeneration) return committed;
-        if (replacement && error instanceof HttpError && (error.status === 409 || error.status === 412)) {
+        if (replacement && saveRefused(error)) {
           try {
             await activeTransfers.cancel(admission.id);
             if (generation !== sessionGeneration) return committed;
@@ -2084,8 +2123,7 @@
           return committed;
         }
         if (outcome !== 'committed') {
-          unresolvedUploadId = admission.id;
-          unresolvedUploadName = file.name;
+          markUnresolved(admission.id, file.name);
           uploadNotice = 'Upload outcome could not be confirmed. Check your files before retrying.';
           return committed;
         }
@@ -2104,11 +2142,12 @@
           replacementPrompt = { file, folder, target };
           uploadNotice = 'A file already has this name. Confirm replacement to continue.';
         } else uploadNotice = 'A folder already has this name. Rename the upload or the folder and try again.';
-      } else if (error instanceof HttpError && error.status >= 400 && error.status < 500 && !uploadCancelable && transferPhase === 'uploading') {
+      } else if (error instanceof HttpError && error.status >= 400 && error.status < 500 && !uploadCancelable && (transferPhase === 'checking' || transferPhase === 'uploading')) {
         if (uploadId) activeTransfers.forget(uploadId);
         uploadId = '';
         uploadNotice = replacement ? 'Replacement was not admitted. The file or folder changed. Refresh and try again.' : 'Upload was not admitted. Refresh the folder and try again.';
       } else if (error instanceof DOMException && error.name === 'AbortError') {
+        if (!uploadId) { uploadNotice = 'Upload canceled before sending bytes.'; return committed; }
         try {
           if (!uploadId) throw new Error('Upload was not admitted');
           await activeTransfers.cancel(uploadId);
@@ -2122,22 +2161,23 @@
             committed = true;
             await showCommittedUpload();
           } else if (outcome === 'canceled') uploadNotice = uploadReplacement ? 'Replacement canceled. This upload did not replace the existing file.' : 'Upload canceled. No saved file is implied.';
-          else { unresolvedUploadId = uploadId; unresolvedUploadName = file.name; unresolvedCancel = true; uploadNotice = 'Upload outcome could not be confirmed. Check your files before retrying.'; }
+          else { markUnresolved(uploadId, file.name); unresolvedCancel = true; cancelPending = true; uploadNotice = 'Upload outcome could not be confirmed. Check your files before retrying.'; }
         }
       } else if (uploadId) {
         const outcome = await uploadOutcome(uploadId);
         if (generation !== sessionGeneration) return committed;
         if (outcome === 'committed') { committed = true; await showCommittedUpload(); }
         else if (outcome === 'canceled' || outcome === 'rejected') uploadNotice = uploadReplacement ? 'Replacement failed. This upload did not replace the existing file.' : 'Upload failed. No saved file was created.';
-        else { unresolvedUploadId = uploadId; unresolvedUploadName = file.name; uploadNotice = 'Upload outcome could not be confirmed. Check status before retrying.'; }
-      } else uploadNotice = 'Upload failed before it was admitted. No saved file is implied.';
+        else { markUnresolved(uploadId, file.name); uploadNotice = 'Upload outcome could not be confirmed. Check status before retrying.'; }
+      } else uploadNotice = error instanceof Error ? error.message : 'Upload failed before it was admitted.';
     } finally {
       if (generation !== sessionGeneration) return committed;
       uploadCancelable = false;
       transferBusy = false;
+      transferWaiting = '';
       resetTransferActivity();
       controller = null;
-      if (!unresolvedUploadId) uploadId = '';
+      if (!unresolvedUploadId) { uploadId = ''; resumeFile = null; resumeReady = false; }
       if (input) input.value = '';
     }
     return committed;
@@ -2159,7 +2199,7 @@
           status = await activeTransfers.status(unresolvedUploadId);
         } catch (retryError) {
           if (generation !== sessionGeneration) return;
-          if (retryError instanceof HttpError && retryError.status === 410) {
+          if (retryError instanceof HttpError && (retryError.status === 410 || (retryError.status === 401 && retryError.code === 'invalid_mutation_ticket' && (activeTransfers.pending()?.expires ?? Infinity) <= Date.now() / 1000))) {
             // An expired ticket can no longer be admitted, so a second 404 is final.
             let admitted = true;
             try { status = await activeTransfers.status(unresolvedUploadId); }
@@ -2167,7 +2207,7 @@
             if (generation !== sessionGeneration) return;
             if (!admitted) {
               activeTransfers.forget(unresolvedUploadId);
-              unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false;
+              unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false; cancelPending = false;
               resolveUploadResult('failed');
               uploadNotice = 'The upload was never admitted and its ticket expired. No saved file was created.';
               transferBusy = false;
@@ -2192,21 +2232,83 @@
       resolveUploadResult('saved');
       uploadId = unresolvedUploadId;
       unresolvedUploadId = '';
-      unresolvedCancel = false;
+      unresolvedCancel = false; cancelPending = false;
       await showCommittedUpload();
       if (generation !== sessionGeneration) return;
       if (!uploadReplacement) uploadNotice = '';
     } else if (outcome === 'canceled' || outcome === 'rejected') {
+      activeTransfers.forget(unresolvedUploadId);
       resolveUploadResult(outcome === 'canceled' ? 'canceled' : 'failed');
       unresolvedUploadId = '';
       uploadId = '';
-      unresolvedCancel = false;
+      unresolvedCancel = false; cancelPending = false;
       uploadNotice = outcome === 'canceled' ? 'Upload canceled. No saved file was created.' : 'Upload was rejected. No saved file was created.';
     } else {
-      unresolvedCancel = true;
-      uploadNotice = 'Upload is admitted or still processing. You can retry cancellation or check status again.';
+      const idle = !status.writer_active;
+      uploadExpired = idle && (status.state === 'admitted' || status.state === 'publishing') && activeTransfers.expired(unresolvedUploadId);
+      finishReady = !uploadExpired && activeTransfers.finishable(unresolvedUploadId, status);
+      resumeReady = !uploadExpired && status.state === 'admitted' && idle;
+      unresolvedCancel = true; cancelPending = false;
+      uploadNotice = uploadExpired ? (status.state === 'publishing' ? expiredSaveNotice : expiredResumeNotice)
+        : finishReady ? `${formatSize(status.length)} received. The file is not saved yet. Finish saving to add it.`
+        : resumeReady ? `${formatSize(status.bytes_received)} received. ${resumeFile ? 'Resume this upload' : 'Select the original file to resume'}.`
+        : status.status === 'recovery_required' ? 'This upload needs server recovery. Ask the administrator to restart the service, then check again. Its bytes remain private.'
+        : !activeTransfers.canCommit(unresolvedUploadId) ? 'Saving is unconfirmed. Check this upload again before continuing.'
+        : 'The server is still processing this upload. Check again shortly.';
     }
     transferBusy = false;
+  }
+
+  async function resumeUpload(file: File): Promise<void> {
+    if (transferBusy || uploadBatchBusy || !resumeReady || !unresolvedUploadId) return;
+    const pending = transfers.pending();
+    if (!pending || pending.id !== unresolvedUploadId) { uploadNotice = 'The original upload record is unavailable. Check its status or cancel it.'; return; }
+    const id = pending.id;
+    // Block before re-reading a large file: the server refuses expired tickets.
+    if (transfers.expired(id)) { resumeReady = false; uploadExpired = true; uploadNotice = expiredResumeNotice; return; }
+    await startUpload(file, null, pending.body.replacement, { id: pending.body.parent_id, etag: pending.body.parent_etag, name: 'Original destination', parent_id: null, kind: 'folder' }, id);
+    if (transferPhase === 'complete') { unresolvedUploadId = ''; resumeReady = false; unresolvedCancel = false; cancelPending = false; transfers.forget(id); resolveUploadResult('saved'); }
+
+  }
+  async function finishUpload(): Promise<void> {
+    if (!unresolvedUploadId || !finishReady || transferBusy || uploadBatchBusy) return;
+    const generation = sessionGeneration;
+    const activeTransfers = transfers;
+    const id = unresolvedUploadId;
+    transferBusy = true; transferPhase = 'saving'; progress = 100;
+    try {
+      await activeTransfers.finish(id);
+      if (generation !== sessionGeneration) return;
+      finishReady = false;
+      resolveUploadResult('saved');
+      uploadId = id; unresolvedUploadId = ''; unresolvedCancel = false; cancelPending = false;
+      await showCommittedUpload();
+      if (generation !== sessionGeneration) return;
+      uploadId = '';
+      if (!uploadReplacement) uploadNotice = '';
+    } catch (error) {
+      if (generation !== sessionGeneration) return;
+      finishReady = false;
+      if (saveRefused(error)) {
+        const reason = error.code === 'name_collision' ? 'An item with this name now exists in the destination' : error.code === 'replacement_changed' ? 'The file being replaced changed' : 'The destination folder changed';
+        uploadNotice = `${reason}, so this upload was not saved. Cancel it, then upload the file again.`;
+      } else {
+        // Status decides: a lost reply after a real save resolves as saved, and nothing is re-sent automatically.
+        transferBusy = false; transferPhase = '';
+        await reconcileUpload();
+        if (generation === sessionGeneration && finishReady) uploadNotice = 'Saving did not complete, and the file is not saved yet. Finish saving to try again.';
+      }
+    } finally {
+      if (generation === sessionGeneration) { transferBusy = false; resetTransferActivity(); }
+    }
+    // The finish control disappears with its outcome; keep keyboard focus in the recovery alert.
+    await tick();
+    if (generation === sessionGeneration && unresolvedUploadId && (document.activeElement === document.body || !document.activeElement)) document.getElementById('upload-check')?.focus();
+  }
+  function reselectUpload(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0]; input.value = '';
+    if (file) void resumeUpload(file);
   }
 
   async function retryCancel(): Promise<void> {
@@ -2218,7 +2320,7 @@
       await activeTransfers.cancel(unresolvedUploadId);
       if (generation !== sessionGeneration) return;
       resolveUploadResult('canceled');
-      unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false;
+      unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false; cancelPending = false;
       uploadNotice = 'Upload canceled. No saved file was created.';
     } catch {
       if (generation !== sessionGeneration) return;
@@ -2226,13 +2328,13 @@
       if (generation !== sessionGeneration) return;
       if (outcome === 'canceled' || outcome === 'rejected') {
         resolveUploadResult(outcome === 'canceled' ? 'canceled' : 'failed');
-        unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false;
+        unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false; cancelPending = false;
         uploadNotice = outcome === 'canceled' ? 'Upload canceled. No saved file was created.' : 'Upload was rejected. No saved file was created.';
       } else if (outcome === 'committed') {
         resolveUploadResult('saved');
-        unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false;
+        unresolvedUploadId = ''; uploadId = ''; unresolvedCancel = false; cancelPending = false;
         await showCommittedUpload();
-      } else uploadNotice = 'Cancellation is still unconfirmed. Retry cancellation or check status.';
+      } else { cancelPending = true; uploadNotice = 'Cancellation is still unconfirmed. Retry cancellation or check status.'; }
     } finally { if (generation === sessionGeneration) transferBusy = false; }
   }
 
@@ -2440,7 +2542,7 @@
                 </div>{/if}
               </section>
             {/if}
-            {#if unresolvedUploadId}<Alert.Root variant="destructive"><Alert.Title>Upload status needs checking</Alert.Title><Alert.Description><p>{unresolvedUploadName} may have been saved. Check its status before uploading it again.</p><div class="mt-2 flex flex-wrap gap-2"><Button variant="outline" size="sm" onclick={reconcileUpload} disabled={transferBusy}>Check upload status</Button>{#if unresolvedCancel}<Button variant="outline" size="sm" onclick={retryCancel} disabled={transferBusy}>Retry cancellation</Button>{/if}</div></Alert.Description></Alert.Root>{/if}
+            {#if unresolvedUploadId}<Alert.Root variant={resumeReady || finishReady ? 'default' : 'destructive'}><Alert.Title>{resumeReady ? 'Upload paused' : finishReady ? 'Upload not saved yet' : uploadExpired ? 'Upload expired' : 'Upload status needs checking'}</Alert.Title><Alert.Description><p>{unresolvedUploadName}</p><p role="status">{uploadNotice}</p>{#if transferBusy}<p role="status">{transferPhase === 'checking' ? 'Checking file' : transferPhase === 'saving' ? 'Saving' : 'Uploading'}: {progress}%{#if transferWaiting}. {transferWaiting}{/if}</p>{/if}<div class="mt-2 flex flex-wrap gap-2"><Button id="upload-check" variant="outline" size="sm" onclick={reconcileUpload} disabled={transferBusy}>Check upload status</Button>{#if resumeReady}<input class="sr-only" type="file" bind:this={reselectInput} onchange={reselectUpload} aria-label="Original upload file" /><Button variant="outline" size="sm" onclick={() => resumeFile ? void resumeUpload(resumeFile) : reselectInput?.click()} disabled={transferBusy || uploadBatchBusy} aria-busy={transferBusy}>{resumeFile ? 'Resume upload' : 'Select original file'}</Button>{/if}{#if finishReady}<Button variant="outline" size="sm" onclick={finishUpload} disabled={transferBusy} aria-busy={transferBusy && transferPhase === 'saving'}>Finish saving</Button>{/if}{#if unresolvedCancel}<Button variant="outline" size="sm" onclick={retryCancel} disabled={transferBusy}>{cancelPending ? 'Retry cancellation' : 'Cancel upload'}</Button>{/if}</div></Alert.Description></Alert.Root>{/if}
             {#if (uploadBatchBusy || uploadReportVisible) && (uploadBatchStatus || uploadResults.length)}
               <section class="upload-batch-report" aria-label="Upload results">
                 {#if uploadNotice}<p class="upload-feedback" role="status">{uploadNotice}</p>{/if}
@@ -2458,6 +2560,7 @@
                         <span class="sr-only">To {batchCurrentDestination}. {batchSaved} of {batchFiles.length} files saved. At least {Math.floor(batchSendPercent / 10) * 10}% sent.</span>
                       </div>
                       <div class="upload-batch-destination" title={batchCurrentDestination}>To {batchCurrentDestination}</div>
+                      {#if transferWaiting}<p class="upload-waiting" role="status">{transferWaiting}</p>{/if}
                       <div class="upload-byte-progress" role="progressbar" aria-label={batchBytes ? 'Batch bytes sent' : 'Batch files sent'} aria-valuemin="0" aria-valuemax="100" aria-valuenow={batchSendPercent} aria-valuetext={`${batchSendPercent}% sent. ${batchSaved} of ${batchFiles.length} files saved.`}>
                         <span style:width={`${batchSendPercent}%`}></span>
                       </div>
@@ -2469,7 +2572,7 @@
                     </div>
                   {:else}
                     <div class="upload-pending">
-                      <div class="min-w-0" role="status" aria-label="Uploading" aria-atomic="true"><span class="sr-only">{transferName ? `${transferName}. ${progress}% sent.` : 'Reading files and folders.'}</span><div class="upload-batch-current"><LoaderCircleIcon class="refreshing" aria-hidden="true" /><span>{batchDisplayStage}{batchCurrent ? ':' : ''}</span>{#if batchCurrent}<span class="upload-current-path" title={batchCurrent.path}>{batchCurrent.path.split('/').at(-1)}</span>{/if}</div><div class="upload-batch-destination" title={batchCurrentDestination}>To {batchCurrentDestination}</div></div>
+                      <div class="min-w-0" role="status" aria-label="Uploading" aria-atomic="true"><span class="sr-only">{transferName ? `${transferName}. ${progress}% ${transferPhase === 'checking' ? 'checked' : 'sent'}.` : 'Reading files and folders.'}</span><div class="upload-batch-current"><LoaderCircleIcon class="refreshing" aria-hidden="true" /><span>{batchDisplayStage}{batchCurrent ? ':' : ''}</span>{#if batchCurrent}<span class="upload-current-path" title={batchCurrent.path}>{batchCurrent.path.split('/').at(-1)}</span>{/if}</div><div class="upload-batch-destination" title={batchCurrentDestination}>To {batchCurrentDestination}{#if transferPhase === 'checking'} · {progress}% checked{/if}</div>{#if transferWaiting}<p class="upload-waiting">{transferWaiting}</p>{/if}</div>
                       <Button variant="ghost" size="icon" aria-label="Cancel upload" title="Cancel upload" disabled={uploadBatchCanceled} onclick={cancelUploadBatch}><XIcon /></Button>
                     </div>
                   {/if}
@@ -2748,7 +2851,7 @@
   .upload-batch-current { display: flex; gap: 5px; min-width: 0; }
   .upload-batch-current > span:first-child { flex-shrink: 0; }
   .upload-current-path, .upload-batch-destination { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .upload-batch-destination, .upload-batch-bytes { color: var(--muted-foreground); font-size: var(--type-meta); }
+  .upload-batch-destination, .upload-batch-bytes, .upload-waiting { color: var(--muted-foreground); font-size: var(--type-meta); }
   .upload-location-details { font-size: var(--type-meta); }
   .upload-location-details summary { min-height: var(--control-height); align-content: center; }
   @media (pointer: coarse) { .upload-location-details summary { min-height: var(--control-height-touch); } }

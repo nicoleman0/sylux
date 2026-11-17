@@ -8,9 +8,9 @@ use crate::domain::{
     authz::csrf_matches,
     coordinator::AdmissionTicket,
     upload::{
-        ActiveUpload, UploadAdmission, UploadStorage, VerifiedUploadTicket, admission_fingerprint,
-        blob_id_from_staging, folder_etag, generation_from_etag, hex, parse_digest, random_id,
-        revision_etag, staging_name, validate_id,
+        ActiveUpload, UploadAdmission, UploadStorage, VerifiedUploadTicket, WorkerError,
+        admission_fingerprint, blob_id_from_staging, folder_etag, generation_from_etag, hex,
+        parse_digest, random_id, revision_etag, staging_name, validate_id,
     },
     upload::{UPLOAD_SCOPE, issue_upload_ticket, verify_upload_ticket},
 };
@@ -349,6 +349,8 @@ pub async fn mutation_ticket(
                 "mutation_id": issued.mutation_id,
                 "ticket": issued.ticket,
                 "expires_at": issued.expires_at,
+                "max_chunk_length": crate::domain::upload::MAX_CHUNK_LENGTH,
+                "max_upload_length": crate::domain::upload::MAX_UPLOAD_LENGTH,
             })),
         )
             .into_response(),
@@ -617,6 +619,12 @@ fn activate_attempt(
         )
         .optional()
         ?;
+    if previous
+        .as_ref()
+        .is_some_and(|attempt| attempt.bytes_received > 0)
+    {
+        return Ok(Err(error(StatusCode::CONFLICT, "upload_requires_resume")));
+    }
     let mut attempt = match previous {
         Some(attempt)
             if attempt.writer_active == 0
@@ -706,7 +714,7 @@ fn finish_attempt(
     match outcome {
         WorkerOutcome::Published(published) => {
             let mutation_changed = transaction.execute(
-                "UPDATE mutation SET state='publishing',completed_length=?2,completed_sha256=?3 WHERE mutation_id=?1 AND state='admitted'",
+                "UPDATE mutation SET state='publishing',completed_length=?2,completed_sha256=?3 WHERE mutation_id=?1 AND state IN ('admitted','publishing')",
                 params![ticket.mutation_id,published.length as i64,published.sha256.as_slice()],
             )?;
             let attempt_changed = transaction.execute(
@@ -780,6 +788,7 @@ fn worker_error(payload_error: PayloadError) -> Response {
         PayloadError::LengthMismatch => error(StatusCode::UNPROCESSABLE_ENTITY, "length_mismatch"),
         PayloadError::DigestMismatch => error(StatusCode::UNPROCESSABLE_ENTITY, "digest_mismatch"),
         PayloadError::Collision => error(StatusCode::CONFLICT, "payload_collision"),
+        PayloadError::Cancelled => error(StatusCode::CONFLICT, "upload_canceled"),
         _ => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "payload_publication_failed",
@@ -830,7 +839,8 @@ pub async fn content(
     };
     let writer = match storage.register_writer(&upload_id) {
         Ok(writer) => writer,
-        Err(_) => return error(StatusCode::CONFLICT, "writer_active"),
+        Err(WorkerError::AlreadyActive) => return error(StatusCode::CONFLICT, "writer_active"),
+        Err(WorkerError::Unavailable) => return ChunkFailure::Stopping.response(),
     };
     let registration = WriterRegistration {
         storage: Arc::clone(&storage),
@@ -1056,7 +1066,7 @@ pub async fn commit(
                 return Err(error(StatusCode::UNAUTHORIZED, "stale_mutation_ticket"));
             }
             let staged: Option<(Vec<u8>, i64)> = transaction.query_row(
-                "SELECT completed_sha256,completed_length FROM mutation WHERE mutation_id=?1 AND principal_account_id=?2 AND state='publishing'",
+                "SELECT completed_sha256,completed_length FROM mutation WHERE mutation_id=?1 AND principal_account_id=?2 AND state='publishing' AND NOT EXISTS(SELECT 1 FROM upload_attempt a WHERE a.mutation_id=mutation.mutation_id AND a.writer_active=1) AND EXISTS(SELECT 1 FROM upload_attempt a WHERE a.mutation_id=mutation.mutation_id AND a.completed_sha256=mutation.completed_sha256 AND a.completed_length=mutation.completed_length AND a.writer_active=0 AND a.outcome IS NULL)",
                 params![ticket_for_tx.mutation_id,ticket_for_tx.account_id],
                 |row| Ok((row.get(0)?,row.get(1)?)),
             ).optional().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "upload_lookup_failed"))?;
@@ -1210,11 +1220,16 @@ pub async fn status(
         Ok(Err(status)) => return error(status, "authentication_required"),
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "upload_lookup_failed"),
     };
+    // Read after SQL: a writer still registered in memory would refuse the next PATCH.
+    let registered = storage(&state).is_ok_and(|storage| storage.writer_registered(&upload_id));
     let Some((state, completed_length, digest, revision_id, bytes, active, outcome)) = row else {
         return error(StatusCode::NOT_FOUND, "upload_not_found");
     };
+    let active = if registered { Some(1) } else { active };
     let status = match (state.as_str(), outcome.as_deref(), active) {
         ("committed", _, _) => "committed",
+        ("publishing", Some("rejected"), _) => "recovery_required",
+        ("publishing", _, Some(1)) => "uploading",
         ("publishing", _, _) => "staged",
         ("rejected", Some("canceled"), _) => "canceled",
         ("rejected", _, _) => "rejected",
@@ -1335,4 +1350,370 @@ pub async fn cancel(
         Ok(Err(response)) => response,
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "database_unavailable"),
     }
+}
+
+/// Storage owns the request task through SQL checkpointing even if its client
+/// disconnects, and joins it at shutdown.
+pub async fn append(
+    State(state): State<AuthState>,
+    Path(upload_id): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let storage = match storage(&state) {
+        Ok(storage) => storage,
+        Err(response) => return response,
+    };
+    let Ok(task) = storage.spawn_owned(append_owned(state, upload_id, headers, body)) else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "server_stopping");
+    };
+    match task.await {
+        Ok(response) => response,
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "upload_worker_failed"),
+    }
+}
+
+enum AppendMessage {
+    Data(axum::body::Bytes),
+    Finish,
+}
+
+enum ChunkFailure {
+    Canceled,
+    Stopping,
+    Idle,
+    Invalid,
+    WriteFailed,
+}
+
+impl ChunkFailure {
+    fn response(self) -> Response {
+        match self {
+            Self::Canceled => error(StatusCode::CONFLICT, "upload_canceled"),
+            Self::Stopping => error(StatusCode::SERVICE_UNAVAILABLE, "server_stopping"),
+            Self::Idle => error(StatusCode::REQUEST_TIMEOUT, "chunk_idle_timeout"),
+            Self::Invalid => error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "chunk_incomplete_or_checksum_mismatch",
+            ),
+            Self::WriteFailed => error(StatusCode::INTERNAL_SERVER_ERROR, "chunk_write_failed"),
+        }
+    }
+}
+
+/// Stream one chunk into staging with fixed buffering. The worker is joined
+/// before returning, so no write outlives the claimed writer.
+#[allow(clippy::too_many_arguments)]
+async fn receive_chunk(
+    storage: &Arc<UploadStorage>,
+    writer: &ActiveUpload,
+    staging_name: String,
+    offset: u64,
+    length: u64,
+    total: u64,
+    digest: [u8; 32],
+    mut body: Body,
+) -> Result<u64, ChunkFailure> {
+    let (sender, mut receiver) = mpsc::channel(2);
+    let store = Arc::clone(storage);
+    let worker = tokio::task::spawn_blocking(move || -> Result<u64, PayloadError> {
+        let mut append = store
+            .payloads
+            .open_append(&staging_name, offset, total, length)?;
+        loop {
+            match receiver.blocking_recv() {
+                Some(AppendMessage::Data(bytes)) => append.write(&bytes)?,
+                Some(AppendMessage::Finish) => return append.commit(digest),
+                None => return Err(PayloadError::LengthMismatch),
+            }
+        }
+    });
+    let idle = storage.chunk_idle_timeout();
+    let mut cancellation = writer.cancellation();
+    let mut stopping = storage.stopping();
+    let mut received = 0u64;
+    let ended = loop {
+        if writer.is_cancelled() {
+            break Err(ChunkFailure::Canceled);
+        }
+        if storage.is_stopping() {
+            break Err(ChunkFailure::Stopping);
+        }
+        let frame = tokio::select! {
+            frame = tokio::time::timeout(idle, body.frame()) => frame,
+            _ = cancellation.changed() => break Err(ChunkFailure::Canceled),
+            _ = stopping.changed() => break Err(ChunkFailure::Stopping),
+        };
+        let data = match frame {
+            Err(_) => break Err(ChunkFailure::Idle),
+            Ok(None) if received == length => break Ok(()),
+            Ok(None) | Ok(Some(Err(_))) => break Err(ChunkFailure::Invalid),
+            Ok(Some(Ok(frame))) => match frame.into_data() {
+                Ok(data) => data,
+                Err(_) => continue,
+            },
+        };
+        if data.len() as u64 > length - received {
+            break Err(ChunkFailure::Invalid);
+        }
+        received += data.len() as u64;
+        let mut sent = true;
+        for start in (0..data.len()).step_by(64 * 1024) {
+            let piece = data.slice(start..data.len().min(start + 64 * 1024));
+            if sender.send(AppendMessage::Data(piece)).await.is_err() {
+                sent = false;
+                break;
+            }
+        }
+        if !sent {
+            break Err(ChunkFailure::WriteFailed);
+        }
+    };
+    if ended.is_ok() {
+        let _ = sender.send(AppendMessage::Finish).await;
+    }
+    drop(sender);
+    let written = worker.await;
+    ended?;
+    match written {
+        Ok(Ok(next)) => Ok(next),
+        Ok(Err(PayloadError::DigestMismatch | PayloadError::LengthMismatch)) => {
+            Err(ChunkFailure::Invalid)
+        }
+        _ => Err(ChunkFailure::WriteFailed),
+    }
+}
+
+async fn append_owned(
+    state: AuthState,
+    upload_id: String,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    use crate::domain::upload::MAX_CHUNK_LENGTH;
+    if validate_id(&upload_id).is_err() {
+        return error(StatusCode::NOT_FOUND, "upload_not_found");
+    }
+    let storage = match storage(&state) {
+        Ok(storage) => storage,
+        Err(response) => return response,
+    };
+    let principal = match authorize_mutation(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let ticket = match verified_ticket(&storage, &headers, &principal) {
+        Ok(ticket) => ticket,
+        Err(response) => return response,
+    };
+    if ticket.mutation_id != upload_id {
+        return error(StatusCode::NOT_FOUND, "upload_not_found");
+    }
+    let Some(csrf) = one_header(&headers, "x-csrf-token").and_then(decode_secret) else {
+        return error(StatusCode::FORBIDDEN, "csrf_required");
+    };
+    let Some(offset) =
+        one_header(&headers, "upload-offset").and_then(|value| value.parse::<u64>().ok())
+    else {
+        return error(StatusCode::BAD_REQUEST, "upload_offset_required");
+    };
+    let Some(length) =
+        one_header(&headers, "content-length").and_then(|value| value.parse::<u64>().ok())
+    else {
+        return error(StatusCode::LENGTH_REQUIRED, "chunk_length_required");
+    };
+    if length > MAX_CHUNK_LENGTH {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "chunk_too_large");
+    }
+    if offset > ticket.admission.length
+        || length > ticket.admission.length - offset
+        || (length == 0 && offset != ticket.admission.length)
+    {
+        return error(StatusCode::UNPROCESSABLE_ENTITY, "length_mismatch");
+    }
+    if one_header(&headers, "content-type") != Some("application/octet-stream") {
+        return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "octet_stream_required");
+    }
+    let Some(chunk_digest) =
+        one_header(&headers, "upload-checksum").and_then(|value| parse_digest(value).ok())
+    else {
+        return error(StatusCode::BAD_REQUEST, "chunk_checksum_required");
+    };
+    let writer = match storage.register_writer(&upload_id) {
+        Ok(writer) => writer,
+        Err(WorkerError::AlreadyActive) => return error(StatusCode::CONFLICT, "writer_active"),
+        Err(WorkerError::Unavailable) => return ChunkFailure::Stopping.response(),
+    };
+    let _registration = WriterRegistration {
+        storage: Arc::clone(&storage),
+        upload_id: upload_id.clone(),
+        writer: Arc::clone(&writer),
+    };
+    let t = ticket.clone();
+    let p = principal.clone();
+    let coordinator = state.coordinator.clone();
+    let attempt = match state.workers.transact(move |tx| -> rusqlite::Result<Result<Attempt, Response>> {
+        if coordinator.revalidate_current(tx, &p, now()).is_err() { return Ok(Err(error(StatusCode::UNAUTHORIZED, "authentication_required"))); }
+        if recovery_epoch(tx).map_err(|_| rusqlite::Error::InvalidQuery)? != t.recovery_epoch { return Ok(Err(error(StatusCode::UNAUTHORIZED, "stale_mutation_ticket"))); }
+        let row: Option<Attempt> = tx.query_row(
+            "SELECT a.attempt_id,a.staging_path,a.attempt_no,a.writer_active,a.bytes_received,a.outcome FROM upload_attempt a JOIN mutation m USING(mutation_id) WHERE m.mutation_id=?1 AND m.principal_account_id=?2 AND m.state='admitted' AND m.expires_at>?3 ORDER BY a.attempt_no DESC LIMIT 1",
+            params![t.mutation_id,t.account_id,now()], |row| Ok(Attempt { attempt_id: row.get(0)?, staging_name: row.get(1)?, attempt_no: row.get(2)?, writer_active: row.get(3)?, bytes_received: row.get(4)?, outcome: row.get(5)? })
+        ).optional()?;
+        let Some(attempt) = row else { return Ok(Err(error(StatusCode::CONFLICT, "upload_not_staging"))); };
+        if attempt.writer_active != 0 { return Ok(Err(error(StatusCode::CONFLICT, "writer_active"))); }
+        if attempt.bytes_received < 0 || attempt.bytes_received as u64 != offset || attempt.outcome.is_some() {
+            return Ok(Err(error(StatusCode::CONFLICT, "upload_offset_mismatch")));
+        }
+        tx.execute("UPDATE upload_attempt SET writer_active=1 WHERE attempt_id=?1 AND writer_active=0", [&attempt.attempt_id])?;
+        Ok(Ok(attempt))
+    }).await {
+        Ok(Ok(attempt)) => attempt, Ok(Err(response)) => return response,
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database_unavailable"),
+    };
+    // Memory is bounded per request regardless of chunk size; no partial chunk is acknowledged.
+    let total = ticket.admission.length;
+    let next_offset = match receive_chunk(
+        &storage,
+        &writer,
+        attempt.staging_name.clone(),
+        offset,
+        length,
+        total,
+        chunk_digest,
+        body,
+    )
+    .await
+    {
+        Ok(next) => next,
+        Err(failure) => {
+            if let Err(response) = release_append(&state, &attempt.attempt_id).await {
+                return response;
+            }
+            return failure.response();
+        }
+    };
+    let id = attempt.attempt_id.clone();
+    let t = ticket.clone();
+    let p = principal.clone();
+    let coordinator = state.coordinator.clone();
+    let checkpoint = state.workers.transact(move |tx| {
+        if coordinator.revalidate_current(tx, &p, now()).is_err() || !csrf_matches(tx, p.session_id(), &csrf) { return Ok(false); }
+        Ok(tx.execute("UPDATE upload_attempt SET bytes_received=?2,writer_active=?3 WHERE attempt_id=?1 AND writer_active=1 AND outcome IS NULL AND EXISTS(SELECT 1 FROM mutation WHERE mutation_id=?4 AND state='admitted')",
+            params![id,next_offset as i64,i64::from(next_offset == total),t.mutation_id])? == 1)
+    }).await;
+    if !matches!(checkpoint, Ok(true)) {
+        if let Err(response) = release_append(&state, &attempt.attempt_id).await {
+            return response;
+        }
+        if writer.is_cancelled() {
+            return ChunkFailure::Canceled.response();
+        }
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "chunk_checkpoint_unconfirmed",
+        );
+    }
+    if next_offset != total {
+        return finish(Json(json!({"upload_id":upload_id,"mutation_id":upload_id,"status":"admitted","bytes_received":next_offset,"length":total,"published":false})).into_response());
+    }
+    let store = Arc::clone(&storage);
+    let name = attempt.staging_name.clone();
+    let expected = ticket.admission.declared_digest().ok().flatten();
+    let hashing_writer = writer.clone();
+    let staging = match tokio::task::spawn_blocking(move || {
+        store.payloads.prepare_partial(&name, total, expected, || {
+            hashing_writer.is_cancelled() || store.is_stopping()
+        })
+    })
+    .await
+    {
+        Ok(Ok(staging)) => staging,
+        Ok(Err(payload_error)) => {
+            if payload_error == PayloadError::DigestMismatch {
+                let mutation = upload_id.clone();
+                match state.workers.transact(move |tx| {
+                    tx.execute("UPDATE mutation SET state='rejected' WHERE mutation_id=?1 AND state='admitted'", [&mutation])?;
+                    tx.execute("UPDATE upload_attempt SET writer_active=0,outcome='rejected' WHERE mutation_id=?1", [mutation])?;
+                    Ok(())
+                }).await {
+                    Ok(()) => {},
+                    Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "rejection_unconfirmed"),
+                }
+            } else {
+                if let Err(response) = release_append(&state, &attempt.attempt_id).await {
+                    return response;
+                }
+                if payload_error == PayloadError::Cancelled && storage.is_stopping() {
+                    return ChunkFailure::Stopping.response();
+                }
+            }
+            return worker_error(payload_error);
+        }
+        Err(_) => {
+            if let Err(response) = release_append(&state, &attempt.attempt_id).await {
+                return response;
+            }
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "payload_worker_failed");
+        }
+    };
+    let metadata = staging.summary();
+    let id = attempt.attempt_id.clone();
+    let mutation = upload_id.clone();
+    let p = principal.clone();
+    let coordinator = state.coordinator.clone();
+    let prepared = state.workers.transact(move |tx| {
+        if coordinator.revalidate_current(tx, &p, now()).is_err() || !csrf_matches(tx, p.session_id(), &csrf) { return Ok(false); }
+        let changed = tx.execute("UPDATE mutation SET state='publishing',completed_length=?2,completed_sha256=?3 WHERE mutation_id=?1 AND state='admitted'", params![mutation, metadata.length as i64, metadata.sha256.as_slice()])?;
+        if changed != 1 { return Ok(false); }
+        tx.execute("UPDATE upload_attempt SET completed_length=?2,completed_sha256=?3 WHERE attempt_id=?1 AND writer_active=1", params![id, metadata.length as i64, metadata.sha256.as_slice()])?;
+        Ok(true)
+    }).await;
+    if !matches!(prepared, Ok(true)) {
+        if let Err(response) = release_append(&state, &attempt.attempt_id).await {
+            return response;
+        }
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "publication_preparation_unconfirmed",
+        );
+    }
+    let digest = staging.summary().sha256;
+    let outcome = match tokio::task::spawn_blocking(move || staging.publish(digest)).await {
+        Ok(Ok(published)) => WorkerOutcome::Published(published),
+        Ok(Err(error)) => WorkerOutcome::Failed(error),
+        Err(_) => WorkerOutcome::Failed(PayloadError::Io("payload_worker_failed")),
+    };
+    if let Err(response) =
+        finish_attempt_owned(&state, &ticket, &attempt, &outcome, &principal, csrf).await
+    {
+        if let Err(release_error) = release_append(&state, &attempt.attempt_id).await {
+            return release_error;
+        }
+        return response;
+    }
+    match outcome {
+        WorkerOutcome::Published(published) => finish(Json(json!({"upload_id":upload_id,"mutation_id":upload_id,"status":"staged","bytes_received":total,"length":total,"sha256":hex(&published.sha256),"published":false})).into_response()),
+        WorkerOutcome::Failed(error) => worker_error(error),
+        WorkerOutcome::Canceled => error(StatusCode::CONFLICT, "upload_canceled"),
+    }
+}
+
+async fn release_append(state: &AuthState, attempt_id: &str) -> Result<(), Response> {
+    let id = attempt_id.to_owned();
+    state
+        .workers
+        .transact(move |tx| {
+            tx.execute(
+                "UPDATE upload_attempt SET writer_active=0,outcome=CASE WHEN EXISTS(SELECT 1 FROM mutation m WHERE m.mutation_id=upload_attempt.mutation_id AND m.state='publishing') THEN 'rejected' ELSE outcome END WHERE attempt_id=?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "upload_checkpoint_unavailable",
+            )
+        })
 }

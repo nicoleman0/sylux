@@ -265,9 +265,10 @@ test('search stays responsive while an upload is active and revalidates after co
   await login(page);
   let content: Route | undefined;
   let queries = 0;
-  await page.route('**/mutation-tickets', route => route.fulfill({ status: 201, json: { mutation_id: 'upload', ticket: 'ticket', expires_at: '2030-01-01' } }));
+  await page.route('**/mutation-tickets', route => route.fulfill({ status: 201, json: { mutation_id: 'upload', ticket: 'ticket', expires_at: 1893456000, max_chunk_length: 8 * 1024 * 1024 } }));
   await page.route('**/uploads', route => route.fulfill({ status: 201, json: { upload_id: 'upload' } }));
   await page.route('**/uploads/upload/content', route => { content = route; });
+  await page.route('**/uploads/upload', route => route.fulfill({ json: { state: 'admitted', status: 'admitted', bytes_received: 0, writer_active: false } }));
   await page.route('**/uploads/upload/commit', route => route.fulfill({ status: 201, json: { status: 'committed' } }));
   await page.route('**/entries/search?*', route => {
     queries++;

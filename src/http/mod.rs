@@ -177,7 +177,10 @@ pub fn router(state: AuthState) -> Router {
             "/uploads/{id}",
             get(uploads::status).delete(uploads::cancel),
         )
-        .route("/uploads/{id}/content", put(uploads::content))
+        .route(
+            "/uploads/{id}/content",
+            put(uploads::content).patch(uploads::append),
+        )
         .route("/uploads/{id}/commit", post(uploads::commit))
         .route("/archives", post(archives::issue))
         .route("/archives/{token}", get(archives::download))

@@ -330,6 +330,18 @@ async fn reconcile_mutation(
     let mut candidates = Vec::with_capacity(attempts.len());
     let mut bad = false;
     for attempt in attempts {
+        if attempt.path == crate::domain::upload::CLEANED_PARTIAL
+            && valid_id(&attempt.id)
+            && mutation.state == "rejected"
+            && !attempt.writer_active
+            && attempt.completed_length.is_none()
+            && attempt.completed_sha256.is_none()
+            && mutation.result_revision.is_none()
+            && mutation.completed_length.is_none()
+            && mutation.completed_sha256.is_none()
+        {
+            continue;
+        }
         let Some((attempt_id, blob_id)) = split_staging_name(&attempt.path) else {
             bad = true;
             continue;
@@ -531,6 +543,11 @@ async fn reconcile_mutation(
                 fail(report, RecoveryDisposition::RecoveryRequired);
                 return Ok(());
             }
+            let mutation_id = mutation.id.clone();
+            workers.transact(move |tx| {
+                tx.execute("UPDATE upload_attempt SET writer_active=0,outcome=NULL WHERE mutation_id=?1", [mutation_id])?;
+                Ok(())
+            }).await.map_err(|_| ReconcileError::Unavailable)?;
             if expired {
                 let mutation_id = mutation.id.clone();
                 workers.transact(move |tx| {
@@ -540,8 +557,7 @@ async fn reconcile_mutation(
             }
         }
         "rejected" => {
-            // A durable rejection never licenses deletion. Unexpected or
-            // conflicting candidates are caught by the bounded inventory walk.
+            // Recovery preserves candidates; expiry cleanup handles incomplete staging.
             if mutation.result_revision.is_some() {
                 fail(report, RecoveryDisposition::RecoveryRequired);
             } else if candidates.iter().any(|c| c.attempt.writer_active) {
