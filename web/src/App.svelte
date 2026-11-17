@@ -32,6 +32,7 @@
   import XIcon from '@lucide/svelte/icons/x';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
   import { modifiedTime } from './lib/modified-time';
+  import { actionTargets, listIntent, moveIndex, shortcutHelp, shortcutsBlocked } from './lib/list-keys';
   import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort, type ResultSort, type RemovalPreview, type RemovalResult } from './lib/listing';
   import { SessionApi, type User, type Account } from './lib/session';
   import { TransferApi, identifyFile, saveRefused, type Replacement } from './lib/transfers';
@@ -304,9 +305,12 @@
           if (isCurrent()) {
             const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title');
             const active = document.activeElement;
-            const interacting = active instanceof HTMLElement && ((!!active.closest('.files-content') && active.matches('input, textarea, select, [contenteditable]')) || !!active.closest('[role=dialog][data-open]'));
+            const interacting = active instanceof HTMLElement && ((!!active.closest('.files-content') && active.matches('input, textarea, select, [contenteditable]')) || !!active.closest('[role=dialog][data-open], .file-row'));
+            // A row removed mid-load drops focus to body; put it back on the same entry if it survived.
+            const rowItem = !active || active === document.body ? listItemFor(listFocusId) : null;
+            if (!rowItem) listFocusId = null;
             if (!interacting) {
-              heading?.focus({ preventScroll: true });
+              (rowItem ?? heading)?.focus({ preventScroll: true });
               const samePage = context && (searchQuery ? context.searchPage === searchPageIndex : context.page === pageIndex);
               window.scrollTo(0, samePage ? context.scroll : 0);
             }
@@ -381,6 +385,74 @@
     if (event.code !== 'Space') return;
     event.preventDefault();
     selectEntry(id, !(event.currentTarget as HTMLInputElement).checked, event.shiftKey);
+  }
+
+  let shortcutsOpen = $state(false);
+  let listFocusId: string | null = null;
+  const itemSelector = '.item-name, .entry-selection input';
+  function listItems(): HTMLElement[] { return [...document.querySelectorAll<HTMLElement>('.files-content .file-row .item-name')]; }
+  function listItemFor(id: string | null): HTMLElement | null {
+    return id ? document.querySelector<HTMLElement>(`.files-content .file-row[data-entry-id="${CSS.escape(id)}"] .item-name`) : null;
+  }
+  function trackListFocus(event: FocusEvent): void {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    listFocusId = target?.matches(itemSelector) ? target.closest<HTMLElement>('.file-row')?.dataset.entryId ?? null : null;
+  }
+  function extendSelection(fromId: string, toId: string): void {
+    const anchor = activeEntries.some((entry) => entry.id === selectionAnchor) ? selectionAnchor! : fromId;
+    const a = activeEntries.findIndex((entry) => entry.id === anchor);
+    const b = activeEntries.findIndex((entry) => entry.id === toId);
+    if (a < 0 || b < 0) return;
+    selectedIds = activeEntries.slice(Math.min(a, b), Math.max(a, b) + 1).map((entry) => entry.id);
+    selectionAnchor = anchor;
+  }
+  function listKeydown(event: KeyboardEvent): void {
+    if (!user || accountView || settingsView || showTrash || shortcutsBlocked(event.target, document)) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const row = target?.matches(itemSelector) ? target.closest<HTMLElement>('.file-row') : null;
+    const onHeading = target?.id === 'folder-title';
+    const inList = !!target?.closest('.files-content .file-row') || onHeading;
+    const intent = listIntent(event, !!row || onHeading, inList);
+    if (!intent) return;
+    if (intent.kind === 'search') {
+      const input = document.getElementById('file-search') as HTMLInputElement | null;
+      if (!input || input.disabled) return;
+      event.preventDefault(); input.focus(); input.select();
+    } else if (intent.kind === 'help') {
+      event.preventDefault(); shortcutsOpen = true;
+    } else if (intent.kind === 'move') {
+      // From the heading, arrows enter the list; this keeps keyboard flow after paging or refresh.
+      const items = listItems();
+      const id = row?.dataset.entryId;
+      const current = row ? items.findIndex((item) => item.closest('.file-row') === row) : -1;
+      const next = moveIndex(current, items.length, intent.to);
+      if (next < 0) return;
+      event.preventDefault();
+      if (intent.extend && id && !fileMutationBusy) extendSelection(id, items[next].closest<HTMLElement>('.file-row')!.dataset.entryId!);
+      items[next].focus();
+    } else if (row) {
+      const id = row.dataset.entryId!;
+      const item = row.querySelector<HTMLElement>('.item-name')!;
+      const entry = activeEntries.find((candidate) => candidate.id === id);
+      if (!entry) return;
+      if (intent.kind === 'open') {
+        if (target !== item) { event.preventDefault(); item.click(); }
+      } else if (intent.kind === 'clear') {
+        if (selectedIds.length) { event.preventDefault(); clearSelection(); }
+      } else if (fileMutationBusy || loading) {
+        return;
+      } else if (intent.kind === 'toggle') {
+        event.preventDefault(); selectEntry(id, !selectedIds.includes(id));
+      } else if (intent.kind === 'rename') {
+        event.preventDefault(); entryAction('rename', entry, item);
+      } else if (intent.kind === 'trash') {
+        const targets = actionTargets(id, selectedEntries, activeEntries);
+        event.preventDefault();
+        // Same confirmation dialogs as the row menu and the selection toolbar.
+        if (targets.length === 1) entryAction('delete', targets[0], item);
+        else void beginBulk('trash', item, targets);
+      }
+    }
   }
   function searchLocation(hit: SearchHit): string {
     return ['Files', ...hit.location.slice(1).map((folder) => folder.name)].join(' / ');
@@ -722,7 +794,14 @@
     try {
       if (bulkNeedsRefresh) await reconcileBulk();
       else await refresh();
-    } finally { if (generation === sessionGeneration && request === workspaceRefreshRequest) workspaceRefreshing = false; }
+    } finally {
+      if (generation === sessionGeneration && request === workspaceRefreshRequest) {
+        workspaceRefreshing = false;
+        // Rows are disabled while loading, which drops a focused row to body. Put it back.
+        await tick();
+        if (generation === sessionGeneration && request === workspaceRefreshRequest && (!document.activeElement || document.activeElement === document.body)) listItemFor(listFocusId)?.focus({ preventScroll: true });
+      }
+    }
   }
 
   async function retryFolder(): Promise<void> {
@@ -2412,7 +2491,7 @@
   {:else}{@const label = entry.kind === 'folder' ? 'Modified date not applicable' : 'Modified date unknown'}<span title={label}><span class="sr-only">{label}</span><span aria-hidden="true">—</span></span>{/if}
 {/snippet}
 
-<svelte:window ondragover={externalDrag} ondrop={externalDrag} />
+<svelte:window ondragover={externalDrag} ondrop={externalDrag} onkeydown={listKeydown} onfocusin={trackListFocus} />
 <svelte:head>
   <title>{instanceName} · Private files</title>
   <meta name="description" content="Private file storage" />
@@ -2696,7 +2775,7 @@
                 <div role="rowgroup" class="file-list">
                 {#if !searchLoading && !searchInputError && !searchError}
                   {#each searchItems as hit (hit.entry.id)}
-                    <div role="row" aria-label={hit.entry.name} class={`file-row search-row selectable-row modified-row ${selectedIds.includes(hit.entry.id) ? 'selected-row' : ''}`}>
+                    <div role="row" aria-label={hit.entry.name} data-entry-id={hit.entry.id} class={`file-row search-row selectable-row modified-row ${selectedIds.includes(hit.entry.id) ? 'selected-row' : ''}`}>
                       <div role="cell" class="entry-selection"><label><input type="checkbox" aria-label={`Select ${hit.entry.name} in ${searchLocation(hit)}`} checked={selectedIds.includes(hit.entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(hit.entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, hit.entry.id)} /></label></div>
                       <div role="cell" class="search-item-main name-cell"><button type="button" class="item-name" disabled={bulkBusy} title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{hit.entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : 'Size unknown'} · {@render modifiedDateLabel(hit.entry)}</span></span></button></div>
                         <div role="cell" class="search-location file-location"><span>Files{#each hit.location.slice(1) as folder (folder.id)}{' / '}{folder.name}{/each}</span><Button variant="link" size="sm" disabled={bulkBusy} onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
@@ -2741,7 +2820,7 @@
             {:else if loading && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
             {:else}<div role="rowgroup" class="file-list">{#each entries as entry (entry.id)}
-              <div role="row" tabindex="-1" aria-label={entry.name} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row modified-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
+              <div role="row" tabindex="-1" aria-label={entry.name} data-entry-id={entry.id} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row modified-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
                 <div role="cell" class="entry-selection"><label><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, entry.id)} /></label></div>
                 <div role="cell" class="name-cell"><button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'} · {@render modifiedDateLabel(entry)}</span></span></button></div><span role="cell" class="file-modified">{@render modifiedDateLabel(entry)}</span><span role="cell" class="file-size">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span>
                 <div role="cell" class="options-cell"><EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(entry.id)} onaction={(action, trigger) => entryAction(action, entry, trigger)} /></div>
@@ -2753,6 +2832,7 @@
             {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading || bulkBusy}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading || bulkBusy}>Next page</Button>{/if}</div>{/if}
             <p class="list-summary" role={loading && workspaceRefreshing && entries.length ? 'status' : undefined}>{loading ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
             {/if}
+            <div class="mt-2"><Button variant="link" size="sm" class="px-0" onclick={() => shortcutsOpen = true}>Keyboard shortcuts</Button></div>
             {#if notice}<Alert.Root role="status" class="workspace-notice"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
         {/if}
@@ -2806,6 +2886,17 @@
         <Dialog.Header><Dialog.Title>Delete {trashTarget?.name}?</Dialog.Title><Dialog.Description>{trashTarget?.kind === 'folder' ? 'Move this folder and its contents to trash. You can restore the folder later.' : 'Move this file to trash. You can restore it later.'}</Dialog.Description></Dialog.Header>
         {#if trashError}<p role="alert">{trashError}</p>{/if}
         <Dialog.Footer><Button variant="outline" disabled={trashBusy} onclick={() => trashTarget = null}>Cancel</Button><Button disabled={trashBusy} aria-busy={trashBusy} onclick={deleteEntry}>{trashBusy ? 'Moving to trash…' : 'Move to trash'}</Button></Dialog.Footer>
+      </Dialog.Content>
+    </Dialog.Root>
+    <Dialog.Root bind:open={shortcutsOpen}>
+      <Dialog.Content>
+        <Dialog.Header><Dialog.Title>Keyboard shortcuts</Dialog.Title><Dialog.Description>Letter and symbol keys work only while focus is in the file list. They pause while you type or a dialog is open.</Dialog.Description></Dialog.Header>
+        <dl class="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-2">
+          {#each shortcutHelp as shortcut (shortcut.keys)}
+            <dt class="flex flex-wrap gap-1">{#each shortcut.keys.split(', ') as key (key)}<kbd class="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">{key}</kbd>{/each}</dt>
+            <dd>{shortcut.action}</dd>
+          {/each}
+        </dl>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!renameId} onOpenChange={(open) => { if (!open && !renameBusy) closeRename(); }}>

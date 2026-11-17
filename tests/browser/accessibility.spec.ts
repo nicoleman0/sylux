@@ -110,6 +110,54 @@ test('rename dialog supports Escape and restores focus to its invoking control',
   await expect(rename).toBeFocused();
 });
 
+test('file list is operable from the keyboard with visible focus', { annotation: { type: 'harness_case', description: 'accessibility_list_keyboard' } }, async () => {
+  await signIn();
+  const folder = page.getByRole('button', { name: `Open ${fixture.folder}`, exact: true });
+  await page.getByRole('heading', { name: 'Files', level: 1 }).focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(folder).toBeFocused();
+  const outline = await folder.evaluate(element => { const style = getComputedStyle(element); return style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0; });
+  expect(outline).toBe(true);
+  await page.keyboard.press('?');
+  const help = page.getByRole('dialog', { name: 'Keyboard shortcuts', exact: true });
+  await expect(help).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(help).toBeHidden();
+  await expect(folder).toBeFocused();
+  await page.keyboard.press('/');
+  const search = page.getByLabel('Search files and folders');
+  await expect(search).toBeFocused();
+  await page.keyboard.type('/?');
+  await expect(search).toHaveValue('/?');
+  await search.fill('');
+  await expect(folder).toBeVisible();
+  await folder.focus();
+  await page.keyboard.press('Enter');
+  const nested = page.getByRole('button', { name: `Open ${fixture.nested}`, exact: true });
+  await expect(nested).toBeVisible();
+  await nested.focus();
+  await page.keyboard.press('Enter');
+  const file = page.getByRole('button', { name: `Preview ${fixture.file}`, exact: true });
+  await expect(file).toBeVisible();
+  await file.focus();
+  await page.keyboard.press('x');
+  await expect(page.getByRole('group', { name: 'Selected items' })).toContainText('1 selected');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('group', { name: 'Selected items' })).toHaveCount(0);
+  await page.keyboard.press('F2');
+  const dialog = page.getByRole('dialog', { name: /rename/i });
+  await expect(dialog.getByRole('textbox', { name: /new name/i })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(file).toBeFocused();
+  await page.keyboard.press('Delete');
+  const confirm = page.getByRole('dialog', { name: /^Delete /});
+  await expect(confirm).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(confirm).toBeHidden();
+  await expect(file).toBeFocused();
+});
+
 test('live failure state is announced and has a text retry action', { annotation: { type: 'harness_case', description: 'accessibility_live_failure_retry' } }, async () => {
   await signIn();
   await page.route('**/folders/*/children**', route => route.abort('failed'));

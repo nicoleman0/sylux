@@ -16,7 +16,8 @@
     "smoke": "playwright test --config playwright.config.ts",
     "audit:dependencies": "node ../tools/npm-audit.mjs",
     "test:dependency-policy": "node --test ../tools/npm-audit.test.mjs",
-    "test:browser": "node ../scripts/run-browser.mjs"
+    "test:browser": "node ../scripts/run-browser.mjs",
+    "test:unit": "node --test src/lib/*.test.ts"
   },
   "devDependencies": {
     "@fontsource/jetbrains-mono": "5.3.0",
