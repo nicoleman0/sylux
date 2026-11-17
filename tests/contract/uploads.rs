@@ -77,6 +77,9 @@ struct Fixture {
     cleanup: Option<sylux::persistence::cleanup::Runner>,
     cleanup_fault: Option<sylux::persistence::payload::PublishFaultHook>,
     removal_commit_hook: Option<Arc<dyn Fn(&'static str) -> rusqlite::Result<()> + Send + Sync>>,
+    storage: Option<Arc<sylux::domain::upload::UploadStorage>>,
+    chunk_idle_timeout: Option<Duration>,
+    commit_barrier: Option<Arc<sylux::http::uploads::UploadCommitTestBarrier>>,
 }
 
 impl Fixture {
@@ -111,6 +114,9 @@ impl Fixture {
             cleanup: None,
             cleanup_fault: None,
             removal_commit_hook: None,
+            storage: None,
+            chunk_idle_timeout: None,
+            commit_barrier: None,
         };
         fixture.start(connection, cancel_barrier).await;
         fixture
@@ -151,7 +157,14 @@ impl Fixture {
             .unwrap()
             .set_publish_fault_hook(Some(hook.clone()));
         }
+        if let Some(timeout) = self.chunk_idle_timeout {
+            Arc::get_mut(state.storage.as_mut().unwrap())
+                .unwrap()
+                .set_chunk_idle_timeout(timeout);
+        }
         state.removal_commit_hook = self.removal_commit_hook.clone();
+        state.upload_commit_test_barrier = self.commit_barrier.clone();
+        self.storage = state.storage.clone();
         self.cleanup = state.start_cleanup();
         let app = http::router(state);
         self.server = Some(tokio::spawn(async move {
@@ -170,6 +183,9 @@ impl Fixture {
             server.abort();
             let _ = server.await;
         }
+        if let Some(storage) = self.storage.take() {
+            storage.shutdown().await.unwrap();
+        }
         if let Some(cleanup) = self.cleanup.take() {
             cleanup.shutdown().await.unwrap();
         }
@@ -185,6 +201,9 @@ impl Fixture {
         if let Some(server) = self.server.take() {
             server.abort();
             let _ = server.await;
+        }
+        if let Some(storage) = self.storage.take() {
+            storage.shutdown().await.unwrap();
         }
         if let Some(cleanup) = self.cleanup.take() {
             cleanup.shutdown().await.unwrap();
@@ -3643,7 +3662,8 @@ async fn sequential_append_resumes_acknowledged_prefix_and_rejects_stale_offsets
         .await;
     assert_eq!(legacy.status, 409);
     assert_eq!(legacy.json()["code"], "upload_requires_resume");
-    // Simulate an unacknowledged tail left after a write but before SQL checkpoint.
+    // Simulate an unacknowledged tail, longer than the resumed bytes, left after
+    // a write but before the SQL checkpoint.
     let name: String = fixture
         .db()
         .lock()
@@ -3659,7 +3679,7 @@ async fn sequential_append_resumes_acknowledged_prefix_and_rejects_stale_offsets
         .append(true)
         .open(fixture.product.join("staging").join(name))
         .unwrap()
-        .write_all(b"discard this tail")
+        .write_all(&[b'x'; 64])
         .unwrap();
     fixture.restart().await;
     assert_eq!(fixture.upload_status(&id).await["bytes_received"], 9);
@@ -3951,5 +3971,604 @@ async fn expired_partial_cleanup_continues_past_an_invalid_candidate() {
         .await
         .unwrap();
     assert!(!paths[0].exists());
+    fixture.close().await;
+}
+
+/// Deterministic bytes that differ at every offset, so reordering changes the digest.
+fn varied(length: usize) -> Vec<u8> {
+    (0..length)
+        .map(|index| (index as u32).wrapping_mul(2_654_435_761).to_be_bytes()[1])
+        .collect()
+}
+
+/// Read one response without waiting for EOF; the client may still hold the socket.
+async fn read_response(stream: &mut TcpStream) -> Response {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        if let Some(split) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&bytes[..split]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map(|value| value.trim().parse::<usize>().unwrap())
+                .unwrap_or(0);
+            if bytes.len() >= split + 4 + length {
+                return Response::parse(&bytes[..split + 4 + length]);
+            }
+        }
+        let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buffer))
+            .await
+            .expect("response within ten seconds")
+            .unwrap();
+        assert!(read > 0, "connection closed before a complete response");
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+}
+
+impl Fixture {
+    /// Send PATCH headers and only part of the declared body, keeping the socket open.
+    async fn hold_append(
+        &self,
+        id: &str,
+        ticket: &str,
+        offset: u64,
+        chunk: &[u8],
+        sent: usize,
+    ) -> TcpStream {
+        let mut stream = TcpStream::connect(&self.address).await.unwrap();
+        let head = format!(
+            "PATCH /uploads/{id}/content HTTP/1.1\r\nHost: {}\r\nOrigin: {}\r\nCookie: {}\r\nX-CSRF-Token: {}\r\nX-Mutation-ID: {ticket}\r\nUpload-Offset: {offset}\r\nUpload-Checksum: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+            self.address,
+            self.origin,
+            owner_auth().cookie,
+            owner_auth().csrf,
+            hex(&Sha256::digest(chunk)),
+            chunk.len(),
+        );
+        let mut wire = head.into_bytes();
+        wire.extend_from_slice(&chunk[..sent]);
+        stream.write_all(&wire).await.unwrap();
+        self.wait_writer(id, true).await;
+        stream
+    }
+
+    async fn wait_writer(&self, id: &str, active: bool) {
+        for _ in 0..500 {
+            if self.upload_status(id).await["writer_active"] == active {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("writer_active never became {active}");
+    }
+
+    async fn raw(&self, wire: Vec<u8>) -> Response {
+        let mut stream = TcpStream::connect(&self.address).await.unwrap();
+        stream.write_all(&wire).await.unwrap();
+        read_response(&mut stream).await
+    }
+
+    fn staging_files(&self) -> usize {
+        fs::read_dir(self.product.join("staging")).unwrap().count()
+    }
+
+    async fn download(&self, entry: &Value) -> Vec<u8> {
+        let entry = entry["id"].as_str().unwrap();
+        self.request(
+            "GET",
+            &format!("/entries/{entry}/content"),
+            Some(&owner_auth()),
+            &[],
+            vec![],
+        )
+        .await
+        .body
+        .to_vec()
+    }
+
+    fn count(&self, sql: &str) -> i64 {
+        self.db()
+            .lock()
+            .unwrap()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_chunk_releases_its_writer_for_resume_and_expiry_cleanup() {
+    let mut fixture = Fixture::new("append-stalled").await;
+    fixture.chunk_idle_timeout = Some(Duration::from_millis(300));
+    fixture.restart().await;
+    let bytes = varied(16);
+    let (resumed, resumed_ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "stalled.bin", &bytes)
+        .await;
+    let first = fixture
+        .append_chunk(&resumed, &resumed_ticket, 0, &bytes[..4])
+        .await;
+    assert_eq!(first.status, 200, "{}", first.text());
+    let expiring = varied(8);
+    let (expired, expired_ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "expiring.bin", &expiring)
+        .await;
+    let first = fixture
+        .append_chunk(&expired, &expired_ticket, 0, &expiring[..3])
+        .await;
+    assert_eq!(first.status, 200, "{}", first.text());
+
+    // Both clients go silent mid-chunk without closing their sockets.
+    let mut held_resumed = fixture
+        .hold_append(&resumed, &resumed_ticket, 4, &bytes[4..], 2)
+        .await;
+    let mut held_expired = fixture
+        .hold_append(&expired, &expired_ticket, 3, &expiring[3..], 1)
+        .await;
+    let timed_out = read_response(&mut held_resumed).await;
+    assert_eq!(timed_out.status, 408, "{}", timed_out.text());
+    assert_eq!(timed_out.json()["code"], "chunk_idle_timeout");
+    fixture.wait_writer(&resumed, false).await;
+    fixture.wait_writer(&expired, false).await;
+    assert_eq!(fixture.upload_status(&resumed).await["bytes_received"], 4);
+    assert_eq!(fixture.upload_status(&expired).await["bytes_received"], 3);
+
+    let last = fixture
+        .append_chunk(&resumed, &resumed_ticket, 4, &bytes[4..])
+        .await;
+    assert_eq!(last.status, 200, "{}", last.text());
+    assert_eq!(last.json()["status"], "staged");
+    let committed = fixture
+        .commit_staged(&resumed, &resumed_ticket, &bytes)
+        .await;
+    assert_eq!(committed.status, 201, "{}", committed.text());
+    assert_eq!(fixture.download(&committed.json()).await, bytes);
+
+    // The silent partial is no longer protected by an active writer.
+    fixture
+        .db()
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE mutation SET issued_at=0,expires_at=0 WHERE mutation_id=?1",
+            [&expired],
+        )
+        .unwrap();
+    assert_eq!(fixture.staging_files(), 1);
+    let storage = fixture.storage.clone().unwrap();
+    let workers = fixture.workers.as_ref().unwrap();
+    let mut cursor = String::new();
+    let cleaned =
+        sylux::domain::upload::cleanup_expired_partials(workers, storage, &mut cursor, 1).await;
+    assert_eq!(cleaned, Ok(1));
+    assert_eq!(fixture.staging_files(), 0);
+    assert_eq!(fixture.upload_status(&expired).await["state"], "rejected");
+    drop(held_expired.shutdown().await);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_during_chunk_receive_reports_upload_canceled() {
+    let fixture = Fixture::new("append-cancel").await;
+    let bytes = varied(12);
+    let (id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "cancel.bin", &bytes)
+        .await;
+    let mut held = fixture.hold_append(&id, &ticket, 0, &bytes, 5).await;
+    let canceled = fixture
+        .mutate(
+            "DELETE",
+            &format!("/uploads/{id}"),
+            &owner_auth(),
+            None,
+            &[],
+            vec![],
+        )
+        .await;
+    assert_eq!(canceled.status, 204, "{}", canceled.text());
+    let response = read_response(&mut held).await;
+    assert_eq!(response.status, 409, "{}", response.text());
+    assert_eq!(response.json()["code"], "upload_canceled");
+    let status = fixture.upload_status(&id).await;
+    assert_eq!(status["status"], "canceled");
+    assert_eq!(status["writer_active"], false);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn malformed_append_headers_are_rejected_before_any_claim() {
+    let fixture = Fixture::new("append-headers").await;
+    let bytes = varied(10);
+    let (id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "headers.bin", &bytes)
+        .await;
+    let digest = hex(&Sha256::digest(&bytes));
+    let path = format!("/uploads/{id}/content");
+    let octet = ("Content-Type", "application/octet-stream".to_owned());
+    let checksum = ("Upload-Checksum", digest.clone());
+    let offset = ("Upload-Offset", "0".to_owned());
+    for (headers, status, code) in [
+        (
+            vec![octet.clone(), checksum.clone()],
+            400,
+            "upload_offset_required",
+        ),
+        (
+            vec![
+                octet.clone(),
+                checksum.clone(),
+                ("Upload-Offset", "-1".into()),
+            ],
+            400,
+            "upload_offset_required",
+        ),
+        (
+            vec![octet.clone(), offset.clone()],
+            400,
+            "chunk_checksum_required",
+        ),
+        (
+            vec![
+                octet.clone(),
+                offset.clone(),
+                ("Upload-Checksum", "ab".into()),
+            ],
+            400,
+            "chunk_checksum_required",
+        ),
+        (
+            vec![
+                ("Content-Type", "text/plain".into()),
+                offset.clone(),
+                checksum.clone(),
+            ],
+            415,
+            "octet_stream_required",
+        ),
+        (
+            vec![offset.clone(), checksum.clone()],
+            415,
+            "octet_stream_required",
+        ),
+    ] {
+        let response = fixture
+            .mutate(
+                "PATCH",
+                &path,
+                &owner_auth(),
+                Some(&ticket),
+                &headers,
+                bytes.clone(),
+            )
+            .await;
+        assert_eq!(response.status, status, "{code}: {}", response.text());
+        assert_eq!(response.json()["code"], code);
+    }
+    let head = |length: &str| {
+        format!(
+            "PATCH {path} HTTP/1.1\r\nHost: {}\r\nOrigin: {}\r\nCookie: {}\r\nX-CSRF-Token: {}\r\nX-Mutation-ID: {ticket}\r\nUpload-Offset: 0\r\nUpload-Checksum: {digest}\r\nContent-Type: application/octet-stream\r\n{length}\r\n",
+            fixture.address,
+            fixture.origin,
+            owner_auth().cookie,
+            owner_auth().csrf,
+        )
+    };
+    let chunked = fixture
+        .raw(
+            format!(
+                "{}a\r\n{}\r\n0\r\n\r\n",
+                head("Transfer-Encoding: chunked\r\n"),
+                "0123456789"
+            )
+            .into_bytes(),
+        )
+        .await;
+    assert_eq!(chunked.status, 411, "{}", chunked.text());
+    assert_eq!(chunked.json()["code"], "chunk_length_required");
+    let oversized = fixture
+        .raw(head(&format!("Content-Length: {}\r\n", 8 * 1024 * 1024 + 1)).into_bytes())
+        .await;
+    assert_eq!(oversized.status, 413, "{}", oversized.text());
+    assert_eq!(oversized.json()["code"], "chunk_too_large");
+    let status = fixture.upload_status(&id).await;
+    assert_eq!(status["bytes_received"], 0);
+    assert_eq!(status["writer_active"], false);
+    assert_eq!(fixture.staging_files(), 0);
+    let accepted = fixture.append_chunk(&id, &ticket, 0, &bytes).await;
+    assert_eq!(accepted.status, 200, "{}", accepted.text());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn final_chunk_publication_fault_recovers_through_the_handler() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for boundary in ["publish.before_noreplace", "publish.before_final_dir_sync"] {
+        let mut fixture = Fixture::new("append-handler-publish-fault").await;
+        let armed = Arc::new(AtomicBool::new(true));
+        let hook_armed = Arc::clone(&armed);
+        fixture.cleanup_fault = Some(Arc::new(move |at| {
+            if at == boundary && hook_armed.swap(false, Ordering::SeqCst) {
+                Err(sylux::persistence::payload::PayloadError::Io(
+                    "injected_publish_fault",
+                ))
+            } else {
+                Ok(())
+            }
+        }));
+        fixture.restart().await;
+        let bytes = varied(40);
+        let (id, ticket) = fixture
+            .admit(&owner_auth(), OWNER_ROOT, 1, "publish.bin", &bytes)
+            .await;
+        let first = fixture.append_chunk(&id, &ticket, 0, &bytes[..16]).await;
+        assert_eq!(first.status, 200, "{}", first.text());
+        let last = fixture.append_chunk(&id, &ticket, 16, &bytes[16..]).await;
+        assert_eq!(last.status, 500, "{boundary}: {}", last.text());
+        assert_eq!(last.json()["code"], "payload_publication_failed");
+        assert!(!armed.load(Ordering::SeqCst), "{boundary} was not reached");
+        let status = fixture.upload_status(&id).await;
+        assert_eq!(status["status"], "recovery_required", "{boundary}");
+        assert_eq!(status["writer_active"], false);
+        let blocked = fixture.commit_staged(&id, &ticket, &bytes).await;
+        assert_eq!(blocked.status, 409, "{}", blocked.text());
+        assert_eq!(blocked.json()["code"], "upload_not_staged");
+
+        fixture.cleanup_fault = None;
+        fixture.restart().await;
+        let report = sylux::persistence::reconcile::reconcile(
+            fixture.workers.as_ref().unwrap(),
+            &fixture.product,
+        )
+        .await
+        .unwrap();
+        assert!(report.ready, "{boundary}: {report:?}");
+        assert_eq!(fixture.upload_status(&id).await["status"], "staged");
+        let committed = fixture.commit_staged(&id, &ticket, &bytes).await;
+        assert_eq!(committed.status, 201, "{boundary}: {}", committed.text());
+        assert_eq!(fixture.download(&committed.json()).await, bytes);
+        fixture.close().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_and_racing_commits_of_one_upload_apply_once() {
+    let mut fixture = Fixture::new("commit-race").await;
+    let barrier = Arc::new(sylux::http::uploads::UploadCommitTestBarrier::default());
+    fixture.commit_barrier = Some(Arc::clone(&barrier));
+    fixture.restart().await;
+    let files = "SELECT count(*) FROM entry WHERE kind='file'";
+    let revisions = "SELECT count(*) FROM revision";
+    let blobs = "SELECT count(*) FROM blob";
+
+    // Interleaved: the first commit pauses before its transaction while a second one wins.
+    let bytes = varied(24);
+    let (id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "race.bin", &bytes)
+        .await;
+    assert_eq!(
+        fixture.append_chunk(&id, &ticket, 0, &bytes).await.status,
+        200
+    );
+    let before = [
+        fixture.count(files),
+        fixture.count(revisions),
+        fixture.count(blobs),
+    ];
+    barrier.arm();
+    let (paused, winner) = tokio::join!(fixture.commit_staged(&id, &ticket, &bytes), async {
+        barrier.wait_paused().await;
+        let winner = fixture.commit_staged(&id, &ticket, &bytes).await;
+        barrier.release();
+        winner
+    });
+    assert_eq!(winner.status, 201, "{}", winner.text());
+    assert_eq!(paused.status, 409, "{}", paused.text());
+    assert_eq!(paused.json()["code"], "upload_not_staged");
+    let after = [
+        fixture.count(files),
+        fixture.count(revisions),
+        fixture.count(blobs),
+    ];
+    assert_eq!(after, before.map(|count| count + 1));
+    let repeated = fixture.commit_staged(&id, &ticket, &bytes).await;
+    assert_eq!(repeated.status, 409, "{}", repeated.text());
+    assert_eq!(
+        [
+            fixture.count(files),
+            fixture.count(revisions),
+            fixture.count(blobs)
+        ],
+        after
+    );
+    let status = fixture.upload_status(&id).await;
+    assert_eq!(status["state"], "committed");
+    assert_eq!(status["revision_id"], winner.json()["revision_id"]);
+
+    // Simultaneous: SQLite serializes the two transactions; exactly one applies.
+    let bytes = varied(32);
+    let (id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 2, "simultaneous.bin", &bytes)
+        .await;
+    assert_eq!(
+        fixture.append_chunk(&id, &ticket, 0, &bytes).await.status,
+        200
+    );
+    let parent = folder_etag(OWNER_ROOT, 2);
+    let commit = || async {
+        let path = format!("/uploads/{id}/commit");
+        let body = serde_json::to_vec(&serde_json::json!({
+            "sha256": hex(&Sha256::digest(&bytes)),
+            "parent_etag": parent,
+        }))
+        .unwrap();
+        let headers = [
+            ("Content-Type", "application/json".to_owned()),
+            ("If-None-Match", "*".to_owned()),
+        ];
+        fixture
+            .mutate("POST", &path, &owner_auth(), Some(&ticket), &headers, body)
+            .await
+    };
+    let (one, two) = tokio::join!(commit(), commit());
+    let mut statuses = [one.status, two.status];
+    statuses.sort_unstable();
+    assert_eq!(statuses, [201, 409], "{} / {}", one.text(), two.text());
+    assert_eq!(
+        [
+            fixture.count(files),
+            fixture.count(revisions),
+            fixture.count(blobs)
+        ],
+        after.map(|count| count + 1)
+    );
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partial_cleanup_runs_at_start_marks_cleaned_rows_and_joins_on_shutdown() {
+    let fixture = Fixture::new("partial-cleanup-lifecycle").await;
+    // More historical rejected partials than one pass visits.
+    for index in 0..33 {
+        let bytes = varied(6);
+        let (id, ticket) = fixture
+            .admit(
+                &owner_auth(),
+                OWNER_ROOT,
+                1,
+                &format!("old-{index}.bin"),
+                &bytes,
+            )
+            .await;
+        assert_eq!(
+            fixture
+                .append_chunk(&id, &ticket, 0, &bytes[..2])
+                .await
+                .status,
+            200
+        );
+    }
+    fixture
+        .db()
+        .lock()
+        .unwrap()
+        .execute("UPDATE mutation SET issued_at=0,expires_at=0", [])
+        .unwrap();
+    let workers = fixture.workers.clone().unwrap();
+    let storage = fixture.storage.clone().unwrap();
+    let runner = sylux::domain::upload::PartialCleanup::start(
+        workers.clone(),
+        Arc::clone(&storage),
+        Duration::from_millis(50),
+    );
+    for _ in 0..500 {
+        if fixture.staging_files() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        fixture.staging_files(),
+        0,
+        "the sweep must start with the server"
+    );
+    for _ in 0..500 {
+        let cleaned = fixture.count(&format!(
+            "SELECT count(*) FROM upload_attempt WHERE staging_path='{}'",
+            sylux::domain::upload::CLEANED_PARTIAL
+        ));
+        if cleaned == 33 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    runner.shutdown().await.unwrap();
+    assert_eq!(
+        fixture.count(&format!(
+            "SELECT count(*) FROM upload_attempt WHERE staging_path='{}'",
+            sylux::domain::upload::CLEANED_PARTIAL
+        )),
+        33
+    );
+
+    // Cleaned history is not revisited, so a newly expired partial is found at once.
+    let mut cursor = String::new();
+    let sweep = |cursor: &mut String| {
+        let workers = workers.clone();
+        let storage = Arc::clone(&storage);
+        let mut owned = std::mem::take(cursor);
+        async move {
+            let result =
+                sylux::domain::upload::cleanup_expired_partials(&workers, storage, &mut owned, 1)
+                    .await;
+            (result, owned)
+        }
+    };
+    let (result, next) = sweep(&mut cursor).await;
+    assert_eq!(result, Ok(0));
+    cursor = next;
+    let bytes = varied(6);
+    let (fresh, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "fresh.bin", &bytes)
+        .await;
+    assert_eq!(
+        fixture
+            .append_chunk(&fresh, &ticket, 0, &bytes[..2])
+            .await
+            .status,
+        200
+    );
+    fixture
+        .db()
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE mutation SET issued_at=0,expires_at=0 WHERE mutation_id=?1",
+            [&fresh],
+        )
+        .unwrap();
+    let (result, next) = sweep(&mut cursor).await;
+    assert_eq!(result, Ok(1));
+    assert_eq!(fixture.staging_files(), 0);
+    let (result, _) = sweep(&mut next.clone()).await;
+    assert_eq!(result, Ok(0));
+    let (result, _) = sweep(&mut String::new()).await;
+    assert_eq!(result, Ok(0), "a second full pass must find nothing");
+    let report = sylux::persistence::reconcile::reconcile(&workers, &fixture.product)
+        .await
+        .unwrap();
+    assert!(report.ready, "{report:?}");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn storage_shutdown_releases_and_joins_an_in_flight_append() {
+    let fixture = Fixture::new("append-shutdown").await;
+    let bytes = varied(20);
+    let (id, ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "shutdown.bin", &bytes)
+        .await;
+    assert_eq!(
+        fixture
+            .append_chunk(&id, &ticket, 0, &bytes[..5])
+            .await
+            .status,
+        200
+    );
+    let mut held = fixture.hold_append(&id, &ticket, 5, &bytes[5..], 3).await;
+    let storage = fixture.storage.clone().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), storage.shutdown())
+        .await
+        .expect("shutdown must not wait for the idle timeout")
+        .unwrap();
+    // Joined before the database stops: the release is already durable.
+    let status = fixture.upload_status(&id).await;
+    assert_eq!(status["writer_active"], false);
+    assert_eq!(status["bytes_received"], 5);
+    assert_eq!(status["state"], "admitted");
+    let response = read_response(&mut held).await;
+    assert_eq!(response.status, 503, "{}", response.text());
+    assert_eq!(response.json()["code"], "server_stopping");
+    let refused = fixture.append_chunk(&id, &ticket, 5, &bytes[5..]).await;
+    assert_eq!(refused.status, 503, "{}", refused.text());
     fixture.close().await;
 }

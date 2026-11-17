@@ -15,6 +15,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 use tokio::sync::watch;
 use unicode_normalization::UnicodeNormalization;
@@ -22,6 +23,9 @@ use unicode_normalization::UnicodeNormalization;
 pub const UPLOAD_SCOPE: &str = "upload_create";
 pub const MAX_UPLOAD_LENGTH: u64 = 64 * 1024 * 1024 * 1024;
 pub const MAX_CHUNK_LENGTH: u64 = 8 * 1024 * 1024;
+/// A chunk body that sends nothing for this long releases its writer.
+pub const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Absolute lifetime from issuance; acknowledged progress does not extend it.
 pub const TICKET_SECONDS: i64 = 24 * 60 * 60;
 const MAX_TICKET_LENGTH: usize = 4096;
 
@@ -45,6 +49,9 @@ pub struct UploadStorage {
     pub payloads: Arc<PayloadStore>,
     mutation_key: [u8; 32],
     active: Mutex<HashMap<String, Arc<ActiveUpload>>>,
+    stop: watch::Sender<bool>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    chunk_idle_timeout: Duration,
 }
 
 pub struct ActiveUpload {
@@ -90,6 +97,9 @@ impl UploadStorage {
             payloads: Arc::new(payloads),
             mutation_key,
             active: Mutex::new(HashMap::new()),
+            stop: watch::channel(false).0,
+            tasks: Mutex::new(Vec::new()),
+            chunk_idle_timeout: CHUNK_IDLE_TIMEOUT,
         })
     }
 
@@ -99,6 +109,9 @@ impl UploadStorage {
 
     pub fn register_writer(&self, upload_id: &str) -> Result<Arc<ActiveUpload>, WorkerError> {
         let mut active = self.active.lock().map_err(|_| WorkerError::Unavailable)?;
+        if self.is_stopping() {
+            return Err(WorkerError::Unavailable);
+        }
         if active.contains_key(upload_id) {
             return Err(WorkerError::AlreadyActive);
         }
@@ -111,6 +124,60 @@ impl UploadStorage {
         });
         active.insert(upload_id.to_owned(), Arc::clone(&writer));
         Ok(writer)
+    }
+
+    pub fn chunk_idle_timeout(&self) -> Duration {
+        self.chunk_idle_timeout
+    }
+
+    #[cfg(feature = "test-harness")]
+    pub fn set_chunk_idle_timeout(&mut self, timeout: Duration) {
+        self.chunk_idle_timeout = timeout;
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        *self.stop.borrow()
+    }
+
+    /// Resolves once shutdown starts. Stopping releases a writer; it is not a user cancel.
+    pub fn stopping(&self) -> watch::Receiver<bool> {
+        self.stop.subscribe()
+    }
+
+    /// Run a request's storage work to completion even if its HTTP future is
+    /// dropped; `shutdown` joins it before the database stops.
+    pub fn spawn_owned<T: Send + 'static>(
+        &self,
+        future: impl std::future::Future<Output = T> + Send + 'static,
+    ) -> Result<tokio::sync::oneshot::Receiver<T>, WorkerError> {
+        let mut tasks = self.tasks.lock().map_err(|_| WorkerError::Unavailable)?;
+        if self.is_stopping() {
+            return Err(WorkerError::Unavailable);
+        }
+        tasks.retain(|task| !task.is_finished());
+        let (send, receive) = tokio::sync::oneshot::channel();
+        tasks.push(tokio::spawn(async move {
+            let _ = send.send(future.await);
+        }));
+        Ok(receive)
+    }
+
+    /// Refuse new owned work, signal running work to release, then join it.
+    pub async fn shutdown(&self) -> Result<(), WorkerError> {
+        let tasks = {
+            let mut tasks = self.tasks.lock().map_err(|_| WorkerError::Unavailable)?;
+            self.stop.send_replace(true);
+            std::mem::take(&mut *tasks)
+        };
+        let mut failed = false;
+        for task in tasks {
+            failed |= task.await.is_err();
+        }
+        if failed {
+            Err(WorkerError::Unavailable)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn cancel_writer(&self, upload_id: &str) -> Result<Option<Arc<ActiveUpload>>, WorkerError> {
@@ -473,6 +540,10 @@ fn read_mutation_key(root: &Path) -> Result<[u8; 32], StorageOpenError> {
     Ok(key)
 }
 
+/// Staging path recorded once an expired partial's unlink is durable, so later
+/// sweeps skip it. It is not a valid staging name and never names a file.
+pub const CLEANED_PARTIAL: &str = "partial-cleaned";
+
 /// One bounded sweep; rejection commits before private bytes are unlinked.
 pub async fn cleanup_expired_partials(
     workers: &crate::persistence::sqlite::SqliteWorkers,
@@ -485,9 +556,9 @@ pub async fn cleanup_expired_partials(
     let rows = workers.transact(move |tx| {
         let rows = {
             let mut statement = tx.prepare(
-                "SELECT a.attempt_id,a.staging_path,a.mutation_id FROM upload_attempt a JOIN mutation m USING(mutation_id) WHERE a.attempt_id>?1 AND m.scope=?3 AND m.completed_length IS NULL AND m.completed_sha256 IS NULL AND NOT EXISTS(SELECT 1 FROM upload_attempt active WHERE active.mutation_id=m.mutation_id AND active.writer_active=1) AND a.writer_active=0 AND a.completed_length IS NULL AND a.completed_sha256 IS NULL AND m.result_revision_id IS NULL AND m.state IN ('admitted','rejected') AND m.expires_at<=?2 ORDER BY a.attempt_id LIMIT 32"
+                "SELECT a.attempt_id,a.staging_path,a.mutation_id FROM upload_attempt a JOIN mutation m USING(mutation_id) WHERE a.attempt_id>?1 AND m.scope=?3 AND m.completed_length IS NULL AND m.completed_sha256 IS NULL AND NOT EXISTS(SELECT 1 FROM upload_attempt active WHERE active.mutation_id=m.mutation_id AND active.writer_active=1) AND a.staging_path<>?4 AND a.writer_active=0 AND a.completed_length IS NULL AND a.completed_sha256 IS NULL AND m.result_revision_id IS NULL AND m.state IN ('admitted','rejected') AND m.expires_at<=?2 ORDER BY a.attempt_id LIMIT 32"
             )?;
-            statement.query_map(params![cursor,at,UPLOAD_SCOPE], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+            statement.query_map(params![cursor,at,UPLOAD_SCOPE,CLEANED_PARTIAL], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (_,_,mutation) in &rows {
             tx.execute("UPDATE mutation SET state='rejected' WHERE mutation_id=?1 AND state='admitted'", [mutation])?;
@@ -496,20 +567,76 @@ pub async fn cleanup_expired_partials(
     }).await.map_err(|_| "partial_cleanup_database_unavailable")?;
     let count = rows.len();
     let next = rows.last().map(|row| row.0.clone()).unwrap_or_default();
-    let cleanup = tokio::task::spawn_blocking(move || {
+    let (cleaned, failed) = tokio::task::spawn_blocking(move || {
+        let mut cleaned = Vec::new();
         let mut failed = false;
-        for (_, name, _) in rows {
-            failed |= storage.payloads.remove_partial(&name).is_err();
+        for (id, name, _) in rows {
+            if storage.payloads.remove_partial(&name).is_ok() {
+                cleaned.push((id, name));
+            } else {
+                failed = true;
+            }
         }
-        if failed {
-            Err("partial_cleanup_failed")
-        } else {
-            Ok(())
-        }
+        (cleaned, failed)
     })
     .await
     .map_err(|_| "partial_cleanup_worker_failed")?;
+    if !cleaned.is_empty() {
+        workers.transact(move |tx| {
+            for (id, name) in cleaned {
+                tx.execute("UPDATE upload_attempt SET staging_path=?3 WHERE attempt_id=?1 AND staging_path=?2 AND writer_active=0 AND completed_length IS NULL AND completed_sha256 IS NULL AND EXISTS(SELECT 1 FROM mutation m WHERE m.mutation_id=upload_attempt.mutation_id AND m.state='rejected' AND m.result_revision_id IS NULL AND m.completed_length IS NULL AND m.completed_sha256 IS NULL)", params![id,name,CLEANED_PARTIAL])?;
+            }
+            Ok(())
+        }).await.map_err(|_| "partial_cleanup_database_unavailable")?;
+    }
     *after = next;
-    cleanup?;
+    if failed {
+        return Err("partial_cleanup_failed");
+    }
     Ok(count)
+}
+
+/// The periodic expired-partial sweep. Its first pass runs at start.
+pub struct PartialCleanup {
+    stop: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl PartialCleanup {
+    pub fn start(
+        workers: crate::persistence::sqlite::SqliteWorkers,
+        storage: Arc<UploadStorage>,
+        period: Duration,
+    ) -> Self {
+        let (stop, mut stopped) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let mut cursor = String::new();
+            let mut interval = tokio::time::interval(period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = stopped.changed() => break,
+                    _ = interval.tick() => {}
+                }
+                // A started pass is never dropped: its blocking unlinks must be joined.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .min(i64::MAX as u64) as i64;
+                if cleanup_expired_partials(&workers, Arc::clone(&storage), &mut cursor, now)
+                    .await
+                    .is_err()
+                {
+                    eprintln!("partial upload cleanup failed; retrying next pass");
+                }
+            }
+        });
+        Self { stop, task }
+    }
+
+    pub async fn shutdown(self) -> Result<(), WorkerError> {
+        self.stop.send_replace(true);
+        self.task.await.map_err(|_| WorkerError::Unavailable)
+    }
 }

@@ -8,9 +8,9 @@ use crate::domain::{
     authz::csrf_matches,
     coordinator::AdmissionTicket,
     upload::{
-        ActiveUpload, UploadAdmission, UploadStorage, VerifiedUploadTicket, admission_fingerprint,
-        blob_id_from_staging, folder_etag, generation_from_etag, hex, parse_digest, random_id,
-        revision_etag, staging_name, validate_id,
+        ActiveUpload, UploadAdmission, UploadStorage, VerifiedUploadTicket, WorkerError,
+        admission_fingerprint, blob_id_from_staging, folder_etag, generation_from_etag, hex,
+        parse_digest, random_id, revision_etag, staging_name, validate_id,
     },
     upload::{UPLOAD_SCOPE, issue_upload_ticket, verify_upload_ticket},
 };
@@ -839,7 +839,8 @@ pub async fn content(
     };
     let writer = match storage.register_writer(&upload_id) {
         Ok(writer) => writer,
-        Err(_) => return error(StatusCode::CONFLICT, "writer_active"),
+        Err(WorkerError::AlreadyActive) => return error(StatusCode::CONFLICT, "writer_active"),
+        Err(WorkerError::Unavailable) => return ChunkFailure::Stopping.response(),
     };
     let registration = WriterRegistration {
         storage: Arc::clone(&storage),
@@ -1348,16 +1349,135 @@ pub async fn cancel(
     }
 }
 
-/// A request task owns the writer through SQL checkpointing even if its client disconnects.
+/// Storage owns the request task through SQL checkpointing even if its client
+/// disconnects, and joins it at shutdown.
 pub async fn append(
     State(state): State<AuthState>,
     Path(upload_id): Path<String>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    match tokio::spawn(append_owned(state, upload_id, headers, body)).await {
+    let storage = match storage(&state) {
+        Ok(storage) => storage,
+        Err(response) => return response,
+    };
+    let Ok(task) = storage.spawn_owned(append_owned(state, upload_id, headers, body)) else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "server_stopping");
+    };
+    match task.await {
         Ok(response) => response,
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "upload_worker_failed"),
+    }
+}
+
+enum AppendMessage {
+    Data(axum::body::Bytes),
+    Finish,
+}
+
+enum ChunkFailure {
+    Canceled,
+    Stopping,
+    Idle,
+    Invalid,
+    WriteFailed,
+}
+
+impl ChunkFailure {
+    fn response(self) -> Response {
+        match self {
+            Self::Canceled => error(StatusCode::CONFLICT, "upload_canceled"),
+            Self::Stopping => error(StatusCode::SERVICE_UNAVAILABLE, "server_stopping"),
+            Self::Idle => error(StatusCode::REQUEST_TIMEOUT, "chunk_idle_timeout"),
+            Self::Invalid => error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "chunk_incomplete_or_checksum_mismatch",
+            ),
+            Self::WriteFailed => error(StatusCode::INTERNAL_SERVER_ERROR, "chunk_write_failed"),
+        }
+    }
+}
+
+/// Stream one chunk into staging with fixed buffering. The worker is joined
+/// before returning, so no write outlives the claimed writer.
+#[allow(clippy::too_many_arguments)]
+async fn receive_chunk(
+    storage: &Arc<UploadStorage>,
+    writer: &ActiveUpload,
+    staging_name: String,
+    offset: u64,
+    length: u64,
+    total: u64,
+    digest: [u8; 32],
+    mut body: Body,
+) -> Result<u64, ChunkFailure> {
+    let (sender, mut receiver) = mpsc::channel(2);
+    let store = Arc::clone(storage);
+    let worker = tokio::task::spawn_blocking(move || -> Result<u64, PayloadError> {
+        let mut append = store
+            .payloads
+            .open_append(&staging_name, offset, total, length)?;
+        loop {
+            match receiver.blocking_recv() {
+                Some(AppendMessage::Data(bytes)) => append.write(&bytes)?,
+                Some(AppendMessage::Finish) => return append.commit(digest),
+                None => return Err(PayloadError::LengthMismatch),
+            }
+        }
+    });
+    let idle = storage.chunk_idle_timeout();
+    let mut cancellation = writer.cancellation();
+    let mut stopping = storage.stopping();
+    let mut received = 0u64;
+    let ended = loop {
+        if writer.is_cancelled() {
+            break Err(ChunkFailure::Canceled);
+        }
+        if storage.is_stopping() {
+            break Err(ChunkFailure::Stopping);
+        }
+        let frame = tokio::select! {
+            frame = tokio::time::timeout(idle, body.frame()) => frame,
+            _ = cancellation.changed() => break Err(ChunkFailure::Canceled),
+            _ = stopping.changed() => break Err(ChunkFailure::Stopping),
+        };
+        let data = match frame {
+            Err(_) => break Err(ChunkFailure::Idle),
+            Ok(None) if received == length => break Ok(()),
+            Ok(None) | Ok(Some(Err(_))) => break Err(ChunkFailure::Invalid),
+            Ok(Some(Ok(frame))) => match frame.into_data() {
+                Ok(data) => data,
+                Err(_) => continue,
+            },
+        };
+        if data.len() as u64 > length - received {
+            break Err(ChunkFailure::Invalid);
+        }
+        received += data.len() as u64;
+        let mut sent = true;
+        for start in (0..data.len()).step_by(64 * 1024) {
+            let piece = data.slice(start..data.len().min(start + 64 * 1024));
+            if sender.send(AppendMessage::Data(piece)).await.is_err() {
+                sent = false;
+                break;
+            }
+        }
+        if !sent {
+            break Err(ChunkFailure::WriteFailed);
+        }
+    };
+    if ended.is_ok() {
+        let _ = sender.send(AppendMessage::Finish).await;
+    }
+    drop(sender);
+    let written = worker.await;
+    ended?;
+    match written {
+        Ok(Ok(next)) => Ok(next),
+        Ok(Err(PayloadError::DigestMismatch | PayloadError::LengthMismatch)) => {
+            Err(ChunkFailure::Invalid)
+        }
+        _ => Err(ChunkFailure::WriteFailed),
     }
 }
 
@@ -1418,7 +1538,8 @@ async fn append_owned(
     };
     let writer = match storage.register_writer(&upload_id) {
         Ok(writer) => writer,
-        Err(_) => return error(StatusCode::CONFLICT, "writer_active"),
+        Err(WorkerError::AlreadyActive) => return error(StatusCode::CONFLICT, "writer_active"),
+        Err(WorkerError::Unavailable) => return ChunkFailure::Stopping.response(),
     };
     let _registration = WriterRegistration {
         storage: Arc::clone(&storage),
@@ -1446,45 +1567,26 @@ async fn append_owned(
         Ok(Ok(attempt)) => attempt, Ok(Err(response)) => return response,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database_unavailable"),
     };
-    // Buffering is capped independently of the total file size; no partial chunk is acknowledged.
-    let bytes = tokio::select! {
-        result = axum::body::to_bytes(body, MAX_CHUNK_LENGTH as usize) => result.ok(),
-        _ = async { let mut cancellation = writer.cancellation(); cancellation.changed().await.ok(); } => None,
-    };
-    let valid = bytes.as_ref().is_some_and(|bytes| {
-        bytes.len() as u64 == length && <[u8; 32]>::from(Sha256::digest(bytes)) == chunk_digest
-    });
-    if !valid || writer.is_cancelled() {
-        if let Err(response) = release_append(&state, &attempt.attempt_id).await {
-            return response;
-        }
-        return error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "chunk_incomplete_or_checksum_mismatch",
-        );
-    }
-    let bytes = bytes.expect("validated chunk");
-    let store = Arc::clone(&storage);
-    let name = attempt.staging_name.clone();
+    // Memory is bounded per request regardless of chunk size; no partial chunk is acknowledged.
     let total = ticket.admission.length;
-    let write = tokio::task::spawn_blocking(move || {
-        if offset == 0 {
-            match store.payloads.start(&name, total) {
-                Ok(staging) => drop(staging),
-                Err(PayloadError::Collision) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        store.payloads.append_at(&name, offset, total, &bytes)
-    })
-    .await;
-    let next_offset = match write {
-        Ok(Ok(offset)) => offset,
-        _ => {
+    let next_offset = match receive_chunk(
+        &storage,
+        &writer,
+        attempt.staging_name.clone(),
+        offset,
+        length,
+        total,
+        chunk_digest,
+        body,
+    )
+    .await
+    {
+        Ok(next) => next,
+        Err(failure) => {
             if let Err(response) = release_append(&state, &attempt.attempt_id).await {
                 return response;
             }
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "chunk_write_failed");
+            return failure.response();
         }
     };
     let id = attempt.attempt_id.clone();
@@ -1500,6 +1602,9 @@ async fn append_owned(
         if let Err(response) = release_append(&state, &attempt.attempt_id).await {
             return response;
         }
+        if writer.is_cancelled() {
+            return ChunkFailure::Canceled.response();
+        }
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "chunk_checkpoint_unconfirmed",
@@ -1513,9 +1618,9 @@ async fn append_owned(
     let expected = ticket.admission.declared_digest().ok().flatten();
     let hashing_writer = writer.clone();
     let staging = match tokio::task::spawn_blocking(move || {
-        store
-            .payloads
-            .prepare_partial(&name, total, expected, || hashing_writer.is_cancelled())
+        store.payloads.prepare_partial(&name, total, expected, || {
+            hashing_writer.is_cancelled() || store.is_stopping()
+        })
     })
     .await
     {
@@ -1534,6 +1639,9 @@ async fn append_owned(
             } else {
                 if let Err(response) = release_append(&state, &attempt.attempt_id).await {
                     return response;
+                }
+                if payload_error == PayloadError::Cancelled && storage.is_stopping() {
+                    return ChunkFailure::Stopping.response();
                 }
             }
             return worker_error(payload_error);

@@ -330,6 +330,18 @@ async fn reconcile_mutation(
     let mut candidates = Vec::with_capacity(attempts.len());
     let mut bad = false;
     for attempt in attempts {
+        if attempt.path == crate::domain::upload::CLEANED_PARTIAL
+            && valid_id(&attempt.id)
+            && mutation.state == "rejected"
+            && !attempt.writer_active
+            && attempt.completed_length.is_none()
+            && attempt.completed_sha256.is_none()
+            && mutation.result_revision.is_none()
+            && mutation.completed_length.is_none()
+            && mutation.completed_sha256.is_none()
+        {
+            continue;
+        }
         let Some((attempt_id, blob_id)) = split_staging_name(&attempt.path) else {
             bad = true;
             continue;

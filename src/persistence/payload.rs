@@ -161,16 +161,23 @@ impl PayloadStore {
     }
 
     /// Reopen only the acknowledged prefix. A lost request may have left a tail.
-    pub fn append_at(
+    pub fn open_append(
         &self,
         staging_name: &str,
         offset: u64,
         declared_length: u64,
-        bytes: &[u8],
-    ) -> Result<u64, PayloadError> {
+        chunk_length: u64,
+    ) -> Result<PartialAppend, PayloadError> {
         staging_ids(staging_name)?;
-        if offset > declared_length || bytes.len() as u64 > declared_length - offset {
+        if offset > declared_length || chunk_length > declared_length - offset {
             return Err(PayloadError::LengthExceeded);
+        }
+        if offset == 0 {
+            match self.start(staging_name, declared_length) {
+                Ok(staging) => drop(staging),
+                Err(PayloadError::Collision) => {}
+                Err(error) => return Err(error),
+            }
         }
         let fd = fs::openat(
             &self.staging,
@@ -193,12 +200,37 @@ impl PayloadStore {
             .map_err(|_| PayloadError::Io("staging_truncate_failed"))?;
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| PayloadError::Io("staging_seek_failed"))?;
-        file.write_all(bytes)
-            .map_err(|_| PayloadError::Io("staging_write_failed"))?;
-        file.sync_all()
-            .map_err(|_| PayloadError::Io("staging_sync_failed"))?;
-        fs::fsync(&self.staging).map_err(|_| PayloadError::Io("staging_directory_sync_failed"))?;
-        Ok(offset + bytes.len() as u64)
+        // Once a nonzero prefix is acknowledged, the entry was already synced.
+        let directory = if offset == 0 {
+            Some(
+                self.staging
+                    .try_clone()
+                    .map_err(|_| PayloadError::Io("staging_directory_clone_failed"))?,
+            )
+        } else {
+            None
+        };
+        Ok(PartialAppend {
+            file,
+            offset,
+            remaining: chunk_length,
+            written: 0,
+            hasher: Sha256::new(),
+            directory,
+        })
+    }
+
+    pub fn append_at(
+        &self,
+        staging_name: &str,
+        offset: u64,
+        declared_length: u64,
+        bytes: &[u8],
+    ) -> Result<u64, PayloadError> {
+        let mut append =
+            self.open_append(staging_name, offset, declared_length, bytes.len() as u64)?;
+        append.write(bytes)?;
+        append.commit(Sha256::digest(bytes).into())
     }
 
     /// Hash the complete acknowledged file once, with a fixed buffer.
@@ -275,7 +307,11 @@ impl PayloadStore {
             Mode::empty(),
         ) {
             Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Ok(()),
+            // A prior unlink may not have been synced before its marker was written.
+            Err(rustix::io::Errno::NOENT) => {
+                return fs::fsync(&self.staging)
+                    .map_err(|_| PayloadError::Io("staging_directory_sync_failed"));
+            }
             Err(_) => return Err(PayloadError::Integrity),
         };
         let stat = fs::fstat(&fd).map_err(|_| PayloadError::Integrity)?;
@@ -286,9 +322,8 @@ impl PayloadStore {
             return Err(PayloadError::Integrity);
         }
         match fs::unlinkat(&self.staging, staging_name, fs::AtFlags::empty()) {
-            Ok(()) => fs::fsync(&self.staging)
+            Ok(()) | Err(rustix::io::Errno::NOENT) => fs::fsync(&self.staging)
                 .map_err(|_| PayloadError::Io("staging_directory_sync_failed")),
-            Err(rustix::io::Errno::NOENT) => Ok(()),
             Err(_) => Err(PayloadError::Io("staging_cleanup_failed")),
         }
     }
@@ -458,6 +493,49 @@ fn fault_from_error(error: PayloadError) -> PayloadFault {
         PayloadError::Missing => PayloadFault::Missing,
         PayloadError::Io(code) => PayloadFault::Io(code),
         _ => PayloadFault::Io("payload_directory_open_failed"),
+    }
+}
+
+/// One chunk written at the acknowledged offset. Dropping it leaves an unsynced
+/// tail that the next `open_append` truncates; only `commit` makes it durable.
+pub struct PartialAppend {
+    file: File,
+    offset: u64,
+    remaining: u64,
+    written: u64,
+    hasher: Sha256,
+    directory: Option<File>,
+}
+
+impl PartialAppend {
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), PayloadError> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(PayloadError::LengthExceeded);
+        }
+        self.file
+            .write_all(bytes)
+            .map_err(|_| PayloadError::Io("staging_write_failed"))?;
+        self.hasher.update(bytes);
+        self.remaining -= bytes.len() as u64;
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Sync only a complete chunk whose digest matches; returns the next offset.
+    pub fn commit(self, expected: [u8; 32]) -> Result<u64, PayloadError> {
+        if self.remaining != 0 {
+            return Err(PayloadError::LengthMismatch);
+        }
+        if <[u8; 32]>::from(self.hasher.finalize()) != expected {
+            return Err(PayloadError::DigestMismatch);
+        }
+        self.file
+            .sync_all()
+            .map_err(|_| PayloadError::Io("staging_sync_failed"))?;
+        if let Some(directory) = self.directory {
+            fs::fsync(&directory).map_err(|_| PayloadError::Io("staging_directory_sync_failed"))?;
+        }
+        Ok(self.offset + self.written)
     }
 }
 

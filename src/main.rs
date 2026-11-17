@@ -1,4 +1,4 @@
-use std::{env, ffi::OsString, net::SocketAddr, process::ExitCode, time::Duration};
+use std::{env, ffi::OsString, net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use axum::{Router, routing::get};
 use tokio::{
@@ -234,8 +234,7 @@ async fn serve_listener(
     .with_storage_root(&configuration.root)
     .map_err(|_| "payload_storage_unavailable")?;
     let mut terminate = signal(SignalKind::terminate()).map_err(|_| "signal_setup_failed")?;
-    let cleanup_storage = auth.storage.clone().ok_or("payload_storage_unavailable")?;
-    let cleanup_workers = workers.clone();
+    let storage = auth.storage.clone().ok_or("payload_storage_unavailable")?;
     let cleanup = auth.start_cleanup();
     let app = http::router(auth)
         .route("/healthz", get(|| async { "ok" }))
@@ -252,6 +251,9 @@ async fn serve_listener(
     let listening = tokio::time::timeout(Duration::from_secs(5), handle.listening()).await;
     if !matches!(listening, Ok(Some(_))) {
         let _ = task.await;
+        if storage.shutdown().await.is_err() {
+            eprintln!("upload writer shutdown failed");
+        }
         if let Some(cleanup) = cleanup {
             cleanup
                 .shutdown()
@@ -264,22 +266,11 @@ async fn serve_listener(
         return Err("listener_start_failed");
     }
     contract_event("listener.bind");
-    let (cleanup_stop, mut cleanup_stopping) = tokio::sync::watch::channel(false);
-    let cleanup_task = tokio::spawn(async move {
-        let mut cursor = String::new();
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            tokio::select! {
-                _ = cleanup_stopping.changed() => break,
-                _ = interval.tick() => {
-                    if sylux::domain::upload::cleanup_expired_partials(&cleanup_workers, cleanup_storage.clone(), &mut cursor,
-                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64).await.is_err() {
-                        eprintln!("partial upload cleanup failed; retrying next pass");
-                    }
-                }
-            }
-        }
-    });
+    let partial_cleanup = sylux::domain::upload::PartialCleanup::start(
+        workers.clone(),
+        Arc::clone(&storage),
+        Duration::from_secs(60),
+    );
 
     let server_joined = tokio::select! {
         _ = tokio::signal::ctrl_c() => false,
@@ -289,12 +280,14 @@ async fn serve_listener(
             true
         }
     };
-    cleanup_stop.send_replace(true);
-    if cleanup_task.await.is_err() {
+    if partial_cleanup.shutdown().await.is_err() {
         eprintln!("partial upload cleanup task failed");
     }
     if server_joined {
         // The select consumed this JoinHandle; polling it again would panic.
+        if storage.shutdown().await.is_err() {
+            eprintln!("upload writer shutdown failed");
+        }
         if let Some(cleanup) = cleanup {
             cleanup
                 .shutdown()
@@ -312,6 +305,7 @@ async fn serve_listener(
         bound,
         guard,
         Some(workers),
+        Some(storage),
         cleanup,
         Duration::from_secs(6),
     )
@@ -324,6 +318,7 @@ async fn drain_server_task(
     bound: root::BoundDatabase,
     guard: ownership::OwnershipGuard,
     workers: Option<SqliteWorkers>,
+    storage: Option<Arc<sylux::domain::upload::UploadStorage>>,
     cleanup: Option<sylux::persistence::cleanup::Runner>,
     join_timeout: Duration,
 ) {
@@ -331,6 +326,12 @@ async fn drain_server_task(
         // Dropping the handle would detach a task that still uses the root.
         task.abort();
         let _ = task.await;
+    }
+    // Upload requests outlive their connections; join them while SQLite runs.
+    if let Some(storage) = storage
+        && storage.shutdown().await.is_err()
+    {
+        eprintln!("upload writer shutdown failed");
     }
     if let Some(cleanup) = cleanup
         && cleanup.shutdown().await.is_err()
@@ -427,7 +428,16 @@ mod tests {
             std::future::pending::<std::io::Result<()>>().await
         });
 
-        drain_server_task(task, bound, guard, None, None, Duration::from_millis(20)).await;
+        drain_server_task(
+            task,
+            bound,
+            guard,
+            None,
+            None,
+            None,
+            Duration::from_millis(20),
+        )
+        .await;
 
         assert!(
             dropped_rx.try_recv().is_ok(),
