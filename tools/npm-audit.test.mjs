@@ -34,28 +34,19 @@ const lock = { packages: {
   'node_modules/vite': { version: '8.3.6' },
   'node_modules/svelte-check': { version: '4.7.8' },
   'node_modules/@sveltejs/vite-plugin-svelte': { version: '7.3.1' },
-  'node_modules/deepmerge': { version: '4.3.1' },
 } };
 const ids = result => result.exceptions.map(e => e.id);
 
 test('allows only the documented picomatch finding', () => {
   assert.deepEqual(ids(validateAudit(known(), lock, before)), ['GHSA-fc5q-39xc-vjpf']);
 });
-test('allows picomatch plus deepmerge while both are valid', () => {
-  assert.deepEqual(ids(validateAudit(withDeepmerge(), lock, before)),
-    ['GHSA-fc5q-39xc-vjpf', 'GHSA-gcqx-w48m-w2h4']);
-});
 test('picomatch exception expires on its own date', () => {
   assert.doesNotThrow(() => validateAudit(known(), lock, new Date('2026-11-30T23:59:59Z')));
   assert.throws(() => validateAudit(known(), lock, new Date('2026-12-01T00:00:00Z')),
     /GHSA-fc5q-39xc-vjpf exception expired/);
 });
-test('deepmerge exception expires on its own date, picomatch stays valid', () => {
-  const lastDay = new Date('2026-11-21T23:59:59Z');
-  const expired = new Date('2026-11-22T00:00:00Z');
-  assert.doesNotThrow(() => validateAudit(withDeepmerge(), lock, lastDay));
-  assert.throws(() => validateAudit(withDeepmerge(), lock, expired), /GHSA-gcqx-w48m-w2h4 exception expired/);
-  assert.doesNotThrow(() => validateAudit(known(), lock, expired));
+test('rejects deepmerge reappearing', () => {
+  assert.throws(() => validateAudit(withDeepmerge(), lock, before));
 });
 test('rejects unknown findings even at low severity', () => {
   const report = known();
