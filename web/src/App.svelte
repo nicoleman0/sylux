@@ -630,6 +630,11 @@
   let finishReady = $state(false);
   let cancelPending = $state(false);
   let uploadExpired = $state(false);
+  // Recovery actions belong to one upload; a newly unresolved upload starts unchecked.
+  function markUnresolved(id: string, name: string) {
+    unresolvedUploadId = id; unresolvedUploadName = name;
+    resumeReady = false; finishReady = false; uploadExpired = false;
+  }
   let transferWaiting = $state('');
   const expiredResumeNotice = 'The 24-hour upload window ended before this upload finished, so it cannot be resumed. Cancel it, then upload the file again.';
   const expiredSaveNotice = 'The 24-hour upload window ended before this upload was saved, so it cannot be saved. Cancel it, then upload the file again.';
@@ -2118,8 +2123,7 @@
           return committed;
         }
         if (outcome !== 'committed') {
-          unresolvedUploadId = admission.id;
-          unresolvedUploadName = file.name;
+          markUnresolved(admission.id, file.name);
           uploadNotice = 'Upload outcome could not be confirmed. Check your files before retrying.';
           return committed;
         }
@@ -2157,14 +2161,14 @@
             committed = true;
             await showCommittedUpload();
           } else if (outcome === 'canceled') uploadNotice = uploadReplacement ? 'Replacement canceled. This upload did not replace the existing file.' : 'Upload canceled. No saved file is implied.';
-          else { unresolvedUploadId = uploadId; unresolvedUploadName = file.name; unresolvedCancel = true; cancelPending = true; uploadNotice = 'Upload outcome could not be confirmed. Check your files before retrying.'; }
+          else { markUnresolved(uploadId, file.name); unresolvedCancel = true; cancelPending = true; uploadNotice = 'Upload outcome could not be confirmed. Check your files before retrying.'; }
         }
       } else if (uploadId) {
         const outcome = await uploadOutcome(uploadId);
         if (generation !== sessionGeneration) return committed;
         if (outcome === 'committed') { committed = true; await showCommittedUpload(); }
         else if (outcome === 'canceled' || outcome === 'rejected') uploadNotice = uploadReplacement ? 'Replacement failed. This upload did not replace the existing file.' : 'Upload failed. No saved file was created.';
-        else { unresolvedUploadId = uploadId; unresolvedUploadName = file.name; uploadNotice = 'Upload outcome could not be confirmed. Check status before retrying.'; }
+        else { markUnresolved(uploadId, file.name); uploadNotice = 'Upload outcome could not be confirmed. Check status before retrying.'; }
       } else uploadNotice = error instanceof Error ? error.message : 'Upload failed before it was admitted.';
     } finally {
       if (generation !== sessionGeneration) return committed;

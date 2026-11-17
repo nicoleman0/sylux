@@ -189,6 +189,13 @@ impl UploadStorage {
         Ok(writer)
     }
 
+    /// SQL releases the claim before the registration drops; status must cover both.
+    pub fn writer_registered(&self, upload_id: &str) -> bool {
+        self.active
+            .lock()
+            .map_or(true, |active| active.contains_key(upload_id))
+    }
+
     pub fn finish_writer(&self, upload_id: &str, writer: &Arc<ActiveUpload>) {
         writer.finish();
         if let Ok(mut active) = self.active.lock()

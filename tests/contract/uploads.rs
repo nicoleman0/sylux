@@ -4176,6 +4176,25 @@ async fn cancel_during_chunk_receive_reports_upload_canceled() {
 }
 
 #[tokio::test]
+async fn status_reports_a_writer_until_its_registration_is_released() {
+    let fixture = Fixture::new("append-registered").await;
+    let bytes = varied(12);
+    let (id, _ticket) = fixture
+        .admit(&owner_auth(), OWNER_ROOT, 1, "registered.bin", &bytes)
+        .await;
+    let storage = fixture.storage.clone().unwrap();
+    // SQL already shows the claim released; the in-memory registration still refuses PATCH.
+    let writer = storage.register_writer(&id).unwrap();
+    let status = fixture.upload_status(&id).await;
+    assert_eq!(status["writer_active"], true, "{status}");
+    assert_eq!(status["status"], "uploading");
+    storage.finish_writer(&id, &writer);
+    let status = fixture.upload_status(&id).await;
+    assert_eq!(status["writer_active"], false, "{status}");
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn malformed_append_headers_are_rejected_before_any_claim() {
     let fixture = Fixture::new("append-headers").await;
     let bytes = varied(10);

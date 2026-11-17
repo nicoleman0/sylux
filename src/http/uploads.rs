@@ -1220,9 +1220,12 @@ pub async fn status(
         Ok(Err(status)) => return error(status, "authentication_required"),
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "upload_lookup_failed"),
     };
+    // Read after SQL: a writer still registered in memory would refuse the next PATCH.
+    let registered = storage(&state).is_ok_and(|storage| storage.writer_registered(&upload_id));
     let Some((state, completed_length, digest, revision_id, bytes, active, outcome)) = row else {
         return error(StatusCode::NOT_FOUND, "upload_not_found");
     };
+    let active = if registered { Some(1) } else { active };
     let status = match (state.as_str(), outcome.as_deref(), active) {
         ("committed", _, _) => "committed",
         ("publishing", Some("rejected"), _) => "recovery_required",
