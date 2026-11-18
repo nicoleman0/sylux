@@ -10,4 +10,5 @@ pub mod namespace;
 pub mod removal;
 pub mod search;
 pub mod upload;
+pub mod usage;
 pub mod zip;

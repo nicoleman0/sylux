@@ -4969,3 +4969,164 @@ async fn payload_reclaim_resumes_after_restart_at_each_cleanup_boundary() {
         fixture.close().await;
     }
 }
+
+impl Fixture {
+    async fn usage(&self, path: &str, auth: Option<&Auth>) -> Response {
+        let response = self.request("GET", path, auth, &[], Vec::new()).await;
+        if response.status == 200 {
+            assert_eq!(response.header("cache-control"), Some("no-store"));
+        }
+        response
+    }
+
+    async fn own_usage(&self) -> (i64, i64) {
+        let response = self.usage("/me/usage", Some(&owner_auth())).await;
+        assert_eq!(response.status, 200, "{}", response.text());
+        let body = response.json();
+        (
+            body["files_bytes"].as_i64().unwrap(),
+            body["trash_bytes"].as_i64().unwrap(),
+        )
+    }
+}
+
+#[tokio::test]
+async fn storage_usage_tracks_trash_restore_replacement_and_removal_exactly() {
+    let mut fixture = Fixture::new("storage-usage").await;
+    // Metadata-only foreign inventory; usage never reads payload bytes.
+    fixture.db().lock().unwrap().execute_batch(
+        "INSERT INTO blob(blob_id,shard,length,sha256) VALUES('f0000000000000000000000000000001','f0',1000,zeroblob(32));
+         INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES('f0000000000000000000000000000002','00000000000000000000000000000002','00000000000000000000000000000102','file','other.bin',x'6f746865722e62696e',1);
+         INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES('f0000000000000000000000000000003','f0000000000000000000000000000002','f0000000000000000000000000000001',1000,zeroblob(32),1,'00000000000000000000000000000002');
+         UPDATE entry SET current_revision_id='f0000000000000000000000000000003' WHERE entry_id='f0000000000000000000000000000002';",
+    ).unwrap();
+    assert_eq!(fixture.own_usage().await, (0, 0));
+
+    let kept = fixture.upload_current("kept.bin", &[1; 11]).await;
+    let moved = fixture.upload_current("moved.bin", &[2; 23]).await;
+    assert_eq!(fixture.own_usage().await, (34, 0));
+
+    let trashed = fixture.trash_uploaded(&moved).await;
+    assert_eq!(fixture.own_usage().await, (11, 23));
+
+    let restored = fixture
+        .mutate(
+            "POST",
+            &format!("/trash/{}/restore", trashed["id"].as_str().unwrap()),
+            &owner_auth(),
+            None,
+            &[("If-Match", trashed["etag"].as_str().unwrap().into())],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(restored.status, 204, "{}", restored.text());
+    assert_eq!(fixture.own_usage().await, (34, 0));
+
+    // Replacement keeps the prior entry and its payload in Trash.
+    let (id, ticket, admission) = fixture.replacement(&kept, &[3; 7]).await;
+    assert_eq!(
+        fixture
+            .replacement_content(&id, &ticket, &[3; 7])
+            .await
+            .status,
+        200
+    );
+    let replaced = fixture.replacement_commit(&id, &ticket, &admission).await;
+    assert_eq!(replaced.status, 201, "{}", replaced.text());
+    assert_eq!(fixture.own_usage().await, (30, 11));
+
+    // Figures derive from stored rows alone, so data written by an earlier process counts the same.
+    fixture.restart().await;
+    assert_eq!(fixture.own_usage().await, (30, 11));
+    let listing = fixture
+        .request(
+            "GET",
+            "/folders/children",
+            Some(&owner_auth()),
+            &[],
+            Vec::new(),
+        )
+        .await
+        .json();
+    let listed: i64 = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["size"].as_i64().unwrap())
+        .sum();
+    assert_eq!(listed, 30, "Files equals the sum of listed file sizes");
+
+    let prior = fixture
+        .request("GET", "/trash", Some(&owner_auth()), &[], Vec::new())
+        .await
+        .json()["items"][0]
+        .clone();
+    assert_eq!(prior["id"], kept["id"]);
+    let preview = fixture
+        .removal_json(
+            "/trash/removals/preview",
+            serde_json::json!({"selection":{"kind":"selected","items":[{"id":prior["id"],"etag":prior["etag"]}]}}),
+        )
+        .await;
+    assert_eq!(preview.status, 200, "{}", preview.text());
+    let operation = "a0000000000000000000000000000077";
+    let removed = fixture
+        .removal_json(
+            "/trash/removals",
+            serde_json::json!({"operation_id":operation,"confirmation":preview.json()["confirmation"]}),
+        )
+        .await;
+    assert_eq!(removed.status, 200, "{}", removed.text());
+    // Committed removal leaves Trash before payload cleanup finishes.
+    assert_eq!(fixture.own_usage().await, (30, 0));
+    fixture.wait_cleanup(operation).await;
+    assert_eq!(fixture.own_usage().await, (30, 0));
+
+    // A user sees only their own figures and cannot read the administrator view.
+    let other = fixture.usage("/me/usage", Some(&other_auth())).await;
+    assert_eq!(other.status, 200, "{}", other.text());
+    assert_eq!(
+        other.json(),
+        serde_json::json!({"files_bytes":1000,"trash_bytes":0})
+    );
+    assert_eq!(
+        fixture
+            .usage("/accounts/usage", Some(&owner_auth()))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        fixture
+            .usage("/accounts/usage", Some(&other_auth()))
+            .await
+            .status,
+        403
+    );
+    assert_eq!(fixture.usage("/accounts/usage", None).await.status, 401);
+    assert_eq!(fixture.usage("/me/usage", None).await.status, 401);
+
+    fixture
+        .db()
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE account SET role='administrator' WHERE account_id=?1",
+            [OWNER_ID],
+        )
+        .unwrap();
+    let all = fixture.usage("/accounts/usage", Some(&owner_auth())).await;
+    assert_eq!(all.status, 200, "{}", all.text());
+    let all = all.json();
+    assert_eq!(
+        all["accounts"],
+        serde_json::json!([
+            {"account_id":OTHER_ID,"files_bytes":1000,"trash_bytes":0},
+            {"account_id":OWNER_ID,"files_bytes":30,"trash_bytes":0},
+        ])
+    );
+    let available = all["volume"]["available_bytes"].as_u64().unwrap();
+    let total = all["volume"]["total_bytes"].as_u64().unwrap();
+    assert!(0 < available && available <= total, "{all}");
+    fixture.close().await;
+}

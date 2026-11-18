@@ -136,6 +136,16 @@ export class MockTransport implements ApiTransport {
     if (options.headers?.['If-Match'] !== entry.etag) throw new HttpError(412);
   }
 
+  /** Mirrors server accounting: reachable files count as Files, every other retained file as Trash. */
+  private usage(): { files_bytes: number; trash_bytes: number } {
+    const reachable = (entry: Entry): boolean => { try { this.activeEntry(entry.id); return true; } catch { return false; } };
+    const size = (entry: Entry): number => entry.kind === 'file' && typeof entry.size === 'number' ? entry.size : 0;
+    let files = 0; let trash = 0;
+    for (const entry of this.entries) if (reachable(entry)) files += size(entry); else trash += size(entry);
+    for (const entry of this.deletedEntries) trash += size(entry);
+    return { files_bytes: files, trash_bytes: trash };
+  }
+
   private uploadParent(parent: string, etag: string): void {
     if (this.folderPath(parent).at(-1)?.etag !== etag) throw new HttpError(412);
   }
@@ -187,6 +197,12 @@ export class MockTransport implements ApiTransport {
         account.enabled = false;
       } else if (!route.endsWith('/reset') || account.role !== 'user' || !account.enabled) throw new HttpError(404);
       return undefined as T;
+    }
+    if (route === '/me/usage' && method === 'GET') { if (!this.user) throw new HttpError(401); return this.usage() as T; }
+    if (route === '/accounts/usage' && method === 'GET') {
+      if (this.user?.role !== 'administrator') throw new HttpError(403);
+      const own = this.usage();
+      return { volume: { available_bytes: 412 * 1024 ** 3, total_bytes: 931 * 1024 ** 3 }, accounts: this.accounts.map((account) => ({ account_id: account.account_id, ...(account.account_id === this.user?.id ? own : { files_bytes: 0, trash_bytes: 0 }) })) } as T;
     }
     if (route === '/me/password' && method === 'POST') { this.user = null; return undefined as T; }
     if (route === '/setup' && method === 'GET') return { setupRequired: this.setupRequired, user: this.user, csrfToken: 'mock-csrf-token' } as T;

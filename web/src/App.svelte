@@ -34,7 +34,7 @@
   import { modifiedTime } from './lib/modified-time';
   import { actionTargets, listIntent, moveIndex, shortcutHelp, shortcutsBlocked } from './lib/list-keys';
   import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort, type ResultSort, type RemovalPreview, type RemovalResult } from './lib/listing';
-  import { SessionApi, type User, type Account } from './lib/session';
+  import { SessionApi, type User, type Account, type Usage, type AllUsage } from './lib/session';
   import { TransferApi, identifyFile, saveRefused, type Replacement } from './lib/transfers';
   import { directoryFilesToUpload, filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
 
@@ -228,6 +228,7 @@
     const trashFocus = showTrash ? watchFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null) : null;
     if (destination === 'files' && (!currentFolder.id || entriesFolderId !== currentFolder.id)) await refresh();
     if (showTrash) await loadTrash();
+    if (accountView) await loadOwnUsage();
     if (settingsView) { await loadAccounts(); if (generation === sessionGeneration && current === navigationRequest) await loadInstance(); }
     await tick();
     const mayFocus = trashFocus?.mayFocus() ?? true;
@@ -289,6 +290,7 @@
           await runSearch(context?.searchCursors[context.searchPage] ?? null, context?.searchPage ?? 0);
         } else await restoreBrowsingPage();
       } else if (showTrash) await loadTrash();
+      else if (accountView) await loadOwnUsage();
       else if (settingsView) { await loadAccounts(); if (isCurrent()) await loadInstance(); }
     } catch (error) {
       if (isCurrent()) {
@@ -357,6 +359,18 @@
   let accountsLoading = $state(false);
   let accountsError = $state('');
   let accountsRequest = 0;
+  type UsageState = 'loading' | 'ready' | 'error';
+  let ownUsage = $state<Usage | null>(null);
+  let ownUsageState = $state<UsageState>('loading');
+  let ownUsageRequest = 0;
+  let allUsage = $state<AllUsage | null>(null);
+  let allUsageState = $state<UsageState>('loading');
+  let allUsageRequest = 0;
+  const usageByAccount = $derived(new Map(allUsage?.accounts.map((usage) => [usage.account_id, usage]) ?? []));
+  // Loading and unknown must never read as zero.
+  function usageLabel(state: UsageState, bytes: number | null | undefined): string {
+    return state === 'loading' ? 'Loading…' : state === 'error' || typeof bytes !== 'number' || !Number.isFinite(bytes) ? 'Unknown' : formatSize(bytes);
+  }
   let handle = $state('');
   let password = $state('');
   let setupAuthorization = $state('');
@@ -1239,7 +1253,30 @@
     } finally { if (generation === sessionGeneration) authBusy = false; }
   }
 
+  async function loadOwnUsage(): Promise<void> {
+    const generation = sessionGeneration;
+    const request = ++ownUsageRequest;
+    ownUsageState = 'loading';
+    try {
+      const result = await session.usage();
+      if (generation === sessionGeneration && request === ownUsageRequest) { ownUsage = result; ownUsageState = 'ready'; }
+    } catch {
+      if (generation === sessionGeneration && request === ownUsageRequest) { ownUsage = null; ownUsageState = 'error'; }
+    }
+  }
+  async function loadAllUsage(): Promise<void> {
+    const generation = sessionGeneration;
+    const request = ++allUsageRequest;
+    allUsageState = 'loading';
+    try {
+      const result = await session.accountsUsage();
+      if (generation === sessionGeneration && request === allUsageRequest) { allUsage = result; allUsageState = 'ready'; }
+    } catch {
+      if (generation === sessionGeneration && request === allUsageRequest) { allUsage = null; allUsageState = 'error'; }
+    }
+  }
   async function loadAccounts(): Promise<void> {
+    void loadAllUsage();
     const generation = sessionGeneration;
     const request = ++accountsRequest;
     accountsLoading = true; accountsError = '';
@@ -1342,6 +1379,7 @@
     changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null; instanceNameBusy = false; appearanceBusy = false; appearanceError = ''; instanceNotice = '';
     accountHandle = ''; clearCreateAccountSecrets(); currentPassword = ''; newPassword = '';
     resetId = ''; resetPassword = ''; accounts = []; accountNotice = ''; accountBusy = false; accountsLoading = false; accountsError = ''; accountsRequest++;
+    ownUsage = null; ownUsageState = 'loading'; ownUsageRequest++; allUsage = null; allUsageState = 'loading'; allUsageRequest++;
   }
   async function changePassword(event: SubmitEvent): Promise<void> {
     event.preventDefault(); const generation = sessionGeneration; accountBusy = true; accountNotice = '';
@@ -2696,6 +2734,7 @@
           <section class="account-content">
             <h1 id="account-title" tabindex="-1">Account</h1>
             <section class="settings-section"><h2>Your account</h2><dl class="account-details"><dt>Account name</dt><dd>{user.handle}</dd><dt>Role</dt><dd>{user.role === 'administrator' ? 'Administrator' : 'User'}</dd></dl></section>
+            <section class="settings-section" aria-labelledby="usage-heading" aria-busy={ownUsageState === 'loading'}><h2 id="usage-heading">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p><RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" busy={false} onclick={() => void loadOwnUsage()} />{/if}</section>
             <section class="settings-section account-setting-row"><div><h2>Password</h2><p class="section-description">Change the password you use to sign in.</p></div><Button variant="outline" onclick={(event) => { passwordDialogTrigger = event.currentTarget; accountNotice = ''; currentPassword = ''; newPassword = ''; changePasswordOpen = true; }}>Change password</Button></section>
             <section class="settings-section account-setting-row"><div><h2>Session</h2><p class="section-description">Sign out of this browser.</p></div><Button variant="outline" disabled={loggingOut} onclick={signOut}>Sign out</Button></section>
             {#if accountNotice && !changePasswordOpen}<p role="status" class="form-notice">{accountNotice}</p>{/if}
@@ -2705,13 +2744,14 @@
             <h1 id="settings-title" tabindex="-1">Settings</h1>
             <nav class="settings-tabs" aria-label="Settings"><Button disabled={instanceBusy} variant="ghost" class={settingsTab === 'accounts' ? 'active' : ''} aria-current={settingsTab === 'accounts' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'accounts'; }}>Accounts</Button><Button disabled={instanceBusy} variant="ghost" class={settingsTab === 'instance' ? 'active' : ''} aria-current={settingsTab === 'instance' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'instance'; }}>Instance</Button><Button disabled={instanceBusy} variant="ghost" class={settingsTab === 'appearance' ? 'active' : ''} aria-current={settingsTab === 'appearance' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'appearance'; }}>Appearance</Button></nav>
             {#if settingsTab === 'accounts'}
-              <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files.</p></div><div class="flex flex-wrap gap-2"><RefreshButton label="Refresh" busyLabel="Refreshing…" busy={accountsLoading} disabled={accountBusy} onclick={() => { if (accountsLoading || accountBusy) return; clearCompletedFeedback(); accountNotice = ''; void loadAccounts(); }} /><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
+              <section class="settings-section"><div class="section-heading"><div><h2 id="accounts-heading" tabindex="-1">Accounts</h2><p class="section-description">Each account has private files. Trash includes files replaced by uploads.</p><p class="volume-space" aria-busy={allUsageState === 'loading'}>Data volume: <span class="volume-value">{allUsageState === 'loading' ? 'Loading…' : allUsage?.volume ? `${formatSize(allUsage.volume.available_bytes)} free of ${formatSize(allUsage.volume.total_bytes)}` : 'Unknown'}</span></p></div><div class="flex flex-wrap gap-2"><RefreshButton label="Refresh" busyLabel="Refreshing…" busy={accountsLoading} disabled={accountBusy} onclick={() => { if (accountsLoading || accountBusy) return; clearCompletedFeedback(); accountNotice = ''; void loadAccounts(); }} /><Button size="sm" disabled={accountBusy} onclick={(event) => { accountDialogTrigger = event.currentTarget; accountNotice = ''; createAccountOpen = true; }}>Create account</Button></div></div>
                 {#if accountsLoading}<p role="status">Loading accounts…</p>{:else if accountsError}<p role="alert">{accountsError}</p>{:else if accounts.length === 0}<p>No accounts to show.</p>{/if}
-                <div role="table" aria-label="Accounts"><div class="account-sort account-head" role="row"><SortHeader label="Name" column="name" sort={accountSort} disabled={accountBusy || accountsLoading} onclick={() => setAccountSort('name')} /><SortHeader label="Role" column="role" sort={accountSort} disabled={accountBusy || accountsLoading} onclick={() => setAccountSort('role')} /><SortHeader label="Status" column="status" sort={accountSort} disabled={accountBusy || accountsLoading} onclick={() => setAccountSort('status')} /><span role="columnheader"><span class="sr-only">Actions</span></span></div>
+                <div role="table" aria-label="Accounts"><div class="account-sort account-head" role="row"><SortHeader label="Name" column="name" sort={accountSort} disabled={accountBusy || accountsLoading} onclick={() => setAccountSort('name')} /><SortHeader label="Role" column="role" sort={accountSort} disabled={accountBusy || accountsLoading} onclick={() => setAccountSort('role')} /><SortHeader label="Status" column="status" sort={accountSort} disabled={accountBusy || accountsLoading} onclick={() => setAccountSort('status')} /><span role="columnheader" class="account-usage">Files</span><span role="columnheader" class="account-usage">Trash</span><span role="columnheader"><span class="sr-only">Actions</span></span></div>
                 <div role="rowgroup" class="account-list">{#each sortedAccounts as account (account.account_id)}
                   <div class="account-row" role="row" aria-label={account.handle}>
-                    <div class="account-identity" role="cell"><strong>{account.handle}</strong>{#if account.account_id === user?.id}<span class="account-you">You</span>{/if}</div><span role="cell" class="account-role">{account.role === 'administrator' ? 'Administrator' : 'User'}</span>
+                    <div class="account-identity" role="cell"><strong>{account.handle}</strong>{#if account.account_id === user?.id}<span class="account-you">You</span>{/if}<span class="account-usage-summary" aria-hidden="true">Files {usageLabel(allUsageState, usageByAccount.get(account.account_id)?.files_bytes)} · Trash {usageLabel(allUsageState, usageByAccount.get(account.account_id)?.trash_bytes)}</span></div><span role="cell" class="account-role">{account.role === 'administrator' ? 'Administrator' : 'User'}</span>
                     <span role="cell"><AccountStatus enabled={account.enabled} /></span>
+                    <span role="cell" class="account-usage">{usageLabel(allUsageState, usageByAccount.get(account.account_id)?.files_bytes)}</span><span role="cell" class="account-usage">{usageLabel(allUsageState, usageByAccount.get(account.account_id)?.trash_bytes)}</span>
                     <div role="cell" class="account-actions"><AccountOptions {account} self={account.account_id === user?.id} lastAdministrator={account.enabled && account.role === 'administrator' && enabledAdministratorCount === 1} disabled={accountBusy} onaction={async (action, trigger) => {
                       accountDialogTrigger = trigger; accountNotice = '';
                       if (action === 'personal') { await navigate('account'); }

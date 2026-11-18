@@ -11,6 +11,7 @@ pub mod removals;
 pub mod setup;
 pub mod status;
 pub mod uploads;
+pub mod usage;
 
 use crate::domain::{
     authz::PasswordLimiter, coordinator::MutationCoordinator, upload::UploadStorage,
@@ -163,7 +164,9 @@ pub fn router(state: AuthState) -> Router {
         .route("/auth/logout", post(auth::logout))
         .route("/me", get(auth::me))
         .route("/me/password", post(accounts::change_password))
+        .route("/me/usage", get(usage::mine))
         .route("/accounts", get(accounts::list).post(accounts::create))
+        .route("/accounts/usage", get(usage::all))
         .route("/accounts/{id}/disable", post(accounts::disable))
         .route("/accounts/{id}/enable", post(accounts::enable))
         .route("/accounts/{id}/role", post(accounts::role))

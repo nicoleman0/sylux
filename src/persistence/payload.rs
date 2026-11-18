@@ -42,6 +42,14 @@ pub struct PublishedPayload {
     pub sha256: [u8; 32],
 }
 
+/// Space on the filesystem holding published payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct VolumeSpace {
+    /// Bytes an unprivileged process may still allocate.
+    pub available_bytes: u64,
+    pub total_bytes: u64,
+}
+
 pub struct VerifiedPayload {
     pub file: File,
     pub length: u64,
@@ -74,6 +82,21 @@ impl PayloadStore {
             payloads,
             #[cfg(feature = "test-harness")]
             publish_fault_hook: None,
+        })
+    }
+
+    /// Query the payload directory's filesystem. This may block on slow mounts.
+    pub fn volume_space(&self) -> Result<VolumeSpace, PayloadError> {
+        let stat =
+            fs::fstatvfs(&self.payloads).map_err(|_| PayloadError::Io("volume_stat_failed"))?;
+        let bytes = |blocks: u64| {
+            blocks
+                .checked_mul(stat.f_frsize)
+                .ok_or(PayloadError::Io("volume_stat_overflow"))
+        };
+        Ok(VolumeSpace {
+            available_bytes: bytes(stat.f_bavail)?,
+            total_bytes: bytes(stat.f_blocks)?,
         })
     }
 
