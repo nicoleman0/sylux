@@ -1,4 +1,4 @@
-//! Compare release function symbols for default and test-harness builds.
+//! Compare production and test-harness release binaries.
 use std::{fs, path::PathBuf, process::Command};
 
 fn project_root() -> PathBuf {
@@ -42,19 +42,25 @@ fn function_symbols(binary: &PathBuf) -> Vec<String> {
         .collect()
 }
 
+fn contains_marker(binary: &[u8], marker: &str) -> bool {
+    binary
+        .windows(marker.len())
+        .any(|bytes| bytes == marker.as_bytes())
+}
+
 #[test]
-fn default_release_excludes_test_only_seed_and_fault_control_symbols() {
+fn default_release_excludes_test_only_seed_and_fault_controls() {
     let root = project_root();
     let target = root.join("target/release");
     build(false);
     let production = target.join("sylux");
-    let saved = target.join("t027-production-surface.bin");
-    fs::copy(&production, &saved).expect("save default release binary before feature build");
-    let production_symbols = function_symbols(&saved);
+    let production_symbols = function_symbols(&production);
+    let production_bytes = fs::read(&production).expect("read default release binary");
 
     build(true);
     let test_harness = target.join("sylux");
     let test_symbols = function_symbols(&test_harness);
+    let test_bytes = fs::read(&test_harness).expect("read test-harness release binary");
 
     // Named test seams survive optimization without relying on an Arc drop instantiation.
     let expected_test_only = [
@@ -76,10 +82,26 @@ fn default_release_excludes_test_only_seed_and_fault_control_symbols() {
         );
     }
 
-    let evidence = format!(
-        "scope=local-synthetic-release-binary-symbols\nproduction=tested-no-default-features\ntest_harness=tested-no-default-features-plus-test-harness\nproduction_test_only_symbols=none\ntest_harness_test_only_symbols={}\n",
-        expected_test_only.join("\n")
-    );
-    fs::write(target.join("t027-surface-diff.txt"), evidence)
-        .expect("write local ignored symbol-surface evidence");
+    // The hooks receive these literals at runtime even when their calls inline.
+    for marker in [
+        "publish.before_write",
+        "publish.before_file_sync",
+        "publish.before_staging_dir_sync",
+        "publish.before_ancestor_sync",
+        "publish.before_noreplace",
+        "publish.before_final_dir_sync",
+        "removal.before_commit",
+        "cleanup.before_unlink",
+        "cleanup.before_directory_sync",
+        "cleanup.before_finalize",
+    ] {
+        assert!(
+            contains_marker(&test_bytes, marker),
+            "test-harness release is missing fault boundary {marker:?}"
+        );
+        assert!(
+            !contains_marker(&production_bytes, marker),
+            "default release contains fault boundary {marker:?}"
+        );
+    }
 }

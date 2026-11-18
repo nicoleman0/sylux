@@ -274,20 +274,15 @@ async fn serve_listener(
     });
     let listening = tokio::time::timeout(Duration::from_secs(5), handle.listening()).await;
     if !matches!(listening, Ok(Some(_))) {
-        let _ = task.await;
-        if storage.shutdown().await.is_err() {
-            eprintln!("upload writer shutdown failed");
-        }
-        if let Some(cleanup) = cleanup {
-            cleanup
-                .shutdown()
-                .await
-                .map_err(|_| "cleanup_shutdown_failed")?;
-        }
-        let _ = workers.shutdown().await;
-        drop(bound);
-        retain_guard_until_process_exit(guard);
-        return Err("listener_start_failed");
+        return finish_server_task(
+            ServerExit::ListenerStartFailed(task),
+            bound,
+            guard,
+            workers,
+            storage,
+            cleanup,
+        )
+        .await;
     }
     contract_event("listener.bind");
     let partial_cleanup = sylux::domain::upload::PartialCleanup::start(
@@ -307,66 +302,62 @@ async fn serve_listener(
     if partial_cleanup.shutdown().await.is_err() {
         eprintln!("partial upload cleanup task failed");
     }
-    if server_joined {
-        // The select consumed this JoinHandle; polling it again would panic.
-        if storage.shutdown().await.is_err() {
-            eprintln!("upload writer shutdown failed");
-        }
-        if let Some(cleanup) = cleanup {
-            cleanup
-                .shutdown()
-                .await
-                .map_err(|_| "cleanup_shutdown_failed")?;
-        }
-        let _ = workers.shutdown().await;
-        drop(bound);
-        retain_guard_until_process_exit(guard);
-        return Ok(());
-    }
-    handle.graceful_shutdown(Some(Duration::from_secs(5)));
-    drain_server_task(
-        task,
-        bound,
-        guard,
-        Some(workers),
-        Some(storage),
-        cleanup,
-        Duration::from_secs(6),
-    )
-    .await;
-    Ok(())
+    let exit = if server_joined {
+        ServerExit::Joined
+    } else {
+        handle.graceful_shutdown(Some(Duration::from_secs(5)));
+        ServerExit::Graceful(task, Duration::from_secs(6))
+    };
+    finish_server_task(exit, bound, guard, workers, storage, cleanup).await
 }
 
-async fn drain_server_task(
-    mut task: tokio::task::JoinHandle<std::io::Result<()>>,
+enum ServerExit {
+    ListenerStartFailed(tokio::task::JoinHandle<std::io::Result<()>>),
+    Joined,
+    Graceful(tokio::task::JoinHandle<std::io::Result<()>>, Duration),
+}
+
+async fn finish_server_task(
+    exit: ServerExit,
     bound: root::BoundDatabase,
     guard: ownership::OwnershipGuard,
-    workers: Option<SqliteWorkers>,
-    storage: Option<Arc<sylux::domain::upload::UploadStorage>>,
+    workers: SqliteWorkers,
+    storage: Arc<sylux::domain::upload::UploadStorage>,
     cleanup: Option<sylux::persistence::cleanup::Runner>,
-    join_timeout: Duration,
-) {
-    if tokio::time::timeout(join_timeout, &mut task).await.is_err() {
-        // Dropping the handle would detach a task that still uses the root.
-        task.abort();
-        let _ = task.await;
-    }
+) -> Result<(), &'static str> {
+    let (result, graceful) = match exit {
+        ServerExit::ListenerStartFailed(task) => {
+            let _ = task.await;
+            (Err("listener_start_failed"), false)
+        }
+        ServerExit::Joined => (Ok(()), false),
+        ServerExit::Graceful(mut task, join_timeout) => {
+            if tokio::time::timeout(join_timeout, &mut task).await.is_err() {
+                // Dropping the handle would detach a task that still uses the root.
+                task.abort();
+                let _ = task.await;
+            }
+            (Ok(()), true)
+        }
+    };
     // Upload requests outlive their connections; join them while SQLite runs.
-    if let Some(storage) = storage
-        && storage.shutdown().await.is_err()
-    {
+    if storage.shutdown().await.is_err() {
         eprintln!("upload writer shutdown failed");
     }
-    if let Some(cleanup) = cleanup
-        && cleanup.shutdown().await.is_err()
-    {
-        contract_event_reason("removal.cleanup_pending", "cleanup_shutdown_failed");
-    }
-    if let Some(workers) = workers {
-        let _ = workers.shutdown().await;
-    }
+    let cleanup_failed = match cleanup {
+        Some(cleanup) => cleanup.shutdown().await.is_err(),
+        None => false,
+    };
+    let _ = workers.shutdown().await;
     drop(bound);
     retain_guard_until_process_exit(guard);
+    if cleanup_failed {
+        if !graceful {
+            return Err("cleanup_shutdown_failed");
+        }
+        contract_event_reason("removal.cleanup_pending", "cleanup_shutdown_failed");
+    }
+    result
 }
 
 // Connection workers can outlive the server future; keep ownership until process exit.
@@ -446,22 +437,28 @@ mod tests {
         root::initialize_empty_root(&root, DEFAULT_BUSY_TIMEOUT).unwrap();
         let guard = ownership::acquire_writer_lock(&root).unwrap();
         let bound = root::open_bound_database(&root, DEFAULT_BUSY_TIMEOUT).unwrap();
+        let workers = SqliteWorkers::open(
+            &root.join(root::METADATA_DIR).join(root::DB_NAME),
+            WorkerConfig::default(),
+        )
+        .unwrap();
+        let storage = Arc::new(sylux::domain::upload::UploadStorage::open(&root).unwrap());
         let (dropped_tx, dropped_rx) = mpsc::channel();
         let task = tokio::spawn(async move {
             let _dropped = ServerTaskDropped(dropped_tx);
             std::future::pending::<std::io::Result<()>>().await
         });
 
-        drain_server_task(
-            task,
+        finish_server_task(
+            ServerExit::Graceful(task, Duration::from_millis(20)),
             bound,
             guard,
+            workers,
+            storage,
             None,
-            None,
-            None,
-            Duration::from_millis(20),
         )
-        .await;
+        .await
+        .unwrap();
 
         assert!(
             dropped_rx.try_recv().is_ok(),
@@ -475,5 +472,69 @@ mod tests {
             "the process-lifetime guard must remain locked until runtime teardown"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "test-harness")]
+    #[tokio::test]
+    async fn cleanup_panic_during_exceptional_shutdown_joins_sqlite_and_retains_guard() {
+        use sylux::persistence::{cleanup::Runner, sqlite::WorkerError};
+
+        for exit in [
+            ServerExit::ListenerStartFailed(tokio::spawn(async {
+                Err(std::io::Error::other("synthetic listener startup failure"))
+            })),
+            ServerExit::Joined,
+            ServerExit::Graceful(
+                tokio::spawn(std::future::pending()),
+                Duration::from_millis(20),
+            ),
+        ] {
+            let root = temporary_root();
+            root::initialize_empty_root(&root, DEFAULT_BUSY_TIMEOUT).unwrap();
+            let guard = ownership::acquire_writer_lock(&root).unwrap();
+            let bound = root::open_bound_database(&root, DEFAULT_BUSY_TIMEOUT).unwrap();
+            let workers = SqliteWorkers::open(
+                &root.join(root::METADATA_DIR).join(root::DB_NAME),
+                WorkerConfig::default(),
+            )
+            .unwrap();
+            let retained_workers = workers.clone();
+            assert!(retained_workers.transact(|_| Ok(())).await.is_ok());
+            assert!(retained_workers.read(|_| Ok(())).await.is_ok());
+            let storage = Arc::new(sylux::domain::upload::UploadStorage::open(&root).unwrap());
+
+            let graceful = matches!(&exit, ServerExit::Graceful(..));
+            let result = finish_server_task(
+                exit,
+                bound,
+                guard,
+                workers,
+                storage,
+                Some(Runner::panicking_for_test()),
+            )
+            .await;
+
+            assert_eq!(
+                result,
+                if graceful {
+                    Ok(())
+                } else {
+                    Err("cleanup_shutdown_failed")
+                }
+            );
+            assert!(matches!(
+                retained_workers.transact(|_| Ok(())).await,
+                Err(WorkerError::Closed)
+            ));
+            assert!(matches!(
+                retained_workers.read(|_| Ok(())).await,
+                Err(WorkerError::Closed)
+            ));
+            assert!(matches!(
+                ownership::acquire_writer_lock(&root),
+                Err(ownership::OwnershipError::LockHeld)
+            ));
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

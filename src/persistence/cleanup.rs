@@ -130,4 +130,12 @@ impl Runner {
         self.stop.send_replace(true);
         self.task.await.map_err(|_| CleanupError::Unavailable)
     }
+
+    #[cfg(feature = "test-harness")]
+    #[doc(hidden)]
+    pub fn panicking_for_test() -> Self {
+        let (stop, _) = watch::channel(false);
+        let task = tokio::spawn(async { panic!("synthetic cleanup runner panic") });
+        Self { stop, task }
+    }
 }

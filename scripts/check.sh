@@ -39,7 +39,7 @@ run cargo clippy --locked --all-targets -- -D warnings
 run cargo test --locked --features test-harness --test contract_setup_auth --test integration_revocation
 run cargo test --locked --features test-harness --test performance_fixture -- --list
 run cargo test --locked
-run cargo test --locked --features test-harness --test integration_admin_recovery --test integration_export --test integration_payload_verify --test integration_binding --test integration_local_lifecycle
+run cargo test --locked --features test-harness --bin sylux --test integration_admin_recovery --test integration_export --test integration_payload_verify --test integration_binding --test integration_local_lifecycle
 run cargo build --locked
 
 run npm --prefix web run audit:dependencies
