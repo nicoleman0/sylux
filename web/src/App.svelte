@@ -216,7 +216,7 @@
     if (record) saveNavigation();
     const generation = sessionGeneration;
     const request = ++navigationRequest;
-    listingRequest++; loading = false; trashRequest++; trashLoading = false; trashPaging = null;
+    pendingMove = null; listingRequest++; loading = false; trashRequest++; trashLoading = false; trashPaging = null;
     if (clearFeedback) clearCompletedFeedback();
     clearSelection(); closeBulk();
     if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
@@ -260,7 +260,7 @@
     changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null;
     resetId = ''; resetPassword = ''; accountHandle = ''; clearCreateAccountSecrets(); currentPassword = ''; newPassword = ''; accountNotice = '';
     accountView = location.destination === 'account'; settingsView = location.destination === 'settings' && user.role === 'administrator'; showTrash = location.destination === 'trash';
-    entries = []; entriesFolderId = ''; listingError = ''; loading = true;
+    entries = []; entriesFolderId = ''; listingError = ''; pendingMove = null; loading = true;
     folderSort = location.sort;
     searchSort = location.searchSort ?? 'name_asc'; trashSort = location.trashSort ?? 'name_asc'; accountSort = location.accountSort ?? 'name_asc';
     try {
@@ -309,10 +309,14 @@
             // A row removed mid-load drops focus to body; put it back on the same entry if it survived.
             const rowItem = !active || active === document.body ? listItemFor(listFocusId) : null;
             if (!rowItem) listFocusId = null;
+            const items = listItems();
+            const moved = pendingMove && active === heading ? items[moveIndex(-1, items.length, pendingMove)] : null;
+            pendingMove = null;
             if (!interacting) {
-              (rowItem ?? heading)?.focus({ preventScroll: true });
+              (rowItem ?? moved ?? heading)?.focus({ preventScroll: true });
               const samePage = context && (searchQuery ? context.searchPage === searchPageIndex : context.page === pageIndex);
               window.scrollTo(0, samePage ? context.scroll : 0);
+              if (moved) moved.scrollIntoView({ block: 'nearest' });
             }
             if (!restorationFailed) { restorationPending = false; historyReady = true; saveNavigation(); }
           }
@@ -389,6 +393,8 @@
 
   let shortcutsOpen = $state(false);
   let listFocusId: string | null = null;
+  // A move key pressed on the heading while rows are disabled by a load; applied when the load ends.
+  let pendingMove: 'next' | 'previous' | 'first' | 'last' | null = null;
   const itemSelector = '.item-name, .entry-selection input';
   function listItems(): HTMLElement[] { return [...document.querySelectorAll<HTMLElement>('.files-content .file-row .item-name')]; }
   function listItemFor(id: string | null): HTMLElement | null {
@@ -397,6 +403,7 @@
   function trackListFocus(event: FocusEvent): void {
     const target = event.target instanceof HTMLElement ? event.target : null;
     listFocusId = target?.matches(itemSelector) ? target.closest<HTMLElement>('.file-row')?.dataset.entryId ?? null : null;
+    if (target?.id !== 'folder-title') pendingMove = null;
   }
   function extendSelection(fromId: string, toId: string): void {
     const anchor = activeEntries.some((entry) => entry.id === selectionAnchor) ? selectionAnchor! : fromId;
@@ -426,6 +433,10 @@
       const id = row?.dataset.entryId;
       const current = row ? items.findIndex((item) => item.closest('.file-row') === row) : -1;
       const next = moveIndex(current, items.length, intent.to);
+      if (onHeading && (next < 0 || items[next].matches(':disabled'))) {
+        if (loading) { event.preventDefault(); pendingMove = intent.to; }
+        return;
+      }
       if (next < 0) return;
       event.preventDefault();
       if (intent.extend && id && !fileMutationBusy) extendSelection(id, items[next].closest<HTMLElement>('.file-row')!.dataset.entryId!);
@@ -885,7 +896,7 @@
     let folderId = currentFolder.id;
     const requestId = ++listingRequest;
     clearSelection();
-    loading = true;
+    pendingMove = null; loading = true;
     listingError = '';
     try {
       if (!folderId) {
@@ -949,7 +960,7 @@
     const target = pageIndex;
     const cursor = pageCursors[target];
     const request = ++listingRequest;
-    loading = true; listingError = '';
+    pendingMove = null; loading = true; listingError = '';
     try {
       const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || request !== listingRequest || searchQuery || currentFolder.id !== folderId) return;
@@ -969,7 +980,7 @@
   function searchChanged(): void {
     if (bulkBusy || restorationPending) return;
     if (loading || entriesFolderId !== currentFolder.id) browseDirty = true;
-    navigationRequest++; historyReady = true; loading = false; listingRequest++;
+    navigationRequest++; historyReady = true; pendingMove = null; loading = false; listingRequest++;
 
     clearCompletedFeedback();
     clearSelection();
@@ -1120,7 +1131,7 @@
     const cursor = nextCursor;
     const requestId = ++listingRequest;
     const isCurrent = () => generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest && !searchQuery && !accountView && !settingsView && !showTrash;
-    loading = true; listingError = '';
+    pendingMove = null; loading = true; listingError = '';
     try {
       const page = await listing.children(folderId, cursor, folderSort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || nextCursor !== cursor || requestId !== listingRequest) return;
@@ -1158,7 +1169,7 @@
     const folderId = currentFolder.id;
     const requestId = ++listingRequest;
     const isCurrent = () => generation === sessionGeneration && currentFolder.id === folderId && requestId === listingRequest && !searchQuery && !accountView && !settingsView && !showTrash;
-    loading = true; listingError = '';
+    pendingMove = null; loading = true; listingError = '';
     const target = pageIndex - 1;
     try {
       const page = await listing.children(folderId, pageCursors[target], folderSort);
