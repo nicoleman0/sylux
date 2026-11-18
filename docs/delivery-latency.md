@@ -26,8 +26,9 @@ added to describe batch elapsed time. The batch ended at 10:46:13,
 | 72 | Independent review started / finished | 09:15:37 / 09:52:06 | Task creation / worker receipt |
 | 72 | First retry fix handed off | 09:53:54 | Worker receipt, commit `09b6462` |
 | 72 | Targeted review started | 09:54:27 | Task creation |
-| 72 | Browser shard rejected the fix | 09:56:27 | [Failed CI](https://github.com/nicoleman0/sylux/actions/runs/44280218511) |
+| 72 | Browser shard rejected the fix / aggregate failed | 09:56:27 / 10:01:26 | [Failed CI](https://github.com/nicoleman0/sylux/actions/runs/44280218511) |
 | 72 | Targeted reviewer stopped with report written | 10:25:26 | Worker escalation; report requests changes |
+| 72 | Second fix task created | 10:26:30 | Task creation |
 | 72 | Second fix handed off | 10:30:26 | Worker receipt, commit `09036b6` |
 | 72 | Final independent review finished | 10:34:45 | Worker receipt |
 | 72 | Chromium install timed out; aggregate failed | 10:41:04 / 10:41:13 | [CI attempt 1](https://github.com/nicoleman0/sylux/actions/runs/44286031815/attempts/1) |
@@ -58,7 +59,14 @@ and Linear state history provide the external timing boundaries.
   requests and retained busy state across sign-out. The targeted review
   spent 30m59s before stopping with its report written; a reporting/quota
   failure then required coordinator recovery. The browser shard had
-  already rejected that fix at 09:56:27. These intervals overlap.
+  already rejected that fix at 09:56:27; the required aggregate failed at
+  10:01:26. The second fix task was created at 10:26:30, leaving 30m03s
+  after shard failure and 25m04s after the red aggregate before rework
+  began. Acting on red CI could have started rework sooner without the
+  new command. This coordinator-side wait overlaps the targeted review
+  inside the 42m39s window; it is not an additional serial delay. The
+  evidence does not establish how much earlier rework would have moved
+  final approval or merge.
 - Final CI and final review also overlapped. CI's remaining tail after
   approval was 10m37s, followed by 51s to merge. Shard 3 spent 9m53s
   installing Chromium before cancellation; its rerun took 3m29s. Shard 4
@@ -100,6 +108,8 @@ keyboard and session tests; this command only covers the named suites.
 
 ## Replay
 
+### Later regression coverage
+
 The same command ran on macOS arm64 with Node 24.22.2, npm 11.19.1,
 Playwright 1.65.0 and Chromium. Each historical source used a disposable
 copy with its own locked dependency install, identical final tests and
@@ -115,13 +125,10 @@ storage sign-out test and used identically in every final replay.
 | First fix `09b64624478abd0bae88ba93506f94f0bd632c05` | 12.336s | Fails: busy trigger is native-disabled rather than aria-disabled |
 | Accepted `09036b634d2b37235d1cfb2626e8f68ba79ceef5` | 31.995s | Svelte check clean; 87 browser executions pass |
 
-The initial defect originally reached the coordinator 37m11s after the
-build handoff. The replay reports it in 12.341s: **36m59s less time to
-feedback**. For the first fix, the earliest hosted failure was 2m33s after
-handoff; replay cuts that to 12.336s: **2m21s less time to feedback**.
-These are separate comparisons, not additive merge-time savings. No
-comparable new PR has merged under this procedure yet, so actual
-pickup-to-merge savings remain unmeasured.
+These replays use later regression tests, not the tests present at each
+historical commit. They show that current coverage rejects the known bad
+implementations; their short failure times do not establish earlier
+feedback that the procedure alone would have provided at the time.
 
 The failing runs stop early: each has one expected failure, 23 passes, one
 interrupted concurrent test and 62 unrun executions. They establish early
@@ -131,9 +138,37 @@ themes. The 400ms focus hold and native-disabled assertion are preserved.
 The initial current-source run also passed all 87, but emitted errors from
 the incomplete sign-out mock; the final corrected run has no such errors.
 
-This is a retrospective replay with tests strengthened after the original
-reviews. It proves that the pre-review command detects these known bad
-implementations, not that it would discover every new retry defect.
-Independent review, the final hosted CI tail and handoff time still remain.
-Linux, real TLS and container recovery were not rerun locally; their
-required hosted gates are unchanged. No release or deployment was made.
+### Historical test coverage
+
+Independent review also replayed the historical sources with their own
+storage-usage and refresh-feedback tests, using the new repeated command:
+
+| Source and its own tests | Command elapsed | Result |
+| --- | ---: | --- |
+| Initial `c646fe3` | 20.2s | Passes: 63 executions; held-request regression tests were absent |
+| First fix `09b6462` | 22.98s | Fails on first repeat: pending retry loses keyboard focus, light theme |
+
+For `09b6462`, two separate single-pass runs produced one pass (23 tests)
+and one failure on the same focus test in the dark theme. Repetition
+exposed a race already covered by that commit's own test. The initial
+commit's passing replay means this procedure alone would not have caught
+its defect before the original review.
+
+The first fix was handed off at 09:53:54; hosted CI first rejected it at
+09:56:27, 2m33s later. Its own-test replay failed in 22.98s, about **2m10s
+earlier feedback** if run at that handoff boundary, excluding dependency
+installation. This is a retrospective feedback comparison, not observed
+delivery savings. Rejection before handoff could have avoided the targeted
+review cycle bounded by task creation at 09:54:27 and the second fix task
+at 10:26:30 (32m03s), within the 42m39s rework window. That interval includes
+the overlapping red-gate wait above, so these opportunities must not be
+added. Actual fixes, independent review and final CI still take time;
+no removable fraction of the cycle or resulting merge-time saving has
+been measured.
+
+Actual pickup-to-merge savings remain unmeasured: no comparable new PR has
+merged under this procedure. These runs support earlier rejection of the
+first fix and current regression protection, not discovery of every new
+retry defect. Linux, real TLS and container recovery were not rerun
+locally; their required hosted gates are unchanged. No release or
+deployment was made.
