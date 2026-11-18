@@ -185,7 +185,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -206,6 +206,7 @@ jobs:
       - name: Install Chromium
         run: npm --prefix web exec -- playwright install --with-deps chromium
       - name: Check browser journeys
+        timeout-minutes: 10
         run: npm --prefix web run smoke -- --forbid-only --workers=2 --shard=${{ matrix.shard }}/4
       - name: Retain browser results
         if: always()
