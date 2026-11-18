@@ -1256,26 +1256,34 @@
 
   async function retryOwnUsage(): Promise<void> {
     if (ownUsageRetrying) return;
-    const trigger = document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
-    const hadFocus = !!trigger && trigger === document.querySelector('#usage-heading ~ .refresh-button');
+    const generation = sessionGeneration;
+    const button = () => document.querySelector('#usage-heading ~ .refresh-button') as HTMLElement | null;
+    const trigger = button();
+    const watch = watchFocus(trigger);
+    const hadFocus = !!trigger && document.activeElement === trigger;
     ownUsageRetrying = true;
-    await loadOwnUsage();
+    const applied = await loadOwnUsage();
+    watch.stop();
+    if (generation !== sessionGeneration) return;
     ownUsageRetrying = false;
     await tick();
+    if (!applied || !hadFocus || !watch.mayFocus()) return;
     if (ownUsageState === 'ready') document.getElementById('usage-heading')?.focus();
-    else if (hadFocus) (document.querySelector('#usage-heading ~ .refresh-button') as HTMLElement | null)?.focus();
+    else button()?.focus();
   }
 
-  async function loadOwnUsage(): Promise<void> {
+  async function loadOwnUsage(): Promise<boolean> {
     const generation = sessionGeneration;
     const request = ++ownUsageRequest;
     ownUsageState = 'loading';
+    const current = () => generation === sessionGeneration && request === ownUsageRequest;
     try {
       const result = await session.usage();
-      if (generation === sessionGeneration && request === ownUsageRequest) { ownUsage = result; ownUsageState = 'ready'; }
+      if (current()) { ownUsage = result; ownUsageState = 'ready'; }
     } catch {
-      if (generation === sessionGeneration && request === ownUsageRequest) { ownUsage = null; ownUsageState = 'error'; }
+      if (current()) { ownUsage = null; ownUsageState = 'error'; }
     }
+    return current();
   }
   async function loadAllUsage(): Promise<void> {
     const generation = sessionGeneration;
@@ -1392,7 +1400,7 @@
     changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null; instanceNameBusy = false; appearanceBusy = false; appearanceError = ''; instanceNotice = '';
     accountHandle = ''; clearCreateAccountSecrets(); currentPassword = ''; newPassword = '';
     resetId = ''; resetPassword = ''; accounts = []; accountNotice = ''; accountBusy = false; accountsLoading = false; accountsError = ''; accountsRequest++;
-    ownUsage = null; ownUsageState = 'loading'; ownUsageRequest++; allUsage = null; allUsageState = 'loading'; allUsageRequest++;
+    ownUsage = null; ownUsageState = 'loading'; ownUsageRequest++; ownUsageRetrying = false; allUsage = null; allUsageState = 'loading'; allUsageRequest++;
   }
   async function changePassword(event: SubmitEvent): Promise<void> {
     event.preventDefault(); const generation = sessionGeneration; accountBusy = true; accountNotice = '';
@@ -2747,7 +2755,7 @@
           <section class="account-content">
             <h1 id="account-title" tabindex="-1">Account</h1>
             <section class="settings-section"><h2>Your account</h2><dl class="account-details"><dt>Account name</dt><dd>{user.handle}</dd><dt>Role</dt><dd>{user.role === 'administrator' ? 'Administrator' : 'User'}</dd></dl></section>
-            <section class="settings-section" aria-labelledby="usage-heading" aria-busy={ownUsageState === 'loading'}><h2 id="usage-heading" tabindex="-1">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p>{/if}{#if ownUsageState === 'error' || ownUsageRetrying}<RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" busy={ownUsageRetrying} onclick={() => void retryOwnUsage()} />{/if}</section>
+            <section class="settings-section" aria-labelledby="usage-heading" aria-busy={ownUsageState === 'loading'}><h2 id="usage-heading" tabindex="-1">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p>{/if}{#if ownUsageState === 'error' || ownUsageRetrying}<RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" keepFocus busy={ownUsageRetrying} onclick={() => void retryOwnUsage()} />{/if}</section>
             <section class="settings-section account-setting-row"><div><h2>Password</h2><p class="section-description">Change the password you use to sign in.</p></div><Button variant="outline" onclick={(event) => { passwordDialogTrigger = event.currentTarget; accountNotice = ''; currentPassword = ''; newPassword = ''; changePasswordOpen = true; }}>Change password</Button></section>
             <section class="settings-section account-setting-row"><div><h2>Session</h2><p class="section-description">Sign out of this browser.</p></div><Button variant="outline" disabled={loggingOut} onclick={signOut}>Sign out</Button></section>
             {#if accountNotice && !changePasswordOpen}<p role="status" class="form-notice">{accountNotice}</p>{/if}
