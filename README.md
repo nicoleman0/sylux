@@ -34,7 +34,7 @@ Not included: OIDC, shared folders, public sharing links and WebDAV.
 
 ## Install
 
-Docker is the primary option. Follow the [Docker beta guide](docs/docker-beta.md). It covers installing a versioned image, local accounts, private HTTPS access, backup and restore. [Native LXC installation](docs/lxc.md) is secondary and has separate qualification limits. Lost administrator credentials can be [recovered offline](docs/docker-beta.md#recover-administrator-access) with host access and the service stopped.
+Docker is the primary option. Follow the [Docker beta guide](docs/docker-beta.md). It covers installing a versioned image, local accounts, private HTTPS access, backup and restore. [Native LXC installation](docs/lxc.md) is secondary and has separate qualification limits. Lost administrator credentials can be [recovered offline](docs/docker-beta.md#recover-administrator-access) with host access and the service stopped. The release image is 37 MB compressed, uses about 49 MiB of memory idle and 62 MiB under an upload workload, and is ready in about half a second on a small x86_64 host; see [the measurements](docs/footprint.md) for the workload and limits.
 
 ## Status and limits
 
