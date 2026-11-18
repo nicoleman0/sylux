@@ -17,6 +17,7 @@ async function signIn(page: Page, role: Role, hash: string, usage: (route: Route
     if (path === '/me/usage') { requested.push(path); return usage(route); }
     if (path === '/accounts/usage') { requested.push(path); return allUsage(route); }
     if (path === '/folders/children') return route.fulfill({ json: { root: { id: 'root', name: 'Files', kind: 'folder', etag: '1' }, items: [], next_cursor: null, has_more: false } });
+    if (path === '/folders/root/children') return route.fulfill({ json: { items: [], next_cursor: null, has_more: false } });
     return route.continue();
   });
   await page.goto(hash);
