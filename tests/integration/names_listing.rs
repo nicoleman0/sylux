@@ -652,6 +652,45 @@ async fn search_scopes_descendants_before_pagination_and_binds_cursors_to_the_fo
 }
 
 #[tokio::test]
+async fn scoped_search_reaches_match_at_maximum_absolute_depth() {
+    let fixture = HttpFixture::new("deep-folder-search", 0).await;
+    let (scope, deepest) = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            let mut parent = ROOT.to_owned();
+            let mut scope = String::new();
+            for depth in 1..=128 {
+                let name = if depth == 128 {
+                    "boundary-match".to_owned()
+                } else {
+                    format!("depth-{depth}")
+                };
+                parent = namespace::create_folder(tx, OWNER, &parent, &name)
+                    .unwrap()
+                    .id;
+                if depth == 120 {
+                    scope = parent.clone();
+                }
+            }
+            Ok((scope, parent))
+        })
+        .await
+        .unwrap();
+    let (status, body) = fixture
+        .search(&format!("?q=boundary-match&folder_id={scope}"))
+        .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["entry"]["id"], deepest);
+    assert_eq!(items[0]["location"].as_array().unwrap().len(), 128);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn search_page_moves_fifty_files_through_http_with_ownership_etags_and_conflicts() {
     let fixture = HttpFixture::new("search-bulk-move", 0).await;
     let (destination, blocker) = fixture.workers.as_ref().unwrap().transact(|tx| {

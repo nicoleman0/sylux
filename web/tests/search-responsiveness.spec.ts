@@ -57,6 +57,43 @@ test('keyboard search sends the current folder and clearing restores its listing
   await expect(draft).toBeVisible();
 });
 
+test('scoped search retains its folder across pages, sorting and Back', async ({ page }) => {
+  await login(page, true);
+  await page.getByRole('button', { name: 'Open Projects', exact: true }).click();
+  const requests: URL[] = [];
+  await page.route('**/entries/search?*', route => {
+    const url = new URL(route.request().url());
+    requests.push(url);
+    const second = url.searchParams.has('cursor');
+    const name = second ? 'Draft-two.txt' : 'Draft-one.txt';
+    return route.fulfill({ json: {
+      items: [{ entry: { ...file(name), parent_id: projects.id }, location: [root, projects] }],
+      next_cursor: second ? null : 'next', has_more: !second,
+    } });
+  });
+  const input = page.getByRole('searchbox', { name: 'Search files and folders' });
+  await input.fill('Draft');
+  await input.press('Enter');
+  await expect(page.getByRole('row', { name: 'Draft-one.txt', exact: true })).toBeVisible();
+  expect(requests.at(-1)?.searchParams.get('folder_id')).toBe(projects.id);
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await expect(page.getByRole('row', { name: 'Draft-two.txt', exact: true })).toBeVisible();
+  expect(requests.at(-1)?.searchParams.get('cursor')).toBe('next');
+  expect(requests.at(-1)?.searchParams.get('folder_id')).toBe(projects.id);
+  await page.getByRole('region', { name: 'Search results' }).getByRole('button', { name: 'Sort by name, descending', exact: true }).click();
+  await expect.poll(() => requests.at(-1)?.searchParams.get('sort')).toBe('name_desc');
+  expect(requests.at(-1)?.searchParams.get('folder_id')).toBe(projects.id);
+  expect(requests.at(-1)?.searchParams.has('cursor')).toBe(false);
+  await expect(page.getByRole('row', { name: 'Draft-one.txt', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
+  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  const previousCount = requests.length;
+  await page.goBack();
+  await expect.poll(() => requests.length).toBeGreaterThan(previousCount);
+  await expect(page.getByRole('row', { name: 'Draft-one.txt', exact: true })).toBeVisible();
+  expect(requests.at(-1)?.searchParams.get('folder_id')).toBe(projects.id);
+});
+
 // Opt-in measurement of the real input/render path. Change only the timer between runs.
 test('measure search scheduling', async ({ page }, info) => {
   test.skip(!process.env.SEARCH_MEASURE, 'Run explicitly when comparing scheduling changes.');
