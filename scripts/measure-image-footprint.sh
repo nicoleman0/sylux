@@ -15,11 +15,14 @@ runs=${RUNS:-5} idle=${IDLE_SECONDS:-30} files=${FILES:-40} file_mib=${FILE_MIB:
 here=$(cd "$(dirname "$0")" && pwd)
 base=$(mktemp -d "${TMPDIR:-/var/tmp}/sylux-footprint.XXXXXXXX")
 name="sylux-footprint-$$"
+poller=
 cleanup() {
+  if [[ -n "$poller" ]]; then kill "$poller" 2>/dev/null || true; wait "$poller" 2>/dev/null || true; fi
   docker rm -f "$name" >/dev/null 2>&1 || true
   rm -rf -- "$base"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 mkdir -m 0700 "$base/root" "$base/tls"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=127.0.0.1' -addext 'subjectAltName=IP:127.0.0.1' \
@@ -45,8 +48,9 @@ for ((n = 1; n <= runs; n++)); do
   node "$here/measure-image-footprint.mjs" ready "$origin" "$base/tls/cert.pem" >"$base/ready" &
   poller=$!
   docker start "$name" >/dev/null
-  wait "$poller"
-  started_ns=$(docker inspect --format '{{.State.StartedAt}}' "$name" | node -e 'const s=require("fs").readFileSync(0,"utf8").trim();const [,whole,frac=""]=s.match(/^(.*?)(?:\.(\d+))?Z$/);console.log(Date.parse(whole+"Z")+"."+frac.slice(0,3).padEnd(3,"0"))')
+  wait "$poller" || { echo "Container did not become ready within ${READY_TIMEOUT_MS:-30000} ms" >&2; exit 1; }
+  poller=
+  started_ns=$(docker inspect --format '{{.State.StartedAt}}' "$name" | xargs node "$here/measure-image-footprint.mjs" epoch-ms)
   starts+=("$(node -e 'console.log((Number(process.argv[1])-Number(process.argv[2])).toFixed(1))' "$(cat "$base/ready")" "$started_ns")")
   [[ $n == "$runs" ]] || docker stop --time 20 "$name" >/dev/null
 done

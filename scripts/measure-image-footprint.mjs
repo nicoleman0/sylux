@@ -7,15 +7,15 @@ import https from 'node:https';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const [mode, origin, certPath, ...rest] = process.argv.slice(2);
-const ca = readFileSync(certPath);
-const agent = new https.Agent({ ca, keepAlive: true, maxSockets: 8 });
+let agent;
+const getAgent = () => (agent ??= new https.Agent({ ca: readFileSync(certPath), keepAlive: true, maxSockets: 8 }));
 
 function request(method, path, { session, body, headers = {}, expect } = {}) {
   const payload = body === undefined ? undefined : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
   const type = Buffer.isBuffer(body) ? 'application/octet-stream' : 'application/json';
   return new Promise((resolve, reject) => {
     const req = https.request(new URL(path, origin), {
-      method, agent, timeout: 60000,
+      method, agent: getAgent(), timeout: 60000,
       headers: {
         Origin: origin,
         ...(session ? { Cookie: session.cookie, 'X-CSRF-Token': session.csrf } : {}),
@@ -49,13 +49,25 @@ async function login(handle, password) {
 }
 
 // Polls /readyz until it answers 204 and prints the wall-clock time (ms since epoch).
+// Exits non-zero after READY_TIMEOUT_MS so a server that never starts cannot hang the caller.
 async function ready() {
+  const deadline = Date.now() + Number(process.env.READY_TIMEOUT_MS ?? 30000);
   for (;;) {
     try {
-      if ((await request("GET", "/readyz")).status === 204) return console.log(Date.now());
+      if ((await request('GET', '/readyz')).status === 204) return console.log(Date.now());
     } catch { /* not listening yet */ }
+    if (Date.now() >= deadline) throw new Error(`/readyz not ready within ${process.env.READY_TIMEOUT_MS ?? 30000} ms`);
     await sleep(2);
   }
+}
+
+// Docker's RFC 3339 timestamp (nanosecond fraction) as epoch milliseconds, keeping sub-millisecond digits.
+function epochMs(stamp) {
+  const m = /^(.*?)(?:\.(\d+))?Z$/.exec(stamp.trim());
+  if (!m) throw new Error(`unrecognised timestamp: ${stamp}`);
+  const whole = Date.parse(`${m[1]}Z`);
+  if (Number.isNaN(whole)) throw new Error(`unrecognised timestamp: ${stamp}`);
+  return whole + Number(`0.${m[2] ?? '0'}`) * 1000;
 }
 
 function procStatus(pid) {
@@ -131,12 +143,13 @@ async function workload(session, { files, fileMiB, workers, pid, cgroup }) {
   return { files, fileMiB, workers, uploadedBytes: uploaded, downloadedBytes: downloaded, browseListings: listings, wallMs, ...peak };
 }
 
-if (mode === 'ready') await ready();
+if (mode === 'epoch-ms') console.log(epochMs(origin));
+else if (mode === 'ready') await ready();
 else if (mode === 'run') {
   const [pid, cgroup, authorizationPath, idleSeconds, files, fileMiB, workers] = rest;
   const { session, idle } = await setup(Number(pid), cgroup, authorizationPath, Number(idleSeconds));
   const during = await workload(session, { files: Number(files), fileMiB: Number(fileMiB), workers: Number(workers), pid: Number(pid), cgroup });
   await sleep(Number(idleSeconds) * 1000);
   console.log(JSON.stringify({ idle, workload: during, after: snapshot(Number(pid), cgroup) }));
-} else throw new Error('mode must be ready or run');
-agent.destroy();
+} else throw new Error('mode must be ready, run or epoch-ms');
+agent?.destroy();
