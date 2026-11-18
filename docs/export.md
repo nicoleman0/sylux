@@ -44,7 +44,10 @@ Success prints `export_complete files=N` and exits zero. Any failure exits
 nonzero and reports its reason on stderr. Name errors include the quoted name.
 A failure can leave directories, complete files and a partial or corrupt file in
 the destination. Treat the entire destination as incomplete, remove it yourself,
-and retry into an absent or empty destination after resolving the error. Do not
+and retry into an absent or empty destination after resolving the error. An
+incomplete destination may contain a `.sylux-export-*` scratch directory with
+metadata for every account, including credential verifiers. Do not share it;
+remove the entire incomplete destination after stopping any export process. Do not
 use a failed export as a backup. The source is never repaired by this command.
 
 ## Docker Compose

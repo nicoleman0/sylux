@@ -22,6 +22,11 @@ impl Drop for Scratch {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+impl Scratch {
+    fn remove(&self) -> Result<(), String> {
+        fs::remove_dir_all(&self.0).map_err(|e| format!("export_scratch_remove_failed: {e}"))
+    }
+}
 
 /// Writes plain files into a new or empty target. Failure leaves an incomplete target.
 pub fn export_account(source: &Path, handle: &str, target: &Path) -> Result<u64, String> {
@@ -71,10 +76,15 @@ pub fn export_account(source: &Path, handle: &str, target: &Path) -> Result<u64,
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&scratch)
-        .map_err(|_| "export_scratch_create_failed")?;
+        .map_err(|error| format!("export_scratch_create_failed: {error}"))?;
     let scratch = Scratch(scratch);
-    let bound = root::snapshot_bound_database(&source, &scratch.0)
-        .map_err(|_| "export_database_unavailable")?;
+    let bound =
+        root::snapshot_bound_database(&source, &scratch.0).map_err(|error| match error {
+            root::BindingError::SnapshotDestination(error) => {
+                format!("export_write_failed: {error}")
+            }
+            _ => "export_database_unavailable".to_owned(),
+        })?;
     root::verify_binding(&bound, &source, &manifest).map_err(|_| "export_binding_invalid")?;
     let db = &bound.connection;
     let version: i64 = db
@@ -97,7 +107,7 @@ pub fn export_account(source: &Path, handle: &str, target: &Path) -> Result<u64,
     let entry: String = db.query_row("SELECT entry_id FROM entry WHERE owner_account_id=?1 AND parent_id IS NULL AND kind='folder' AND state='active'", [&owner], |r| r.get(0))
         .map_err(|_| "export_account_root_invalid")?;
     let scratch_name = scratch.0.file_name().ok_or("export_destination_invalid")?;
-    walk(
+    let count = walk(
         db,
         &source,
         &owner,
@@ -105,13 +115,28 @@ pub fn export_account(source: &Path, handle: &str, target: &Path) -> Result<u64,
         &out,
         0,
         Some(scratch_name.as_bytes()),
-    )
+    )?;
+    drop(bound);
+    scratch.remove()?;
+    Ok(count)
 }
 
 fn absolute_target(target: &Path) -> Result<PathBuf, String> {
     let bytes = target.as_os_str().as_bytes();
-    let end = bytes.iter().rposition(|b| *b != b'/').map_or(1, |i| i + 1);
-    let trimmed = std::ffi::OsString::from_vec(bytes[..end.min(bytes.len())].to_vec());
+    let mut end = bytes.len();
+    while end > 1 {
+        let component_end = bytes[..end]
+            .iter()
+            .rposition(|b| *b == b'/')
+            .map_or(0, |i| i);
+        let component = &bytes[component_end + usize::from(bytes[component_end] == b'/')..end];
+        if component.is_empty() || component == b"." {
+            end = component_end.max(1);
+        } else {
+            break;
+        }
+    }
+    let trimmed = std::ffi::OsString::from_vec(bytes[..end].to_vec());
     let target = Path::new(&trimmed);
     if fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("export_destination_symlink".into());
@@ -232,4 +257,17 @@ fn walk(
         return Err(format!("export_name_spelling_changed name={name:?}"));
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Scratch;
+    use std::path::PathBuf;
+
+    #[test]
+    fn scratch_cleanup_failure_is_reported() {
+        let scratch = Scratch(PathBuf::from("/path/that/does/not/exist/sylux-export-test"));
+        let error = scratch.remove().unwrap_err();
+        assert!(error.starts_with("export_scratch_remove_failed:"));
+    }
 }

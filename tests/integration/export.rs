@@ -179,6 +179,21 @@ fn held_writer_lock_refuses() {
     assert!(!c.target.exists());
 }
 #[test]
+fn snapshot_destination_errors_keep_the_os_cause() {
+    let c = Case::new();
+    let scratch = c.dir.join("missing-parent").join("scratch");
+    let error = match root::snapshot_bound_database(&c.source, &scratch) {
+        Ok(_) => panic!("snapshot unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    match error {
+        root::BindingError::SnapshotDestination(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("expected destination error, got {}", other.reason()),
+    }
+}
+#[test]
 fn corruption_missing_truncated_and_digest_are_nonzero() {
     for mode in 0..3 {
         let mut c = Case::new();
@@ -208,6 +223,12 @@ fn symlink_payload_and_destination_are_refused() {
         c.run_to(Path::new(&format!("{}/", c.target.display()))),
         "destination_symlink",
     );
+    for suffix in ["/.", "/./"] {
+        failed(
+            c.run_to(Path::new(&format!("{}{suffix}", c.target.display()))),
+            "destination_symlink",
+        );
+    }
 }
 #[test]
 fn unsafe_component_cannot_escape_target() {

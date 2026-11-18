@@ -95,6 +95,7 @@ pub enum BindingError {
     /// The database path stopped referencing the validated inode.
     DatabaseReplaced,
     Io(&'static str),
+    SnapshotDestination(std::io::Error),
 }
 
 impl BindingError {
@@ -107,6 +108,7 @@ impl BindingError {
             | Self::LayoutInvalid(code)
             | Self::DatabaseInvalid(code)
             | Self::Io(code) => code,
+            Self::SnapshotDestination(_) => "snapshot_destination_error",
             Self::KeyMissing => "mutation_key_missing",
             Self::DatabaseMissing => "database_missing",
             Self::RowMissing => "installation_row_missing",
@@ -231,7 +233,6 @@ pub fn open_bound_database_read_only(
 /// Copy metadata under the caller-held writer lock, so SQLite never touches source sidecars.
 /// `scratch` must be a private, empty directory outside the source root.
 pub fn snapshot_bound_database(root: &Path, scratch: &Path) -> Result<BoundDatabase, BindingError> {
-    use std::io;
     use std::os::unix::fs::OpenOptionsExt;
     let root_fd = open_root_directory(root)?;
     let metadata = open_subdirectory(&root_fd, METADATA_DIR)
@@ -261,8 +262,19 @@ pub fn snapshot_bound_database(root: &Path, scratch: &Path) -> Result<BoundDatab
             .create_new(true)
             .mode(0o600)
             .open(scratch.join(&name))
-            .map_err(|_| BindingError::Io("snapshot_create_failed"))?;
-        io::copy(&mut input, &mut output).map_err(|_| BindingError::Io("snapshot_copy_failed"))?;
+            .map_err(BindingError::SnapshotDestination)?;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = input
+                .read(&mut buffer)
+                .map_err(|_| BindingError::Io("snapshot_source_read_failed"))?;
+            if read == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..read])
+                .map_err(BindingError::SnapshotDestination)?;
+        }
     }
     let connection = sqlite::open_reader(&scratch.join(DB_NAME), sqlite::DEFAULT_BUSY_TIMEOUT)
         .map_err(|error| BindingError::DatabaseInvalid(connection_open_code(error)))?;
