@@ -47,6 +47,11 @@
 - For UI changes, start with `npm --prefix web run check` and the affected
   browser journey. For Rust changes, start with a relevant filtered test;
   enable `test-harness` for contract and integration coverage.
+- Before handing off changes to storage retry or shared refresh controls,
+  run `npm --prefix web run check:feedback`. It repeats the held-request,
+  keyboard and session journeys against a fresh dev server. Include the
+  tested revision and result in the handoff; independent review and required
+  CI still follow. See [delivery measurements](docs/delivery-latency.md).
 - Before Cargo builds, tests or Clippy, ensure `web/dist` is current:
   `build.rs` embeds it. Run `npm --prefix web run build` after UI changes.
   Install dependencies with `npm --prefix web ci` on a fresh checkout or

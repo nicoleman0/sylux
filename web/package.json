@@ -10,6 +10,7 @@
   "packageManager": "npm@11.19.1",
   "scripts": {
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "check:feedback": "npm run check && CI=true npm run smoke -- storage-usage.spec.ts refresh-feedback.spec.ts --repeat-each=3 --workers=2 --max-failures=1",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
