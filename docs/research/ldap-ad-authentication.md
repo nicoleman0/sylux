@@ -106,9 +106,9 @@ may update server-managed audit, lockout or last-logon state.
    configured base/scope with a server-built equality filter. Request just DN,
    stable ID, login/display fields and required account-state attributes.
 3. Require exactly one complete successful search result, a valid stable ID and
-   sufficient enabled-state data. Reject zero results, ambiguity, referrals,
-   partial results, size/time-limit errors or missing required attributes. Never
-   accept the first row of a truncated search.
+   sufficient enabled-state data. Reject zero results, ambiguity, referrals
+   (including `SearchResultReference` continuation references), partial results,
+   size/time-limit errors or missing required attributes. Never accept the first row of a truncated search.
 4. Bind on a **separate fresh TLS connection** using the returned DN and submitted
    password. Never rebind a pooled reader connection as a user. Close the user
    connection on every outcome. Base-read the returned DN through the reader
@@ -123,7 +123,15 @@ may update server-managed audit, lockout or last-logon state.
 [RFC 4511 section 4.5.1](https://datatracker.ietf.org/doc/html/rfc4511#section-4.5.1)
 defines base, single-level and subtree scopes plus search limits. Recommend one
 explicit subtree under a dedicated people OU; use single-level if nested OUs are
-not intended. Do not search an entire forest or global catalog by default.
+not intended. The configured base/scope must exclude subordinate naming contexts.
+Microsoft's [AD referrals documentation](https://learn.microsoft.com/en-us/windows/win32/ad/referrals)
+describes subtree searches returning referrals to subordinate domains and
+unexplored schema/configuration containers. A domain-root subtree search that
+returns such continuation references is unsupported: fail the whole login even
+if one matching user was returned. Do not chase or ignore the references; choose
+a suitably scoped base, such as the dedicated people OU, and qualify it against
+the target directory. This does not assume every AD domain-root search returns
+references. Do not search an entire forest or global catalog by default.
 [RFC 4515 section 3](https://datatracker.ietf.org/doc/html/rfc4515#section-3)
 defines filter escaping. Use the client library's filter encoder, never string
 interpolation of unescaped login text; DN escaping is a separate format. Attribute
@@ -233,7 +241,7 @@ identifiers must not appear in published evidence.
 | --- | --- |
 | D1 Happy path | Real TLS search and user bind; approved A signs in, reloads and uploads/downloads a known fixture. Wrong and empty passwords fail without a session. Reader has no write/password-read rights. |
 | D2 Transport/secrets | Reject untrusted, expired and wrong-host certificates; configured private CA succeeds. No cleartext credentials, silent downgrade or secret in logs/responses/export. Rotate reader secret and CA; old connections/secrets stop being used. If StartTLS is later added, strip/reject upgrade and confirm no bind occurs. |
-| D3 Search boundary | Reject injection text, duplicate names, missing GUID/UUID/state, referrals, oversized/partial/time-limited searches and results outside configured scope. A valid escaped-name control succeeds. No unapproved outbound connection occurs. |
+| D3 Search boundary | Reject injection text, duplicate names, missing GUID/UUID/state, referrals, oversized/partial/time-limited searches and results outside configured scope. An AD domain-root subtree search returning `SearchResultReference` continuation references fails the whole login even with one matching user; a suitably scoped people-OU control without references succeeds. A valid escaped-name control succeeds. No referral is chased and no unapproved outbound connection occurs. |
 | D4 Identity continuity | Rename/move A and change UPN/uid while preserving the stable ID: approved local account/files remain. Delete and recreate A with the same name: it cannot inherit files or the prior link. Test binary GUID conversion and same-name local/other-directory collisions. |
 | D5 Policy and races | Disable, lock, expire and require password change in real AD; check fresh binds and admission. For LDAP test the selected eligibility schema. Hold authentication while locally disabling/demoting the account; issuance must honor current local authority. Measure upstream disablement with an existing session against SYL-88's bound. |
 | D6 Failure capacity | Drop/delay DNS, TCP, TLS, search and bind; reject invalid reader secret and malformed replies. Check total deadlines, result/concurrency bounds, no bind retries and no cached success. Local administrator sign-in/logout still works under directory saturation and outage. |
