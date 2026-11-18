@@ -22,6 +22,17 @@ test('preview rejects active document types and oversized files before downloadi
   expect(requests).toEqual([]);
 });
 
+test('media previews use the direct content URL without the blob size limit', async () => {
+  const { client, requests } = harness(new Blob(['unused']));
+  const url = '/entries/preview/content';
+  for (const [name, kind] of [['clip.MP4', 'video'], ['song.MP3', 'audio']]) {
+    const file = entry(name, 101 * 1024 * 1024);
+    expect(await loadPreview(client, file, url, new AbortController().signal)).toEqual({ kind, url });
+    expect(previewUnavailable(file)).toBeNull();
+  }
+  expect(requests).toEqual([]);
+});
+
 test('text previews preserve UTF-8 content and request bounded authenticated bytes', async () => {
   const text = '<script>window.executed = true</script>\nCafé';
   const { client, requests } = harness(new Blob([text], { type: 'application/json' }));

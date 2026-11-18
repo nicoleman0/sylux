@@ -3,7 +3,7 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import type { ApiClient } from './api';
   import type { Entry } from './listing';
-  import { loadPreview, type Preview } from './preview';
+  import { loadPreview, mediaPreviewKind, type MediaPreview, type Preview } from './preview';
   import { getPdfPreviewCompatibilityError } from './pdf-compatibility';
   import XIcon from '@lucide/svelte/icons/x';
   import DownloadIcon from '@lucide/svelte/icons/download';
@@ -19,7 +19,29 @@
   let imageUrl = $state('');
   let error = $state('');
   let attempt = $state(0);
+  let downloadButton: HTMLElement | null = $state(null);
   const isPdf = $derived(entry?.name.split('.').at(-1)?.toLowerCase() === 'pdf');
+  const mediaKind = $derived(entry?.kind === 'file' ? mediaPreviewKind(entry.name) : null);
+
+  function attachMedia(element: HTMLMediaElement, media: MediaPreview) {
+    const target = entry;
+    function fail() {
+      if (!element.error || entry !== target || preview !== media || url !== media.url) return;
+      if (document.activeElement === element) downloadButton?.focus();
+      preview = { kind: 'unsupported', message: 'This media could not be played. Download the file to open it.' };
+    }
+    element.addEventListener('error', fail);
+    element.setAttribute('src', media.url);
+    return {
+      destroy() {
+        element.removeEventListener('error', fail);
+        element.pause();
+        // Reset resource selection so the browser cancels the old request.
+        element.removeAttribute('src');
+        element.load();
+      },
+    };
+  }
 
   $effect(() => {
     const target = entry;
@@ -47,7 +69,15 @@
 </script>
 
 <Dialog.Root open={!!entry} onOpenChange={(open) => { if (!open) onclose(); }}>
-  <Dialog.Content class={isPdf ? 'pdf-reader-shell !max-w-none !w-full !h-[100dvh] !max-h-none !rounded-none !gap-0 !p-0 !ring-0 overflow-hidden flex flex-col' : '!max-w-[calc(100vw-1rem)] w-[calc(100vw-1rem)] h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] overflow-hidden flex flex-col gap-4 p-4 sm:!max-w-[min(92vw,1400px)] sm:w-[92vw] sm:h-[88dvh] sm:max-h-[88dvh] sm:gap-6 sm:p-6'} showCloseButton={false} onCloseAutoFocus={(event) => event.preventDefault()}>
+  <Dialog.Content
+    class={isPdf
+      ? 'pdf-reader-shell !max-w-none !w-full !h-[100dvh] !max-h-none !rounded-none !gap-0 !p-0 !ring-0 overflow-hidden flex flex-col'
+      : mediaKind === 'audio'
+        ? '!max-w-xl w-[calc(100vw-1rem)] max-h-[calc(100dvh-1rem)] flex flex-col gap-4 p-4 sm:p-6'
+        : '!max-w-[calc(100vw-1rem)] w-[calc(100vw-1rem)] h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] overflow-hidden flex flex-col gap-4 p-4 sm:!max-w-[min(92vw,1400px)] sm:w-[92vw] sm:h-[88dvh] sm:max-h-[88dvh] sm:gap-6 sm:p-6'}
+    showCloseButton={false}
+    onCloseAutoFocus={(event) => event.preventDefault()}
+  >
     {#if isPdf}
       <header class="reader-header">
         <Button variant="ghost" size="icon" aria-label="Close preview" title="Close preview" onclick={onclose}><XIcon /></Button>
@@ -55,6 +85,11 @@
         <Dialog.Description class="sr-only">PDF reader</Dialog.Description>
         <Button variant="ghost" size="icon" aria-label="Download file" title="Download file" onclick={ondownload}><DownloadIcon /></Button>
       </header>
+    {:else if mediaKind}
+      <Dialog.Header class="shrink-0">
+        <Dialog.Title class="truncate" title={entry?.name}><span class="sr-only">Preview </span>{entry?.name}</Dialog.Title>
+        <Dialog.Description class="sr-only">Media preview</Dialog.Description>
+      </Dialog.Header>
     {:else}
     <Dialog.Header class="shrink-0">
       <Dialog.Title class="break-all">Preview {entry?.name}</Dialog.Title>
@@ -68,6 +103,17 @@
         <pre class="bg-muted max-h-full overflow-auto rounded-md p-4 font-mono text-sm whitespace-pre-wrap break-words">{preview.text || 'This file is empty.'}</pre>
       {:else if preview?.kind === 'image'}
         <img src={imageUrl} alt={entry?.name ?? 'File preview'} class="mx-auto max-h-full max-w-full object-contain" onerror={() => { error = 'This image could not be displayed. Download the file to open it.'; }} />
+      {:else if preview?.kind === 'video' || preview?.kind === 'audio'}
+        {#key preview}
+          <div class="flex h-full min-h-0 items-center justify-center">
+            {#if preview.kind === 'video'}
+              <!-- svelte-ignore a11y_media_has_caption (preview plays user files; captions may be embedded) -->
+              <video use:attachMedia={preview} controls preload="none" playsinline aria-label={entry?.name} class="media-player max-h-full w-full max-w-4xl bg-black object-contain"></video>
+            {:else}
+              <audio use:attachMedia={preview} controls preload="none" aria-label={entry?.name} class="media-player w-full max-w-xl"></audio>
+            {/if}
+          </div>
+        {/key}
       {:else if preview?.kind === 'pdf'}
         {@const compatibilityError = getPdfPreviewCompatibilityError()}
         {#if compatibilityError}
@@ -87,7 +133,12 @@
         <p role="status">Loading preview…</p>
       {/if}
     </div>
-    {#if !isPdf}<Dialog.Footer class="shrink-0"><Button variant="outline" onclick={onclose}>Close preview</Button><Button onclick={ondownload}>Download file</Button></Dialog.Footer>{/if}
+    {#if !isPdf}
+      <Dialog.Footer class={mediaKind ? 'shrink-0 flex-row flex-wrap justify-end' : 'shrink-0'}>
+        <Button variant="outline" onclick={onclose}>Close preview</Button>
+        <Button bind:ref={downloadButton} onclick={ondownload}>Download file</Button>
+      </Dialog.Footer>
+    {/if}
   </Dialog.Content>
 </Dialog.Root>
 
@@ -95,4 +146,5 @@
   .reader-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.75rem; border-bottom: 1px solid var(--border); flex-shrink: 0; }
   .reader-body > :global(p), .reader-body > :global(.grid) { margin: 1rem; }
   :global(.pdf-reader-shell[data-state]), :global(.pdf-reader-shell) { animation: none; }
+  .media-player:focus-visible { outline-offset: -2px; }
 </style>
