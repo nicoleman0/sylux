@@ -39,6 +39,32 @@ async function open(page: Page) {
 const item = (page: Page, name: string) => page.getByRole('button', { name: `Preview ${name}.txt`, exact: true });
 const box = (page: Page, name: string) => page.getByRole('checkbox', { name: `Select ${name}.txt`, exact: true });
 
+test('the footer shortcut button is keyboard reachable and regains focus after help', async ({ page }) => {
+  await open(page);
+  const trigger = page.getByRole('button', { name: 'Keyboard shortcuts', exact: true });
+  await expect(trigger).toHaveCount(1);
+  await expect(page.locator('footer').getByRole('button', { name: 'Keyboard shortcuts', exact: true })).toBeVisible();
+  await trigger.focus();
+  await page.keyboard.press('Shift+Tab');
+  await expect(trigger).not.toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(trigger).toBeFocused();
+  await expect(trigger).toHaveCSS('outline-style', 'solid');
+  await page.keyboard.press('Enter');
+  const help = page.getByRole('dialog', { name: 'Keyboard shortcuts', exact: true });
+  await expect(help.getByRole('button', { name: 'Close', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(help).toBeHidden();
+  await expect(trigger).toBeFocused();
+
+  // Some pointer activations leave focus on the previous control.
+  await item(page, 'delta').focus();
+  await trigger.evaluate(button => button.click());
+  await help.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(help).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
+
 test('arrows move focus, shift extends the selection, escape clears it', async ({ page }) => {
   await open(page);
   await item(page, 'alpha').focus();
@@ -159,9 +185,14 @@ test('focus stays on the item through a refresh', async ({ page }) => {
   await expect(item(page, 'beta')).toBeFocused();
 });
 
-test('arrow down from the folder heading enters the list', async ({ page }) => {
+test('fresh Files shows how to focus the first item from the folder heading', async ({ page }) => {
   await open(page);
-  await page.getByRole('heading', { name: 'Files', level: 1 }).focus();
+  const heading = page.getByRole('heading', { name: 'Files', level: 1 });
+  const hint = page.getByText('Press Down Arrow to focus the first item.', { exact: true });
+  await expect(heading).toBeFocused();
+  await expect(hint).toBeVisible();
+  await expect(heading).toHaveAccessibleDescription('Press Down Arrow to focus the first item.');
   await page.keyboard.press('ArrowDown');
   await expect(item(page, 'alpha')).toBeFocused();
+  await expect(hint).toBeHidden();
 });
