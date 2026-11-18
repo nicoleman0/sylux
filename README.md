@@ -1,30 +1,49 @@
-# Sylux
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo-light.svg" alt="Sylux" width="96" height="96">
+  </picture>
+</p>
+
+<h1 align="center">Sylux</h1>
+
+<p align="center">
+  <a href="https://github.com/nicoleman0/sylux/actions/workflows/ci.yml"><img src="https://github.com/nicoleman0/sylux/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
+  <a href="https://github.com/nicoleman0/sylux/releases"><img src="https://img.shields.io/github/v/release/nicoleman0/sylux?include_prereleases&label=release" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/nicoleman0/sylux" alt="MIT license"></a>
+</p>
 
 Self-hosted multi-user file storage with a Rust server, Svelte interface and SQLite metadata.
 
-## Beta
+## Who it is for
 
-Docker is the primary installation option. Start with the [Docker beta guide](docs/docker-beta.md).
-It covers installing a versioned image, local accounts, private HTTPS access, backup and restore.
-[Native LXC installation](docs/lxc.md) is secondary and has separate qualification limits.
-Lost administrator credentials can be [recovered offline](docs/docker-beta.md#recover-administrator-access)
-with host access and the service stopped.
+Self-hosters and small groups who want private file storage in a browser. Each account's files are private to it. Sylux favors everyday workflows and low operating overhead over broad feature parity.
 
-The beta includes local account administration, isolated private storage, folders,
-file moves, recoverable deletion and replacement uploads. OIDC, shared folders,
-public sharing links and WebDAV are not included. Text, image and
-[PDF previews](docs/pdf-preview.md) are available in the browser.
+## Features
 
-[Folder listings](docs/folder-listings.md) support name and file-size sorting.
-Folders and selections [download as one ZIP](docs/archives.md).
-[Uploads up to 64 GiB resume](docs/uploads.md) after a connection loss or tab reload, within a 24-hour window.
+- Local accounts with administrator and user roles.
+- Folders, file moves, rename and recoverable deletion with [Trash and restore](docs/trash.md).
+- Replacement uploads, and [uploads up to 64 GiB that resume](docs/uploads.md) after a connection loss or tab reload, within a 24-hour window.
+- [Folder and selection downloads](docs/archives.md) as one ZIP.
+- [Folder listings](docs/folder-listings.md) sorted by name, file size or modified date.
+- [Account search](docs/search.md) by name.
+- Text, image and [PDF previews](docs/pdf-preview.md) in the browser.
+- Administrator-set [instance name and appearance](docs/instance-appearance.md).
 
-Keep independent copies of important files. Functional tests do not establish
-physical power-loss durability or schema upgrade/downgrade support.
+Not included: OIDC, shared folders, public sharing links and WebDAV.
 
-## Feedback
+## Install
 
-Email **hello@corvus-dev.com** with the version, host environment, steps to reproduce,
-expected result and observed result. Do not send passwords, setup tokens or personal files.
+Docker is the primary option. Follow the [Docker beta guide](docs/docker-beta.md). It covers installing a versioned image, local accounts, private HTTPS access, backup and restore. [Native LXC installation](docs/lxc.md) is secondary and has separate qualification limits. Lost administrator credentials can be [recovered offline](docs/docker-beta.md#recover-administrator-access) with host access and the service stopped.
 
-Licensed under the [MIT License](LICENSE). See [third-party notices](docs/dependency-notices.md).
+## Status and limits
+
+Sylux is in beta. Releases are [pre-releases](https://github.com/nicoleman0/sylux/releases). Functional tests do not establish physical power-loss durability or schema upgrade and downgrade support. Keep independent copies of important files.
+
+## Feedback and contributing
+
+Email **hello@corvus-dev.com** with the version, host environment, steps to reproduce, expected result and observed result. Do not send passwords, setup tokens or personal files. There is no contributing guide yet; open an issue or email before sending a pull request.
+
+## License
+
+[MIT](LICENSE). See [third-party notices](docs/dependency-notices.md).
