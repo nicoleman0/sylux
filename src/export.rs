@@ -83,6 +83,9 @@ pub fn export_account(source: &Path, handle: &str, target: &Path) -> Result<u64,
             root::BindingError::SnapshotDestination(error) => {
                 format!("export_write_failed: {error}")
             }
+            root::BindingError::SnapshotOpen(error) => {
+                format!("export_snapshot_open_failed: {error}")
+            }
             _ => "export_database_unavailable".to_owned(),
         })?;
     root::verify_binding(&bound, &source, &manifest).map_err(|_| "export_binding_invalid")?;
@@ -125,10 +128,7 @@ fn absolute_target(target: &Path) -> Result<PathBuf, String> {
     let bytes = target.as_os_str().as_bytes();
     let mut end = bytes.len();
     while end > 1 {
-        let component_end = bytes[..end]
-            .iter()
-            .rposition(|b| *b == b'/')
-            .map_or(0, |i| i);
+        let component_end = bytes[..end].iter().rposition(|b| *b == b'/').unwrap_or(0);
         let component = &bytes[component_end + usize::from(bytes[component_end] == b'/')..end];
         if component.is_empty() || component == b"." {
             end = component_end.max(1);

@@ -96,6 +96,7 @@ pub enum BindingError {
     DatabaseReplaced,
     Io(&'static str),
     SnapshotDestination(std::io::Error),
+    SnapshotOpen(String),
 }
 
 impl BindingError {
@@ -109,6 +110,7 @@ impl BindingError {
             | Self::DatabaseInvalid(code)
             | Self::Io(code) => code,
             Self::SnapshotDestination(_) => "snapshot_destination_error",
+            Self::SnapshotOpen(_) => "snapshot_open_error",
             Self::KeyMissing => "mutation_key_missing",
             Self::DatabaseMissing => "database_missing",
             Self::RowMissing => "installation_row_missing",
@@ -277,7 +279,7 @@ pub fn snapshot_bound_database(root: &Path, scratch: &Path) -> Result<BoundDatab
         }
     }
     let connection = sqlite::open_reader(&scratch.join(DB_NAME), sqlite::DEFAULT_BUSY_TIMEOUT)
-        .map_err(|error| BindingError::DatabaseInvalid(connection_open_code(error)))?;
+        .map_err(|error| BindingError::SnapshotOpen(error.reason()))?;
     Ok(BoundDatabase {
         connection,
         _metadata: metadata,

@@ -194,6 +194,29 @@ fn snapshot_destination_errors_keep_the_os_cause() {
     }
 }
 #[test]
+fn snapshot_open_failure_keeps_sqlite_cause_separate_from_source_errors() {
+    let c = Case::new();
+    fs::write(
+        c.source.join("metadata/sylux.sqlite3"),
+        b"invalid sqlite snapshot",
+    )
+    .unwrap();
+    let scratch = c.dir.join("scratch");
+    fs::DirBuilder::new().mode(0o700).create(&scratch).unwrap();
+
+    let error = match root::snapshot_bound_database(&c.source, &scratch) {
+        Ok(_) => panic!("invalid snapshot unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason(), "snapshot_open_error");
+    match error {
+        root::BindingError::SnapshotOpen(cause) => {
+            assert!(!cause.is_empty());
+        }
+        other => panic!("expected snapshot open error, got {}", other.reason()),
+    }
+}
+#[test]
 fn corruption_missing_truncated_and_digest_are_nonzero() {
     for mode in 0..3 {
         let mut c = Case::new();
