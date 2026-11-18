@@ -196,3 +196,15 @@ test('fresh Files shows how to focus the first item from the folder heading', as
   await expect(item(page, 'alpha')).toBeFocused();
   await expect(hint).toBeHidden();
 });
+
+test('first pointer click after fresh Files keeps row geometry stable', async ({ page }) => {
+  await open(page);
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeFocused();
+  const target = item(page, 'beta');
+  const before = (await target.boundingBox())!;
+  await page.mouse.move(before.x + 10, before.y + before.height - 3);
+  await page.mouse.down();
+  expect((await target.boundingBox())!.y).toBe(before.y);
+  await page.mouse.up();
+  await expect(page.getByRole('dialog', { name: 'Preview beta.txt' })).toBeVisible();
+});
