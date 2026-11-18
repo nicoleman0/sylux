@@ -27,6 +27,7 @@ protocol capabilities to exercise, not proof of Sylux compatibility.
   configuration and login/callback/logout research.
 - [SYL-87](https://linear.app/corvus-dev/issue/SYL-87) owns direct LDAP/AD
   connectivity, secure binds, searches, directory identity and failure behavior.
+  See the [LDAP/AD recommendation](ldap-ad-authentication.md).
   An AD-connected IdP is an alternative route, not direct LDAP support in Sylux.
 - [SYL-88](https://linear.app/corvus-dev/issue/SYL-88) owns stable account links,
   provisioning, collision rules, roles/groups, deprovisioning, session revocation
