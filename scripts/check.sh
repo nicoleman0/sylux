@@ -29,6 +29,7 @@ run python3 scripts/test-ci-comment-structured.py
 run python3 scripts/test-account-authority-check.py
 run npm --prefix web ci
 run node --test scripts/test-ci-comment-syntax.mjs
+run node --test scripts/test-measure-image-footprint.mjs
 run node --test tools/test-browser-screenshot-paths.mjs
 run npm --prefix web run check
 run npm --prefix web run build
