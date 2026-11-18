@@ -144,7 +144,7 @@ struct Observation {
     watchdog_expired: bool,
     trace_overflow: bool,
 }
-fn event(line: &str) -> &'static str {
+fn event(line: &str, expected_binding_reason: Option<&str>) -> &'static str {
     // No raw stderr, credentials, paths or unknown JSON values are copied into evidence.
     let parsed = serde_json::from_str::<serde_json::Value>(line).ok();
     let name = parsed
@@ -167,10 +167,27 @@ fn event(line: &str) -> &'static str {
         "init.complete",
         "init.refused",
     ];
-    if let Some(name) = name
+    if let Some(fields) = parsed.as_ref().and_then(|v| v.as_object())
+        && let Some(name) = name
         && let Some(&known) = ALLOWED.iter().find(|&&known| known == name)
     {
-        return known;
+        let reason = fields.get("reason").and_then(|v| v.as_str());
+        let valid = match known {
+            "ownership.refused"
+            | "binding.refused"
+            | "removal.cleanup_pending"
+            | "startup.failed"
+            | "init.refused" => {
+                fields.len() == 2
+                    && reason.is_some()
+                    && (known != "binding.refused"
+                        || expected_binding_reason.is_none_or(|expected| reason == Some(expected)))
+            }
+            _ => fields.len() == 1,
+        };
+        if valid {
+            return known;
+        }
     }
     if line.starts_with("Sylux static assets listening on ") {
         "listener.bind" // actual scaffold violation, NOT a fabricated production trace
@@ -179,6 +196,14 @@ fn event(line: &str) -> &'static str {
     }
 }
 fn probe(case: &Case, command: &str) -> Observation {
+    probe_with_binding_reason(case, command, None)
+}
+
+fn probe_with_binding_reason(
+    case: &Case,
+    command: &str,
+    expected_binding_reason: Option<&'static str>,
+) -> Observation {
     let lease = case.owner.register_worker().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_sylux"))
         .arg(command)
@@ -216,7 +241,11 @@ fn probe(case: &Case, command: &str) -> Observation {
                     break;
                 }
                 Ok(_) => {
-                    if line.len() > 4096 || tx.try_send(event(&line).to_owned()).is_err() {
+                    if line.len() > 4096
+                        || tx
+                            .try_send(event(&line, expected_binding_reason).to_owned())
+                            .is_err()
+                    {
                         reader_overflow.store(true, Ordering::SeqCst);
                     }
                 }
@@ -572,39 +601,45 @@ fn a10_second_process_refused_before_database_migration_recovery_listener() {
     case.cleanup();
 }
 
+fn legacy_installation(case: &Case) -> (sylux::persistence::root::InstallationIdentity, PathBuf) {
+    use std::os::unix::fs::OpenOptionsExt;
+    use sylux::persistence::{root, schema, sqlite};
+
+    case.bound();
+    let mut legacy = root::read_manifest(&case.store).unwrap();
+    legacy.schema_version = 1;
+    fs::write(
+        case.store.join(root::MANIFEST_NAME),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    let path = case.store.join("metadata/sylux.sqlite3");
+    fs::remove_file(&path).unwrap();
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    let db = sqlite::open_writer(&path, Duration::from_millis(375)).unwrap();
+    db.execute_batch(schema::MIGRATION_0001_S1).unwrap();
+    schema::insert_installation_row(&db, &legacy, [7; 32]).unwrap();
+    db.execute_batch("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES('11111111111111111111111111111111','legacy-owner','administrator',1,0);
+        INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES('22222222222222222222222222222222','11111111111111111111111111111111',NULL,'folder','',x'',1);").unwrap();
+    (legacy, path)
+}
+
 #[test]
 fn serve_upgrades_v1_and_recovers_committed_transition_with_partial_manifest_temp() {
     use sha2::{Digest, Sha256};
     use sylux::persistence::{root, schema, sqlite};
     for interruption in ["none", "database", "manifest-temp"] {
         let case = Case::new(&format!("legacy-{interruption}"));
-        case.bound();
-        let mut legacy = root::read_manifest(&case.store).unwrap();
-        legacy.schema_version = 1;
-        fs::write(
-            case.store.join(root::MANIFEST_NAME),
-            serde_json::to_vec(&legacy).unwrap(),
-        )
-        .unwrap();
-        let path = case.store.join("metadata/sylux.sqlite3");
-        fs::remove_file(&path).unwrap();
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .open(&path)
-                .unwrap();
+        let (legacy, path) = legacy_installation(&case);
+        if interruption != "none" {
             let db = sqlite::open_writer(&path, Duration::from_millis(375)).unwrap();
-            db.execute_batch(schema::MIGRATION_0001_S1).unwrap();
-            schema::insert_installation_row(&db, &legacy, [7; 32]).unwrap();
-            db.execute_batch("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES('11111111111111111111111111111111','legacy-owner','administrator',1,0);
-                INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES('22222222222222222222222222222222','11111111111111111111111111111111',NULL,'folder','',x'',1);").unwrap();
-            if interruption != "none" {
-                let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
-                schema::migrate_v1(&db, Some(hash.as_slice())).unwrap();
-            }
+            let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
+            schema::migrate_v1(&db, Some(hash.as_slice())).unwrap();
         }
         if interruption == "manifest-temp" {
             private_file(&case.store, "installation.json.tmp")
@@ -622,19 +657,20 @@ fn serve_upgrades_v1_and_recovers_committed_transition_with_partial_manifest_tem
                 .contains("verify_schema_upgrade_required_run_serve")
         );
         let observed = probe(&case, "serve");
-        for (earlier, later) in [
-            ("binding.verified", "migration.start"),
-            ("migration.start", "migration.complete"),
-            ("migration.complete", "recovery.start"),
-            ("recovery.start", "listener.bind"),
-        ] {
-            let a = observed.events.iter().position(|e| e == earlier);
-            let b = observed.events.iter().position(|e| e == later);
-            assert!(
-                matches!((a,b), (Some(a),Some(b)) if a<b),
-                "{interruption}: {observed:?}"
-            );
-        }
+        assert_eq!(
+            observed.events,
+            [
+                "ownership.lock_acquire",
+                "ownership.acquired",
+                "database.open",
+                "migration.start",
+                "binding.verified",
+                "migration.complete",
+                "recovery.start",
+                "listener.bind",
+            ],
+            "{interruption}: {observed:?}"
+        );
         assert!(!observed.watchdog_expired && !observed.trace_overflow);
         let upgraded = root::read_manifest(&case.store).unwrap();
         assert_eq!(upgraded.schema_version, 2);
@@ -657,6 +693,52 @@ fn serve_upgrades_v1_and_recovers_committed_transition_with_partial_manifest_tem
         );
         drop(db);
         require_valid_root(&case);
+        case.cleanup();
+    }
+}
+
+#[test]
+fn serve_reports_v1_upgrade_failures_without_verifying_binding() {
+    use sylux::persistence::root;
+
+    for (failure, reason, database_version) in [
+        ("sql", "schema_migration_failed", 1),
+        ("publication", "manifest_not_regular", 2),
+    ] {
+        let case = Case::new(failure);
+        let (_, path) = legacy_installation(&case);
+        if failure == "sql" {
+            case.update_db("CREATE TABLE removal (synthetic_fixture INTEGER)");
+        } else {
+            fs::create_dir(case.store.join("installation.json.tmp")).unwrap();
+        }
+
+        let observed = probe_with_binding_reason(&case, "serve", Some(reason));
+        assert_eq!(
+            observed.events,
+            [
+                "ownership.lock_acquire",
+                "ownership.acquired",
+                "database.open",
+                "migration.start",
+                "binding.refused",
+            ],
+            "{failure}: {observed:?}"
+        );
+        assert!(
+            observed.exited_unsuccessfully
+                && !observed.watchdog_expired
+                && !observed.trace_overflow,
+            "{failure}: {observed:?}"
+        );
+        assert_eq!(root::read_manifest(&case.store).unwrap().schema_version, 1);
+        let db = Connection::open(path).unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            database_version
+        );
+        drop(db);
         case.cleanup();
     }
 }

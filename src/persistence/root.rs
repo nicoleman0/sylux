@@ -746,7 +746,6 @@ pub fn upgrade_binding(
         serde_json::to_vec(manifest).map_err(|_| BindingError::Io("manifest_encode_failed"))?;
     let hash = Sha256::digest(&bytes);
     if row.schema_version == 1 && version == 1 {
-        super::contract_event("binding.verified");
         super::contract_event("migration.start");
         schema::migrate_v1(&bound.connection, Some(hash.as_slice()))
             .map_err(|_| BindingError::DatabaseInvalid("schema_migration_failed"))?;
@@ -764,12 +763,9 @@ pub fn upgrade_binding(
         }
         schema::verify_core_schema(&bound.connection)
             .map_err(|_| BindingError::DatabaseInvalid("schema_invalid"))?;
+        super::contract_event("migration.start");
     } else {
         return Err(BindingError::UnsupportedVersion("schema_version"));
-    }
-    if row.schema_version == 2 {
-        super::contract_event("binding.verified");
-        super::contract_event("migration.start");
     }
     let mut upgraded = manifest.clone();
     upgraded.schema_version = 2;
@@ -798,5 +794,6 @@ pub fn upgrade_binding(
         .map_err(|_| BindingError::Io("manifest_publish_failed"))?;
     fs::fsync(&root_fd).map_err(|_| BindingError::Io("manifest_sync_failed"))?;
     verify_binding(bound, root, &upgraded)?;
+    super::contract_event("binding.verified");
     Ok(upgraded)
 }
