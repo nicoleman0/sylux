@@ -38,6 +38,54 @@ time of 12.37 s [12.10–12.85] and execute HTTP time of 12.75 s
 [12.45–13.24]. The writer remained occupied for essentially the full
 request.
 
+## Post-fix flat-root replay
+
+An independent replay on 2026-11-18 used the exact tested source revision
+`e6322015e478a345973b08142f1c6928dfe88ac3`. It used the same benchmark
+harness and fixture contract: 10,000 flat trashed file roots, one revision
+and one verified empty payload per file, a fresh fixture copy per request,
+and a single loopback TLS client that previewed then confirmed removal and
+checked the persisted operation, membership and cleanup rows. Three rotated
+repetitions produced these medians and observed ranges in milliseconds:
+
+| Selection | Roots/files | Unrelated live files | n | Preview fingerprint | Writer fingerprint | Writer through commit | Execute HTTP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| All | 10,000 | 0 | 3 | 499.6 [496.3–507.9] | 505.2 [500.8–514.9] | 906.7 [881.4–928.0] | 907.1 [881.7–928.3] |
+| All | 10,000 | 20,000 | 3 | 549.9 [547.5–578.4] | 556.6 [549.0–661.2] | 989.1 [985.7–1,365.2] | 989.4 [986.0–1,366.1] |
+
+The first row is from the tracked harness command
+`run.sh stress stress --repeats 3`. The second is a separate comparison from
+a disposable copy of `measure.py` extended to seed 20,000 unrelated live
+files, run alongside a no-library control, and summarize both. The paired
+control differed slightly from the tracked-harness run (505.4 ms median
+fingerprint, 893.7 ms writer); the table uses the tracked run for its first
+row and the paired run for its second. The library comparison is archived
+evidence, but is not directly selectable from the tracked harness. Both use
+synthetic local storage on the same 10-core
+Apple Silicon host with bundled SQLite 3.54.1 and Rust 1.99.1; the 20,000
+live files each had one revision. Load varied during the first replay and
+unrelated host work was visible, so these results do not establish mixed
+traffic behavior.
+
+At 10,000 roots the observed fingerprint medians are about 50 µs per root
+and writer hold is about 90 µs per root. Those are per-root averages for this
+single size and fixture, not evidence of an asymptotic scaling law. The
+residual cost includes removal work after the fingerprint. Separately,
+`roots()` still pages deleted roots in batches of 200; its query plan scans
+the owner's entries and sorts through a temporary B-tree on each page.
+That pre-existing paging cost may scale with both page count and owner entry
+count and was not isolated by this replay.
+
+To replay the no-library stress case from the tracked harness on macOS, build
+the web assets first and set `SYL89_EVIDENCE_DIR` to a new external directory:
+
+```sh
+export SYL89_EVIDENCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/syl89-stress.XXXXXXXX")"
+bash tools/benchmarks/syl-89-removal/build.sh "$PWD" e6322015e478a345973b08142f1c6928dfe88ac3
+bash tools/benchmarks/syl-89-removal/run.sh stress stress --repeats 3
+python3 tools/benchmarks/syl-89-removal/summarize.py "$SYL89_EVIDENCE_DIR/stress.jsonl"
+```
+
 ## Tree-first query replay
 
 On 2026-11-18, an instrumented release build of `b49ebe30` plus patch
