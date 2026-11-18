@@ -11,6 +11,7 @@ pub enum CommandKind {
     Serve,
     AdminResetPassword,
     AdminVerifyPayloads,
+    AdminExport,
 }
 
 #[derive(Debug)]
@@ -25,6 +26,7 @@ pub struct CliConfig {
     pub public_origin: Option<String>,
     pub assets: PathBuf,
     pub admin_handle: Option<String>,
+    pub destination: Option<PathBuf>,
 }
 
 /// Redacted codes only; never echo argument values.
@@ -60,11 +62,13 @@ where
         Some("admin") => match arguments.next().as_deref().and_then(|value| value.to_str()) {
             Some("reset-password") => CommandKind::AdminResetPassword,
             Some("verify-payloads") => CommandKind::AdminVerifyPayloads,
+            Some("export") => CommandKind::AdminExport,
             _ => return Err(ConfigError::Usage("admin_subcommand_required")),
         },
         _ => return Err(ConfigError::Usage("subcommand_required")),
     };
     let mut admin_handle = None;
+    let mut destination = None;
     let mut password_stdin = false;
     let mut root: Option<PathBuf> = None;
     let mut listen: Option<String> = None;
@@ -80,13 +84,26 @@ where
         let allowed: Option<&[&str]> = match command {
             CommandKind::AdminResetPassword => Some(&["--root", "--handle", "--password-stdin"]),
             CommandKind::AdminVerifyPayloads => Some(&["--root"]),
+            CommandKind::AdminExport => Some(&["--root", "--handle", "--destination"]),
             CommandKind::Init | CommandKind::Serve => None,
         };
         if allowed.is_some_and(|flags| !flags.contains(&flag)) {
             return Err(ConfigError::Usage("unknown_argument"));
         }
         match flag {
-            "--handle" if command == CommandKind::AdminResetPassword => {
+            "--destination" if command == CommandKind::AdminExport => {
+                set_once(
+                    &mut destination,
+                    value_path(&mut arguments, "destination_value_missing")?,
+                    "duplicate_destination",
+                )?;
+            }
+            "--handle"
+                if matches!(
+                    command,
+                    CommandKind::AdminResetPassword | CommandKind::AdminExport
+                ) =>
+            {
                 set_once(
                     &mut admin_handle,
                     value_string(&mut arguments, "handle_value_missing")?,
@@ -148,6 +165,14 @@ where
             return Err(ConfigError::Usage("password_stdin_required"));
         }
     }
+    if command == CommandKind::AdminExport {
+        if admin_handle.as_deref().is_none_or(str::is_empty) {
+            return Err(ConfigError::Usage("handle_required"));
+        }
+        if destination.is_none() {
+            return Err(ConfigError::Usage("destination_required"));
+        }
+    }
     let listen = listen
         .or_else(|| {
             matches!(command, CommandKind::Init | CommandKind::Serve)
@@ -172,6 +197,7 @@ where
         public_origin,
         assets,
         admin_handle,
+        destination,
     })
 }
 
