@@ -15,13 +15,15 @@ cargo test --locked --features test-harness \
   --test contract_uploads folder_total_tracks_real_upload_replacement_trash_and_restore -- --exact
 cargo test --locked --features test-harness \
   --test integration_retry_reconcile folder_recovery_lost_trash_and_restore_replies_are_inspected_after_restart -- --exact
+cargo test --locked --features test-harness \
+  --test contract_uploads storage_usage_tracks_trash_restore_replacement_and_removal_exactly -- --exact
 ```
 
 Or run the full [storage suite](README.md) to include the related upload, private-file, and isolation cases.
 
 ## Observable proof and limits
 
-Contract checks verify replaced bytes remain in Trash, restore conflicts are visible, successful restore recovers the original bytes, and folder totals reflect trash/restore. The restart integration drops the mutation reply, restarts and reconciles the owned fixture, then verifies content is hidden after trash and exact again after restore.
+Contract checks verify replaced bytes remain in Trash, restore conflicts are visible, successful restore recovers the original bytes, and folder totals reflect trash/restore. The usage contract checks exact Files and Trash totals ([`docs/storage-usage.md`](../../../../docs/storage-usage.md)) and that only administrators read every account. The restart integration drops the mutation reply, restarts and reconciles the owned fixture, then verifies content is hidden after trash and exact again after restore.
 
 The browser Trash tests in `web/tests/trash.spec.ts` use mocked API responses. They cover presentation, paging, and feedback behavior; they do not verify persisted Trash state. Do not automatically retry an uncertain trash or restore request; inspect fresh Files and Trash as documented in [`docs/trash.md`](../../../../docs/trash.md).
 

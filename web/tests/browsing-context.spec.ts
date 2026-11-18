@@ -20,6 +20,7 @@ async function backend(page: Page, administrator = false) {
       return json({ account_id: handle, handle, role: administrator ? 'administrator' : 'user', csrf_token: 'csrf' });
     }
     if (url.pathname === '/accounts') return json([{ account_id: 'member', handle: 'member', role: 'user', enabled: true }]);
+    if (url.pathname === '/me/usage') return json({ files_bytes: 0, trash_bytes: 0 });
     if (url.pathname === '/auth/logout') return json({});
     if (url.pathname === '/folders/children') return json({ root, items: [child], next_cursor: null, has_more: false });
     if (/^\/folders\/[^/]+\/path$/.test(url.pathname)) {

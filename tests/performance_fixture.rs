@@ -6,7 +6,7 @@ mod common;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use common::{
     FixtureRoot,
-    server::{TlsApiServer, TlsFiles},
+    server::{TlsApiServer, TlsFiles, tls_connect},
 };
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -21,7 +21,7 @@ use sylux::{
         authz::{PasswordLimiter, verifier},
         names::EntryName,
         namespace::{self, ListingSort},
-        search,
+        search, usage,
     },
     http::{self, AuthState},
     persistence::{
@@ -103,6 +103,7 @@ fn seed(db: &mut Connection, count: usize, password_hash: &str) -> io::Result<Va
     let mut expected_deep = Vec::new();
     let mut expected_live_files = Vec::new();
     let mut expected_trash = Vec::new();
+    let (mut files_bytes, mut trash_bytes) = (0i64, 0i64);
     for n in 0..10 {
         let mut secret = [0u8; 32];
         let mut csrf = [0u8; 32];
@@ -181,9 +182,11 @@ fn seed(db: &mut Connection, count: usize, password_hash: &str) -> io::Result<Va
                 }
                 if kind == "file" {
                     expected_live_files.push(eid.clone());
+                    files_bytes += length;
                 }
             } else {
                 expected_trash.push(eid.clone());
+                trash_bytes += length;
             }
             entry
                 .execute(params![
@@ -233,7 +236,7 @@ fn seed(db: &mut Connection, count: usize, password_hash: &str) -> io::Result<Va
         layers.push(live);
     }
     Ok(
-        json!({"sessions":sessions,"expectations":{"root":ordered_ids(&expected_root),"deep":ordered_ids(&expected_deep),"path":std::iter::once(ROOT.to_owned()).chain((0..16).map(|n|id(0x1000+n))).collect::<Vec<_>>(),"search_ids":{"selective":vec![id(0x1000+99)],"broad":expected_live_files.iter().take(100).collect::<Vec<_>>(),"none":Vec::<String>::new(),"one":expected_live_files.iter().take(100).collect::<Vec<_>>()},"search_counts":{"selective":1,"broad":expected_live_files.len(),"none":0,"one":expected_live_files.len()},"trash":expected_trash},"dimensions":{"seed":SEED,"metadata_entries":count,"wide_root_live_children":wide_live,"deep_live_children_by_layer":layers,"total_seed_entries":count+11,"metadata_files":count-16,"deep_folder_depth":16,"trash_entries":deleted,"sessions":10,"payloads":"metadata-only; absent; never request content","size_formula":"(index * 7919 + seed) % 16777216","modified_base_unix":1700000000}}),
+        json!({"sessions":sessions,"expectations":{"root":ordered_ids(&expected_root),"deep":ordered_ids(&expected_deep),"path":std::iter::once(ROOT.to_owned()).chain((0..16).map(|n|id(0x1000+n))).collect::<Vec<_>>(),"search_ids":{"selective":vec![id(0x1000+99)],"broad":expected_live_files.iter().take(100).collect::<Vec<_>>(),"none":Vec::<String>::new(),"one":expected_live_files.iter().take(100).collect::<Vec<_>>()},"search_counts":{"selective":1,"broad":expected_live_files.len(),"none":0,"one":expected_live_files.len()},"trash":expected_trash,"usage":{"files_bytes":files_bytes,"trash_bytes":trash_bytes}},"dimensions":{"seed":SEED,"metadata_entries":count,"wide_root_live_children":wide_live,"deep_live_children_by_layer":layers,"total_seed_entries":count+11,"metadata_files":count-16,"deep_folder_depth":16,"trash_entries":deleted,"sessions":10,"payloads":"metadata-only; absent; never request content","size_formula":"(index * 7919 + seed) % 16777216","modified_base_unix":1700000000}}),
     )
 }
 
@@ -293,6 +296,66 @@ async fn probes(workers: &SqliteWorkers, fast: bool) -> io::Result<Vec<Value>> {
     let mut out = Vec::new();
     for task in tasks {
         out.push(task.await.map_err(fail)??);
+    }
+    Ok(out)
+}
+
+/// Sequential, uncontended usage samples checked against the seed oracle.
+async fn usage_samples(
+    workers: &SqliteWorkers,
+    server: &TlsApiServer,
+    ca: &[u8],
+    cookie: &str,
+    product: &std::path::Path,
+    expected: &Value,
+) -> io::Result<Vec<Value>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut out = Vec::new();
+    for _ in 0..9 {
+        for operation in ["usage_account", "usage_all"] {
+            let (service_ms, value) = workers
+                .read(move |db| {
+                    let started = Instant::now();
+                    let value = if operation == "usage_account" {
+                        json!(usage::account(db, OWNER)?)
+                    } else {
+                        let all = usage::all(db)?;
+                        assert_eq!(all.len(), 1);
+                        json!(all[0].usage)
+                    };
+                    Ok((started.elapsed().as_secs_f64() * 1000., value))
+                })
+                .await
+                .map_err(fail)?;
+            if &value != expected {
+                return Err(fail(format!("{operation} {value} != {expected}")));
+            }
+            out.push(json!({"operation":operation,"service_ms":service_ms}));
+        }
+        let started = Instant::now();
+        let mut stream = tls_connect(server.address(), ca, "localhost").await?;
+        stream
+            .write_all(format!("GET /me/usage HTTP/1.1\r\nHost: localhost\r\nCookie: __Host-sylux={cookie}\r\nAccept: application/json\r\nConnection: close\r\n\r\n").as_bytes())
+            .await?;
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await?;
+        let http_ms = started.elapsed().as_secs_f64() * 1000.;
+        let split = bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| fail("incomplete usage response"))?;
+        if !bytes.starts_with(b"HTTP/1.1 200") {
+            return Err(fail("usage request failed"));
+        }
+        let body: Value = serde_json::from_slice(&bytes[split + 4..]).map_err(fail)?;
+        if &body != expected {
+            return Err(fail(format!("http usage {body} != {expected}")));
+        }
+        out.push(json!({"operation":"usage_http","http_ms":http_ms}));
+        let payloads = sylux::persistence::payload::PayloadStore::open(product).map_err(fail)?;
+        let started = Instant::now();
+        payloads.volume_space().map_err(fail)?;
+        out.push(json!({"operation":"volume_space","service_ms":started.elapsed().as_secs_f64() * 1000.}));
     }
     Ok(out)
 }
@@ -374,6 +437,11 @@ async fn main() -> io::Result<()> {
             match command.as_deref() {
                 Some("probes") | Some("probes-fast") => {
                     emit(json!({"event":"probes","samples":probes(&workers, command.as_deref() == Some("probes-fast")).await?}))?
+                }
+                Some("usage") => {
+                    let ca = fs::read(&tls.ca_der)?;
+                    let cookie = seeded["sessions"][0]["cookie"].as_str().ok_or_else(|| fail("session"))?;
+                    emit(json!({"event":"usage","samples":usage_samples(&workers, &server, &ca, cookie, &product, &seeded["expectations"]["usage"]).await?}))?
                 }
                 Some("stop") | None => break,
                 _ => return Err(fail("unknown fixture command")),
