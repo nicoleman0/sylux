@@ -204,6 +204,10 @@ fn symlink_payload_and_destination_are_refused() {
     fs::remove_dir_all(&c.target).unwrap();
     std::os::unix::fs::symlink(&c.source, &c.target).unwrap();
     failed(c.run(), "destination_symlink");
+    failed(
+        c.run_to(Path::new(&format!("{}/", c.target.display()))),
+        "destination_symlink",
+    );
 }
 #[test]
 fn unsafe_component_cannot_escape_target() {
@@ -409,4 +413,45 @@ fn existing_empty_target_is_accepted_and_source_alias_is_refused() {
         .output()
         .unwrap();
     failed(o, "export_source_symlink");
+}
+
+#[test]
+fn destination_write_failure_is_distinct_from_payload_damage() {
+    use std::io::{self, Write};
+    use sylux::persistence::payload::{ExportCopyError, PayloadVerifier};
+    struct FullDisk;
+    impl Write for FullDisk {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected destination full"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut c = Case::new();
+    let blob = c.file(ROOT, "file", b"content");
+    let error = PayloadVerifier::open(&c.source)
+        .unwrap()
+        .copy_verified(&blob, 7, Sha256::digest(b"content").into(), &mut FullDisk)
+        .unwrap_err();
+    assert!(
+        matches!(error, ExportCopyError::Destination(e) if e.to_string() == "injected destination full")
+    );
+}
+
+#[test]
+fn existing_empty_destination_with_unwritable_parent() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut c = Case::new();
+    c.file(ROOT, "file", b"content");
+    let parent = c.dir.join("parent");
+    fs::create_dir(&parent).unwrap();
+    let target = parent.join("target");
+    fs::create_dir(&target).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = c.run_to(&target);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(fs::read(target.join("file")).unwrap(), b"content");
+    assert_eq!(fs::read_dir(target).unwrap().count(), 1);
 }

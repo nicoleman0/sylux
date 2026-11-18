@@ -33,11 +33,11 @@ would consider them aliases.
 
 Every payload is checked against its recorded length and SHA-256 while copying
 through a 64 KiB buffer. Metadata is copied to a temporary private directory
-beside the destination before SQLite opens it, so SQLite cannot create or change
+inside the destination before SQLite opens it, so SQLite cannot create or change
 source journals or shared-memory files. No migrations or startup recovery run.
 Reading may update filesystem access times. Temporary metadata is removed when
 the command exits normally, including error exits; a killed process may leave a
-`.sylux-export-*` directory beside the destination. Remove that private directory
+`.sylux-export-*` directory inside the destination. Remove that private directory
 once no export process is using it.
 
 Success prints `export_complete files=N` and exits zero. Any failure exits
@@ -46,3 +46,26 @@ A failure can leave directories, complete files and a partial or corrupt file in
 the destination. Treat the entire destination as incomplete, remove it yourself,
 and retry into an absent or empty destination after resolving the error. Do not
 use a failed export as a backup. The source is never repaired by this command.
+
+## Docker Compose
+
+Use a release that includes `admin export`. From the installation directory,
+stop the service and create an empty private directory on the host. The one-shot
+container runs as UID/GID 10001 and needs write access to that directory.
+
+```sh
+docker compose stop || exit 1
+RUNNING=$(docker compose ps --status running -q) || exit 1
+test -z "$RUNNING" || exit 1
+sudo install -d -o 10001 -g 10001 -m 0700 /srv/alice-export || exit 1
+docker compose run --rm -T --volume /srv/alice-export:/export sylux \
+  admin export --root /var/lib/sylux --handle alice --destination /export
+```
+
+Choose an empty destination outside the source root and replace `alice` with
+the account handle. Compose supplies the usual source mount; export reads its
+metadata and payloads without changing them, including WAL and SHM files.
+The existing writer lock is opened read-write, so keep the source bind mount
+writable even though export does not modify its contents.
+The export is private account data. See [Docker beta install](docker-beta.md)
+for the service configuration and restart procedure.

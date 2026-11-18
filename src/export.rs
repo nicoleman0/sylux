@@ -1,10 +1,18 @@
 //! Offline account export. Source ownership is retained until every reader closes.
-use crate::persistence::{ownership, payload::PayloadVerifier, root, schema};
+use crate::persistence::{
+    ownership,
+    payload::{ExportCopyError, PayloadVerifier},
+    root, schema,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use rustix::fs::{self as rfs, Dir, Mode, OFlags};
 use std::{
+    collections::HashSet,
     fs::{self, File},
-    os::unix::fs::DirBuilderExt,
+    os::unix::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::DirBuilderExt,
+    },
     path::{Path, PathBuf},
 };
 
@@ -38,15 +46,28 @@ pub fn export_account(source: &Path, handle: &str, target: &Path) -> Result<u64,
     if target.starts_with(&source) || source.starts_with(&target) {
         return Err("export_destination_overlaps_source".into());
     }
+    match fs::symlink_metadata(&target) {
+        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => (),
+        Ok(_) => return Err("export_destination_not_directory".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&target)
+            .map_err(|_| "export_destination_create_failed")?,
+        Err(_) => return Err("export_destination_unavailable".into()),
+    }
+    let out = open_dir(&target)?;
+    for item in Dir::read_from(&out).map_err(|_| "export_destination_unreadable")? {
+        let item = item.map_err(|_| "export_destination_unreadable")?;
+        if !matches!(item.file_name().to_bytes(), b"." | b"..") {
+            return Err("export_destination_not_empty".into());
+        }
+    }
     let manifest = root::read_manifest(&source).map_err(|_| "export_binding_invalid")?;
     root::verify_protected_material(&source).map_err(|_| "export_binding_invalid")?;
     let mut token = [0; 16];
     getrandom::fill(&mut token).map_err(|_| "export_random_failed")?;
     let suffix: String = token.iter().map(|b| format!("{b:02x}")).collect();
-    let scratch = target
-        .parent()
-        .ok_or("export_destination_invalid")?
-        .join(format!(".sylux-export-{suffix}"));
+    let scratch = target.join(format!(".sylux-export-{suffix}"));
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&scratch)
@@ -75,26 +96,23 @@ pub fn export_account(source: &Path, handle: &str, target: &Path) -> Result<u64,
         .ok_or("export_account_not_found")?;
     let entry: String = db.query_row("SELECT entry_id FROM entry WHERE owner_account_id=?1 AND parent_id IS NULL AND kind='folder' AND state='active'", [&owner], |r| r.get(0))
         .map_err(|_| "export_account_root_invalid")?;
-    match fs::symlink_metadata(&target) {
-        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => (),
-        Ok(_) => return Err("export_destination_not_directory".into()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&target)
-            .map_err(|_| "export_destination_create_failed")?,
-        Err(_) => return Err("export_destination_unavailable".into()),
-    }
-    let out = open_dir(&target)?;
-    for item in Dir::read_from(&out).map_err(|_| "export_destination_unreadable")? {
-        let item = item.map_err(|_| "export_destination_unreadable")?;
-        if !matches!(item.file_name().to_bytes(), b"." | b"..") {
-            return Err("export_destination_not_empty".into());
-        }
-    }
-    walk(db, &source, &owner, &entry, &out, 0)
+    let scratch_name = scratch.0.file_name().ok_or("export_destination_invalid")?;
+    walk(
+        db,
+        &source,
+        &owner,
+        &entry,
+        &out,
+        0,
+        Some(scratch_name.as_bytes()),
+    )
 }
 
 fn absolute_target(target: &Path) -> Result<PathBuf, String> {
+    let bytes = target.as_os_str().as_bytes();
+    let end = bytes.iter().rposition(|b| *b != b'/').map_or(1, |i| i + 1);
+    let trimmed = std::ffi::OsString::from_vec(bytes[..end.min(bytes.len())].to_vec());
+    let target = Path::new(&trimmed);
     if fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("export_destination_symlink".into());
     }
@@ -126,6 +144,7 @@ fn walk(
     parent: &str,
     out: &File,
     depth: u32,
+    scratch: Option<&[u8]>,
 ) -> Result<u64, String> {
     if depth > 128 {
         return Err("export_namespace_depth_invalid".into());
@@ -139,6 +158,7 @@ fn walk(
         .query(params![owner, parent])
         .map_err(|_| "export_metadata_unreadable")?;
     let mut count = 0;
+    let mut names = HashSet::new();
     while let Some(row) = rows.next().map_err(|_| "export_metadata_unreadable")? {
         let id: String = row.get(0).map_err(|_| "export_metadata_invalid")?;
         let name: String = row.get(1).map_err(|_| "export_metadata_invalid")?;
@@ -146,12 +166,12 @@ fn walk(
         if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
             return Err("export_name_invalid".into());
         }
+        names.insert(name.clone());
         let kind: String = row.get(2).map_err(|_| "export_metadata_invalid")?;
         let name_error = |e| format!("export_name_unrepresentable_or_collision name={name:?}: {e}");
         if kind == "folder" {
             rfs::mkdirat(out, name.as_str(), Mode::RUSR | Mode::WUSR | Mode::XUSR)
                 .map_err(name_error)?;
-            exact_name(out, &name)?;
             let child = rfs::openat(
                 out,
                 name.as_str(),
@@ -159,7 +179,7 @@ fn walk(
                 Mode::empty(),
             )
             .map_err(|_| "export_folder_open_failed")?;
-            count += walk(db, source, owner, &id, &File::from(child), depth + 1)?;
+            count += walk(db, source, owner, &id, &File::from(child), depth + 1, None)?;
         } else if kind == "file" {
             let blob: String = row.get(3).map_err(|_| "export_revision_missing")?;
             let length: i64 = row.get(4).map_err(|_| "export_metadata_invalid")?;
@@ -179,36 +199,37 @@ fn walk(
                 Mode::RUSR | Mode::WUSR,
             )
             .map_err(name_error)?;
-            exact_name(out, &name)?;
             let verifier =
                 PayloadVerifier::open(source).map_err(|_| "export_payload_store_invalid")?;
             let mut file = File::from(fd);
             verifier
                 .copy_verified(&blob, length, digest, &mut file)
-                .map_err(|fault| {
-                    format!(
+                .map_err(|error| match error {
+                    ExportCopyError::Payload(fault) => format!(
                         "export_payload_invalid reason={}",
                         crate::admin::PayloadReport::fault_label(fault)
-                    )
+                    ),
+                    ExportCopyError::Destination(error) => format!("export_write_failed: {error}"),
                 })?;
-            file.sync_all().map_err(|_| "export_write_failed")?;
+            file.sync_all()
+                .map_err(|error| format!("export_write_failed: {error}"))?;
             count += 1;
         } else {
             return Err("export_metadata_invalid".into());
         }
     }
-    Ok(count)
-}
-fn exact_name(parent: &File, name: &str) -> Result<(), String> {
-    for item in Dir::read_from(parent).map_err(|_| "export_destination_unreadable")? {
-        if item
-            .map_err(|_| "export_destination_unreadable")?
-            .file_name()
-            .to_bytes()
-            == name.as_bytes()
-        {
-            return Ok(());
+    for item in Dir::read_from(out).map_err(|_| "export_destination_unreadable")? {
+        let item = item.map_err(|_| "export_destination_unreadable")?;
+        let actual = item.file_name().to_bytes();
+        if matches!(actual, b"." | b"..") || scratch == Some(actual) {
+            continue;
+        }
+        if let Ok(name) = std::str::from_utf8(actual) {
+            names.remove(name);
         }
     }
-    Err(format!("export_name_spelling_changed name={name:?}"))
+    if let Some(name) = names.iter().next() {
+        return Err(format!("export_name_spelling_changed name={name:?}"));
+    }
+    Ok(count)
 }

@@ -553,6 +553,18 @@ impl From<PayloadFault> for PayloadError {
     }
 }
 
+#[derive(Debug)]
+pub enum ExportCopyError {
+    Payload(PayloadFault),
+    Destination(std::io::Error),
+}
+
+impl From<PayloadFault> for ExportCopyError {
+    fn from(fault: PayloadFault) -> Self {
+        Self::Payload(fault)
+    }
+}
+
 /// Read-only access to the payload directory for offline verification.
 /// Unlike `PayloadStore`, it never creates a directory.
 pub struct PayloadVerifier {
@@ -579,7 +591,7 @@ impl PayloadVerifier {
         length: u64,
         digest: [u8; 32],
         output: &mut impl Write,
-    ) -> Result<(), PayloadFault> {
+    ) -> Result<(), ExportCopyError> {
         validate_id(blob_id).map_err(|_| PayloadFault::InvalidId)?;
         let shard = open_directory(&self.payloads, &blob_id[..2]).map_err(fault_from_error)?;
         let fd = fs::openat(
@@ -594,10 +606,10 @@ impl PayloadVerifier {
             || stat.st_nlink != 1
             || stat.st_mode & 0o777 != 0o600
         {
-            return Err(PayloadFault::NotPrivateFile);
+            return Err(PayloadFault::NotPrivateFile.into());
         }
         if stat.st_size < 0 || stat.st_size as u64 != length {
-            return Err(PayloadFault::LengthMismatch);
+            return Err(PayloadFault::LengthMismatch.into());
         }
         let mut file = File::from(fd);
         let mut hasher = Sha256::new();
@@ -612,19 +624,19 @@ impl PayloadVerifier {
             }
             copied += n as u64;
             if copied > length {
-                return Err(PayloadFault::LengthMismatch);
+                return Err(PayloadFault::LengthMismatch.into());
             }
             hasher.update(&buffer[..n]);
             output
                 .write_all(&buffer[..n])
-                .map_err(|_| PayloadFault::Io("export_write_failed"))?;
+                .map_err(ExportCopyError::Destination)?;
         }
         if copied != length {
-            return Err(PayloadFault::LengthMismatch);
+            return Err(PayloadFault::LengthMismatch.into());
         }
         let actual: [u8; 32] = hasher.finalize().into();
         if actual != digest {
-            return Err(PayloadFault::DigestMismatch);
+            return Err(PayloadFault::DigestMismatch.into());
         }
         Ok(())
     }

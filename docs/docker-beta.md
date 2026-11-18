@@ -205,6 +205,11 @@ files with no metadata row are not checked here; startup reconciliation covers
 them. The command leaves any existing `-wal` unchanged and may create an empty
 `-wal` and a `-shm` in `metadata/`.
 
+## Export an account
+
+For a plain-file copy of one account, stop Sylux and follow the
+[Docker Compose export procedure](export.md#docker-compose).
+
 ## 5. Upgrade and roll back
 
 Keep the current release archive, `.env`, and local image ID. Stop the service and make a verified pre-upgrade archive as in step 4 **without starting it again**. Download and verify all assets for the new release into a new directory as in step 1, then load and inspect its version tag. Copy the prior `.env` into the new directory, set `SYLUX_IMAGE` to the newly inspected local ID, run `docker compose config -q`, and start there with `docker compose up -d`. Check sign-in and known file downloads.
