@@ -179,9 +179,8 @@ h1:focus, h2:focus { outline: none; }
 .account-role { display: block; font-size: var(--type-meta); color: var(--muted-foreground); margin-top: 2px; }
 .account-actions { display: flex; flex-wrap: wrap; gap: 2px; justify-content: flex-end; min-width: 0; }
 .account-you { margin-left: 8px; font-size: var(--type-meta); color: var(--muted-foreground); }
-.account-head > .account-usage { font-size: var(--type-meta); }
+.account-head > .account-usage { font-size: var(--type-meta); text-align: right; }
 .account-row > .account-usage { font-size: var(--type-meta); color: var(--muted-foreground); text-align: right; }
-.account-head > .account-usage { text-align: right; }
 .account-usage-summary { display: none; font-size: var(--type-meta); color: var(--muted-foreground); }
 .volume-space { margin-top: 4px; font-size: var(--type-meta); color: var(--muted-foreground); }
 .usage-details dd, .account-row > .account-usage, .volume-value { font-family: var(--font-data); }

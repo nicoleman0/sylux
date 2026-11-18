@@ -363,6 +363,7 @@
   let ownUsage = $state<Usage | null>(null);
   let ownUsageState = $state<UsageState>('loading');
   let ownUsageRequest = 0;
+  let ownUsageRetrying = $state(false);
   let allUsage = $state<AllUsage | null>(null);
   let allUsageState = $state<UsageState>('loading');
   let allUsageRequest = 0;
@@ -1251,6 +1252,18 @@
       notice = authView === 'setup' ? 'Setup could not be completed. Check the authorization and account details, then try again.' : 'Sign-in could not be completed. Check the details and try again.';
       password = '';
     } finally { if (generation === sessionGeneration) authBusy = false; }
+  }
+
+  async function retryOwnUsage(): Promise<void> {
+    if (ownUsageRetrying) return;
+    const trigger = document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
+    const hadFocus = !!trigger && trigger === document.querySelector('#usage-heading ~ .refresh-button');
+    ownUsageRetrying = true;
+    await loadOwnUsage();
+    ownUsageRetrying = false;
+    await tick();
+    if (ownUsageState === 'ready') document.getElementById('usage-heading')?.focus();
+    else if (hadFocus) (document.querySelector('#usage-heading ~ .refresh-button') as HTMLElement | null)?.focus();
   }
 
   async function loadOwnUsage(): Promise<void> {
@@ -2734,7 +2747,7 @@
           <section class="account-content">
             <h1 id="account-title" tabindex="-1">Account</h1>
             <section class="settings-section"><h2>Your account</h2><dl class="account-details"><dt>Account name</dt><dd>{user.handle}</dd><dt>Role</dt><dd>{user.role === 'administrator' ? 'Administrator' : 'User'}</dd></dl></section>
-            <section class="settings-section" aria-labelledby="usage-heading" aria-busy={ownUsageState === 'loading'}><h2 id="usage-heading">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p><RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" busy={false} onclick={() => void loadOwnUsage()} />{/if}</section>
+            <section class="settings-section" aria-labelledby="usage-heading" aria-busy={ownUsageState === 'loading'}><h2 id="usage-heading" tabindex="-1">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p>{/if}{#if ownUsageState === 'error' || ownUsageRetrying}<RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" busy={ownUsageRetrying} onclick={() => void retryOwnUsage()} />{/if}</section>
             <section class="settings-section account-setting-row"><div><h2>Password</h2><p class="section-description">Change the password you use to sign in.</p></div><Button variant="outline" onclick={(event) => { passwordDialogTrigger = event.currentTarget; accountNotice = ''; currentPassword = ''; newPassword = ''; changePasswordOpen = true; }}>Change password</Button></section>
             <section class="settings-section account-setting-row"><div><h2>Session</h2><p class="section-description">Sign out of this browser.</p></div><Button variant="outline" disabled={loggingOut} onclick={signOut}>Sign out</Button></section>
             {#if accountNotice && !changePasswordOpen}<p role="status" class="form-notice">{accountNotice}</p>{/if}

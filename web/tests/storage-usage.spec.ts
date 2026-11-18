@@ -81,6 +81,42 @@ test('failed usage reads as unknown, never zero, and can be retried', async ({ p
   await expect(storage.getByRole('alert')).toHaveCount(0);
 });
 
+for (const theme of ['light', 'dark'] as const) test(`pending retry keeps keyboard focus on a busy trigger without duplicate requests ${theme}`, async ({ page }) => {
+  await page.emulateMedia({ colorScheme: theme, reducedMotion: 'reduce' });
+  let calls = 0;
+  let release!: () => void;
+  let held = new Promise<void>(resolve => { release = resolve; });
+  let outcome: 'fail' | 'ok' = 'fail';
+  const requested = await signIn(page, 'user', '/#account', async route => {
+    calls++;
+    if (calls > 1) await held;
+    return outcome === 'fail' ? route.fulfill({ status: 500 }) : route.fulfill({ json: { files_bytes: 1024, trash_bytes: 0 } });
+  }, route => route.fulfill({ status: 500 }));
+  const storage = page.getByRole('region', { name: 'Storage' });
+  const retry = storage.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
+  await retry.focus();
+  await page.keyboard.press('Enter');
+  await expect(retry).toHaveAttribute('aria-busy', 'true');
+  await expect(retry).toBeDisabled();
+  await expect(retry).toBeFocused();
+  await page.keyboard.press('Enter');
+  expect(requested).toEqual(['/me/usage', '/me/usage']);
+  release();
+  await expect(retry).toHaveAttribute('aria-busy', 'false');
+  await expect(storage.getByRole('alert')).toHaveText('Could not load storage use.');
+  await expect(retry).toBeFocused();
+  held = new Promise<void>(resolve => { release = resolve; });
+  outcome = 'ok';
+  await page.keyboard.press('Enter');
+  await expect(retry).toHaveAttribute('aria-busy', 'true');
+  release();
+  await expect(storage.getByRole('definition')).toHaveText(['1 KB', '0 B']);
+  await expect(retry).toHaveCount(0);
+  await expect(storage.getByRole('heading', { name: 'Storage' })).toBeFocused();
+  expect(requested).toHaveLength(3);
+});
+
 test('administrator free space and account figures fall back to unknown', async ({ page }) => {
   await signIn(page, 'administrator', '/#settings', route => route.fulfill({ status: 500 }), route => route.fulfill({ json: { volume: null, accounts: [] } }));
   await expect(page.getByText(/^Data volume:/)).toHaveText('Data volume: Unknown');
