@@ -37,8 +37,9 @@ this research. Proposed behavior begins in the following section.
 | --- | --- |
 | Account and ownership | [Schema](../../migrations/sqlite/0001_s1.sql) gives accounts an `account_id`, unique handle, `user` or `administrator` role, enabled flag and credential epoch. Entries reference `owner_account_id`. External names must never replace that owner key. |
 | Local sign-in | [auth.rs](../../src/http/auth.rs), `login`, checks password and enabled state, then rechecks enabled state, expected epoch and verifier inside session insertion. A future external callback needs the equivalent current-state check after network I/O. |
-| Session validity | [authz.rs](../../src/domain/authz.rs), `validate_session`, requires an enabled account, matching epoch, unrevoked session, and live idle/absolute deadlines. Current constants are 30 minutes idle and 12 hours absolute. They do not establish an upstream-disablement guarantee. |
+| Session validity | [authz.rs](../../src/domain/authz.rs), `validate_session`, requires an enabled account, matching epoch, unrevoked session, and live idle/absolute deadlines. The idle and absolute constants are 30 minutes and 12 hours respectively; the idle deadline is never refreshed, so the effective lifetime is fixed at 30 minutes from login. These deadlines do not establish an upstream-disablement guarantee. |
 | Authority change | [accounts.rs](../../src/http/accounts.rs), `change_authority`, authorizes the actor, guards the last enabled administrator, updates authority/epoch and revokes target sessions in one transaction. It rejects self-disable/self-demotion. Preserve this ordering. |
+| Password reset and promotion | [accounts.rs](../../src/http/accounts.rs), `reset`, installs a password verifier for an enabled ordinary account; `change_authority` can promote an enabled account. The proposed first slice must reject both reset and promotion for external-mode accounts. |
 | Storage admission | [coordinator.rs](../../src/domain/coordinator.rs), `admit_current`, `revalidate_current` and durable admission/publication, validates the session and principal again at relevant boundaries. Keep serving SQL on [SqliteWorkers](../../src/persistence/sqlite.rs); network I/O stays outside transactions. Uncertain mutations retain their existing reconciliation rules. |
 | Private files | [Isolation contract](../../tests/contract/isolation.rs), `a03_unrelated_and_admin_route_matrix_denies_owner_private_state`, covers owner, unrelated user, administrator and anonymous routes. Administrator role is not permission to read another user's files. |
 | Recovery and audit | [Recovery guide](../docker-beta.md#recover-administrator-access) and [recovery contract](../../tests/integration/admin_recovery.rs) reset/enable an existing administrator and revoke its sessions without reopening setup or changing other accounts/files. The schema's current `event` table stores actor, action, time and outcome; it is not a complete identity audit trail. |
@@ -85,7 +86,9 @@ account creation:
    SYL-86 callback or SYL-87 bind. The key must exactly match the pending approval.
    For an existing local account, also require recent local-password proof tied
    to that same browser and account. Administrator approval alone cannot silently
-   attach an identity to an existing user's private files.
+   attach an identity to an existing user's private files. This protects against
+   mistaken or claimant-driven links, not a malicious administrator: today an
+   administrator can reset an ordinary user's password and supply that proof.
 3. Use a single-use, browser-bound approval transaction, proposed five-minute
    lifetime, bounded count and no identity/secret in its URL. Recheck the approving
    administrator's current authority, target state, link uniqueness and approval
@@ -107,7 +110,9 @@ a separate reviewed recovery decision, not weaker linking. Local administrator
 accounts cannot be linked or converted in the first slice.
 
 For implementation, distinguish local and external credential modes explicitly;
-a nullable password field alone is not evidence of the intended policy. Store
+a nullable password field alone is not evidence of the intended policy. The existing
+`POST /accounts/{id}/reset` and role-change promotion route must enforce the
+external-mode rejections above. Store
 session origin/link generation so link revocation cannot leave sessions live.
 This describes constraints, not a migration/schema design.
 
@@ -146,7 +151,8 @@ Proposed first qualification envelope, **not a measured guarantee**:
 - External access expires at a fixed deadline no later than **15 minutes from
   the start of fresh upstream authentication**. Activity and login retries cannot
   slide it. Keep the idle limit no greater than that deadline. Do not reuse the
-  current 12-hour local absolute lifetime for external sessions.
+  current 12-hour local absolute constant for external sessions; the current
+  non-sliding idle deadline already limits local sessions to 30 minutes.
 - Renew only with new upstream proof and current local admission checks. OIDC
   requests fresh authentication (`max_age=0`), validates `auth_time` within the
   bounded attempt, and qualifies provider eligibility enforcement. Direct LDAP
@@ -156,7 +162,8 @@ Proposed first qualification envelope, **not a measured guarantee**:
   attempt start to cap access; accepted token clock tolerance cannot extend it.
 - Let **P** be the qualified worst-case delay from authoritative upstream
   disablement to denial of *all* new authentication, including replication,
-  federation caches, existing IdP SSO and authentication already in flight.
+  federation caches, alternative authentication paths, existing IdP SSO and
+  authentication already in flight.
   Propose **P ≤ 5 minutes** and therefore **P + 15 ≤ 20 minutes** to loss of
   new authorized requests. Operator acceptance and fixture evidence are required.
   A successful login just before P is the worst case to test.
@@ -261,11 +268,11 @@ commands, versions, deadlines, request outcomes, checksums and cleanup evidence.
 | ID | Future action | Expected result |
 | --- | --- | --- |
 | L1 Approved sign-in | Approve A's exact key; authenticate via actual Keycloak, reload, upload and download a known fixture. Try unknown and same-email keys. | Only approved A gets its account; exact file bytes survive reload. Unknown/collision cases create no account/session. Repeat SYL-86 V1/V3/V4 callback, replay and transport controls. |
-| L2 Link and continuity | Give A an existing local account/file; approve conversion, prove both credentials and race two activation callbacks. Rename upstream, then delete/recreate the same name. Try B's browser/proof, reused approval, changed issuer and conflicting link. | One activation, same account/owner ID and bytes; old local password/cookies fail. All mismatches deny without reassignment. Recreated identity cannot inherit A's files. Test GUID/UUID encoding if direct LDAP is approved. |
+| L2 Link and continuity | Give A an existing local account/file; approve conversion, prove both credentials and race two activation callbacks. Rename upstream, then delete/recreate the same name. Try administrator reset of converted A, B's browser/proof, reused approval, changed issuer and conflicting link. | One activation, same account/owner ID and bytes; old local password/cookies fail. Administrator reset of converted A is rejected and installs no verifier. All mismatches deny without reassignment. Recreated identity cannot inherit A's files. Test GUID/UUID encoding if direct LDAP is approved. |
 | L3 Local disable race | Hold token exchange or LDAP bind after proof starts. Disable A locally, then release it. Also race disable versus session insertion, disable/re-enable during proof and approver demotion versus link commit in both orders. | Disabled state wins at the next authorization boundary; no usable issued session. Earlier sessions are revoked. Demoted approver cannot activate the link. No partial account/link effect or false success audit event on rejection. |
-| L4 Upstream disable and outage | Disable A upstream at recorded time while A stays active; attempt fresh authentication repeatedly, including an attempt just before P, a held callback and existing IdP SSO. Stop/delay provider/directory, vary bridge caches and AD replication. | Measure P and final new-request denial against P + 15 minutes, proposed ≤20. No renewal during outage or sliding deadline. If stale fresh proofs continue beyond P, qualification fails. Inspect open downloads separately and state cancellation limits. |
-| L5 Deprovision/unlink | Revoke A's link, remove provider configuration and re-enable A locally without relinking. Try old sessions, pending approvals, old password and same-name replacement identity. | No access revival. Files/Trash/checksums and owner ID remain; B receives nothing. Explicit approved restoration of the same key requires fresh proof. |
-| L6 Recovery and last admin | Make external services unavailable/saturated. Use R's local login/logout; rehearse documented host recovery after stop/verified backup. Concurrently disable/demote two local admins through real HTTP. | Local paths stay usable; reset invalidates old password/cookies, keeps setup closed and files unchanged. Authority race preserves an enabled administrator and rejects revoked actors. Future external paths also preserve a local recovery administrator. |
+| L4 Upstream disable and outage | Disable A upstream at recorded time while A stays active; attempt fresh authentication repeatedly, including an attempt just before P, a held callback and existing IdP SSO. Stop/delay provider/directory, vary bridge caches, alternative authentication paths, AD replication and directory controller/site selection. | Measure P and final new-request denial against P + 15 minutes, proposed ≤20. No renewal during outage or sliding deadline. If stale fresh proofs continue beyond P, qualification fails. Inspect open downloads separately and state cancellation limits. Check a resumable upload spanning expiry and resumption under a fresh session. |
+| L5 Deprovision/unlink | Revoke A's link, remove provider configuration and re-enable A locally without relinking. Try old sessions, pending approvals, old password, administrator reset and same-name replacement identity. | Reset is rejected and installs no verifier; no access revival. Files/Trash/checksums and owner ID remain; B receives nothing. Explicit approved restoration of the same key requires fresh proof. |
+| L6 Recovery and last admin | Make external services unavailable/saturated. Use R's local login/logout; rehearse documented host recovery after stop/verified backup. Attempt to promote external A; concurrently disable/demote two local admins through real HTTP. | Local paths stay usable; reset invalidates old password/cookies, keeps setup closed and files unchanged. Promotion of external A is rejected; the authority race preserves an enabled administrator and rejects revoked actors. Future external paths also preserve a local recovery administrator. |
 | L7 Two-user isolation | A/B each create private live and trashed files. Try guessed entry/revision/upload/mutation/removal IDs across list, download/preview, replace, move, trash, restore, retry and reconcile routes, also as R. | Neither user nor R can read/mutate the other's private state; use existing isolation contract's status/privacy expectations. Each owner control succeeds with exact bytes. Repeat after rename, link activation, revocation and reapproval. |
 | L8 MFA/logout/audit | Require provider MFA, attempt password-only/unenrolled and insufficient/missing assurance paths; sign out with provider up/down. Inspect restricted audit, app/proxy logs and responses, including failure floods. | Required policy cannot be bypassed; local logout always rejects old cookie. Provider logout reported separately. Events are complete/minimal, no credentials or raw identities leak, and bounded failure logging preserves local availability. |
 
@@ -287,6 +294,7 @@ Unanswered inputs before implementation approval:
   credentials fit, and who can verify a person's identity for linking/recovery.
 - Accepted upstream-disablement delay, whether the proposed 20-minute envelope
   and frequent reauthentication are tolerable, directory replication/cache bounds,
+  directory controller/site selection, alternative authentication and cache paths,
   and the required treatment of already-open downloads. No bound is qualified yet.
 - Required MFA policy/assurance, local administrator custody, recovery rehearsals,
   audit retention and disabled-account storage/erasure policy.
