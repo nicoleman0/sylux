@@ -572,6 +572,63 @@ impl PayloadVerifier {
         Ok(Self { payloads })
     }
 
+    /// Verify the exact bytes written, without creating anything in the payload store.
+    pub fn copy_verified(
+        &self,
+        blob_id: &str,
+        length: u64,
+        digest: [u8; 32],
+        output: &mut impl Write,
+    ) -> Result<(), PayloadFault> {
+        validate_id(blob_id).map_err(|_| PayloadFault::InvalidId)?;
+        let shard = open_directory(&self.payloads, &blob_id[..2]).map_err(fault_from_error)?;
+        let fd = fs::openat(
+            &shard,
+            blob_id,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| PayloadFault::Missing)?;
+        let stat = fs::fstat(&fd).map_err(|_| PayloadFault::Io("payload_stat_failed"))?;
+        if !FileType::from_raw_mode(stat.st_mode).is_file()
+            || stat.st_nlink != 1
+            || stat.st_mode & 0o777 != 0o600
+        {
+            return Err(PayloadFault::NotPrivateFile);
+        }
+        if stat.st_size < 0 || stat.st_size as u64 != length {
+            return Err(PayloadFault::LengthMismatch);
+        }
+        let mut file = File::from(fd);
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut copied = 0u64;
+        loop {
+            let n = file
+                .read(&mut buffer)
+                .map_err(|_| PayloadFault::Io("payload_read_failed"))?;
+            if n == 0 {
+                break;
+            }
+            copied += n as u64;
+            if copied > length {
+                return Err(PayloadFault::LengthMismatch);
+            }
+            hasher.update(&buffer[..n]);
+            output
+                .write_all(&buffer[..n])
+                .map_err(|_| PayloadFault::Io("export_write_failed"))?;
+        }
+        if copied != length {
+            return Err(PayloadFault::LengthMismatch);
+        }
+        let actual: [u8; 32] = hasher.finalize().into();
+        if actual != digest {
+            return Err(PayloadFault::DigestMismatch);
+        }
+        Ok(())
+    }
+
     pub fn verify(
         &self,
         blob_id: &str,

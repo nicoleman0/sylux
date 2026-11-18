@@ -59,6 +59,11 @@ path = "tests/integration/admin_recovery.rs"
 required-features = ["test-harness"]
 
 [[test]]
+name = "integration_export"
+path = "tests/integration/export.rs"
+required-features = ["test-harness"]
+
+[[test]]
 name = "integration_payload_verify"
 path = "tests/integration/payload_verify.rs"
 required-features = ["test-harness"]

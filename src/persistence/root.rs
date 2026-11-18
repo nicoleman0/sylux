@@ -228,6 +228,50 @@ pub fn open_bound_database_read_only(
     open_bound_database_as(root, busy_timeout, sqlite::ConnectionRole::Reader)
 }
 
+/// Copy metadata under the caller-held writer lock, so SQLite never touches source sidecars.
+/// `scratch` must be a private, empty directory outside the source root.
+pub fn snapshot_bound_database(root: &Path, scratch: &Path) -> Result<BoundDatabase, BindingError> {
+    use std::io;
+    use std::os::unix::fs::OpenOptionsExt;
+    let root_fd = open_root_directory(root)?;
+    let metadata = open_subdirectory(&root_fd, METADATA_DIR)
+        .map_err(|_| BindingError::Io("metadata_open_failed"))?;
+    for name in [DB_NAME.to_owned(), format!("{DB_NAME}-wal")] {
+        let fd = match fs::openat(
+            &metadata,
+            name.as_str(),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(e) if e == rustix::io::Errno::NOENT && name != DB_NAME => continue,
+            Err(_) => return Err(BindingError::Io("snapshot_source_unavailable")),
+        };
+        let stat = fs::fstat(&fd).map_err(|_| BindingError::Io("snapshot_stat_failed"))?;
+        validate_private_regular(
+            &stat,
+            "database_not_regular",
+            "database_aliased",
+            "database_mode_not_0600",
+        )
+        .map_err(BindingError::DatabaseInvalid)?;
+        let mut input = File::from(fd);
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(scratch.join(&name))
+            .map_err(|_| BindingError::Io("snapshot_create_failed"))?;
+        io::copy(&mut input, &mut output).map_err(|_| BindingError::Io("snapshot_copy_failed"))?;
+    }
+    let connection = sqlite::open_reader(&scratch.join(DB_NAME), sqlite::DEFAULT_BUSY_TIMEOUT)
+        .map_err(|error| BindingError::DatabaseInvalid(connection_open_code(error)))?;
+    Ok(BoundDatabase {
+        connection,
+        _metadata: metadata,
+    })
+}
+
 fn open_bound_database_as(
     root: &Path,
     busy_timeout: Duration,

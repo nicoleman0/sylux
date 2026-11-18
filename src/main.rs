@@ -46,6 +46,30 @@ async fn main() -> ExitCode {
                 }
             }
             CommandKind::AdminVerifyPayloads => run_verify_payloads(&configuration),
+            CommandKind::AdminExport => {
+                match sylux::export::export_account(
+                    &configuration.root,
+                    configuration
+                        .admin_handle
+                        .as_deref()
+                        .expect("parser requires handle"),
+                    configuration
+                        .destination
+                        .as_deref()
+                        .expect("parser requires destination"),
+                ) {
+                    Ok(count) => {
+                        println!("export_complete files={count}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(reason) => {
+                        eprintln!(
+                            "sylux: {reason}; export failed; any newly written destination is incomplete"
+                        );
+                        ExitCode::FAILURE
+                    }
+                }
+            }
         },
         Err(error) => {
             eprintln!("sylux: {}", error.reason());

@@ -2,6 +2,7 @@ pub mod admin;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod export;
 pub mod http;
 pub mod persistence;
 

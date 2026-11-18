@@ -36,6 +36,8 @@ Not included: OIDC, shared folders, public sharing links and WebDAV.
 
 Docker is the primary option. Follow the [Docker beta guide](docs/docker-beta.md). It covers installing a versioned image, local accounts, private HTTPS access, backup and restore. [Native LXC installation](docs/lxc.md) is secondary and has separate qualification limits. Lost administrator credentials can be [recovered offline](docs/docker-beta.md#recover-administrator-access) with host access and the service stopped. The release image is 37 MB compressed, uses about 49 MiB of memory idle and 60 MiB under an upload workload, and is ready in under 0.1 seconds on a small x86_64 host; see [the measurements](docs/footprint.md) for the workload and limits.
 
+Export one account to a plain directory with the server stopped: [offline export](docs/export.md).
+
 ## Status and limits
 
 Sylux is in beta. Releases are [pre-releases](https://github.com/nicoleman0/sylux/releases). Functional tests do not establish physical power-loss durability or schema upgrade and downgrade support. Keep independent copies of important files.
