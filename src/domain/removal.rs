@@ -74,11 +74,11 @@ fn fingerprint(
             count += 1;
             let mut stmt = db.prepare("WITH RECURSIVE tree(id) AS (
             SELECT entry_id FROM entry WHERE entry_id=?1 AND owner_account_id=?2
-            UNION ALL SELECT e.entry_id FROM entry e JOIN tree t ON e.parent_id=t.id
+            UNION ALL SELECT e.entry_id FROM tree t CROSS JOIN entry e ON e.parent_id=t.id
             WHERE e.state='active' AND e.owner_account_id=?2
               AND NOT EXISTS(SELECT 1 FROM removal_member m WHERE m.entry_id=e.entry_id)
         ) SELECT e.entry_id,e.parent_id,e.original_name,e.kind,e.state,e.generation,e.current_revision_id
-          FROM entry e JOIN tree t ON t.id=e.entry_id ORDER BY e.entry_id")?;
+          FROM tree t CROSS JOIN entry e ON t.id=e.entry_id ORDER BY e.entry_id")?;
             let mut rows = stmt.query(params![root, owner])?;
             while let Some(row) = rows.next()? {
                 let values: (
@@ -102,10 +102,10 @@ fn fingerprint(
             }
             let mut stmt = db.prepare("WITH RECURSIVE tree(id) AS (
                 SELECT entry_id FROM entry WHERE entry_id=?1 AND owner_account_id=?2
-                UNION ALL SELECT e.entry_id FROM entry e JOIN tree t ON e.parent_id=t.id
+                UNION ALL SELECT e.entry_id FROM tree t CROSS JOIN entry e ON e.parent_id=t.id
                 WHERE e.state='active' AND e.owner_account_id=?2
                   AND NOT EXISTS(SELECT 1 FROM removal_member m WHERE m.entry_id=e.entry_id)
-            ) SELECT r.entry_id,r.revision_id,r.blob_id FROM revision r JOIN tree t ON t.id=r.entry_id ORDER BY r.entry_id,r.revision_id")?;
+            ) SELECT r.entry_id,r.revision_id,r.blob_id FROM tree t CROSS JOIN revision r ON t.id=r.entry_id ORDER BY r.entry_id,r.revision_id")?;
             let mut rows = stmt.query(params![root, owner])?;
             while let Some(row) = rows.next()? {
                 let values: (String, String, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
@@ -324,4 +324,45 @@ pub fn execute(
     tx.execute("INSERT INTO removal_cleanup(blob_id,operation_id,state) SELECT DISTINCT r.blob_id,?1,'pending' FROM revision r JOIN removal_member m ON m.entry_id=r.entry_id JOIN blob b ON b.blob_id=r.blob_id WHERE m.operation_id=?1 AND b.lifecycle='live' AND NOT EXISTS(SELECT 1 FROM revision retained WHERE retained.blob_id=r.blob_id AND NOT EXISTS(SELECT 1 FROM removal_member gone WHERE gone.entry_id=retained.entry_id))",[operation])?;
     tx.execute("UPDATE blob SET lifecycle='deleting' WHERE blob_id IN(SELECT blob_id FROM removal_cleanup WHERE operation_id=?1)",[operation])?;
     status(tx, owner, operation)
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, params};
+
+    #[test]
+    fn fingerprint_tree_queries_use_indexed_lookups() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(crate::persistence::schema::MIGRATION_0001_S1)
+            .unwrap();
+        db.execute_batch(include_str!("../../migrations/sqlite/0002_removal.sql"))
+            .unwrap();
+        let source = include_str!("removal.rs");
+        let queries: Vec<_> = source
+            .split("db.prepare(\"")
+            .skip(1)
+            .filter_map(|part| part.split_once("\")?").map(|(query, _)| query))
+            .filter(|query| query.starts_with("WITH RECURSIVE tree(id)"))
+            .collect();
+        assert_eq!(queries.len(), 2);
+        for query in queries {
+            let mut stmt = db.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap();
+            let plan: Vec<String> = stmt
+                .query_map(params!["root", "owner"], |row| row.get(3))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert!(
+                plan.iter().any(|line| line
+                    .contains("entry_active_listing (owner_account_id=? AND parent_id=?")),
+                "{plan:?}"
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|line| line.starts_with("SCAN e") || line.starts_with("SCAN r")),
+                "{plan:?}"
+            );
+        }
+    }
 }

@@ -742,3 +742,36 @@ fn serve_reports_v1_upgrade_failures_without_verifying_binding() {
         case.cleanup();
     }
 }
+
+#[test]
+fn serve_refuses_corrupt_pending_v2_transition_before_migration_start() {
+    use sha2::{Digest, Sha256};
+    use sylux::persistence::{schema, sqlite};
+
+    let case = Case::new("corrupt-pending-v2");
+    let (legacy, path) = legacy_installation(&case);
+    let db = sqlite::open_writer(&path, Duration::from_millis(375)).unwrap();
+    let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
+    schema::migrate_v1(&db, Some(hash.as_slice())).unwrap();
+    db.execute(
+        "UPDATE binding_transition SET legacy_manifest_hash = zeroblob(32)",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let observed = probe_with_binding_reason(&case, "serve", Some("schema_version_mismatch"));
+    assert_eq!(
+        observed.events,
+        [
+            "ownership.lock_acquire",
+            "ownership.acquired",
+            "database.open",
+            "binding.refused"
+        ]
+    );
+    assert!(
+        observed.exited_unsuccessfully && !observed.watchdog_expired && !observed.trace_overflow,
+        "{observed:?}"
+    );
+    case.cleanup();
+}

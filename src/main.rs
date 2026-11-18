@@ -484,6 +484,10 @@ mod tests {
                 Err(std::io::Error::other("synthetic listener startup failure"))
             })),
             ServerExit::Joined,
+            ServerExit::Graceful(
+                tokio::spawn(std::future::pending()),
+                Duration::from_millis(20),
+            ),
         ] {
             let root = temporary_root();
             root::initialize_empty_root(&root, DEFAULT_BUSY_TIMEOUT).unwrap();
@@ -499,6 +503,7 @@ mod tests {
             assert!(retained_workers.read(|_| Ok(())).await.is_ok());
             let storage = Arc::new(sylux::domain::upload::UploadStorage::open(&root).unwrap());
 
+            let graceful = matches!(&exit, ServerExit::Graceful(..));
             let result = finish_server_task(
                 exit,
                 bound,
@@ -509,7 +514,14 @@ mod tests {
             )
             .await;
 
-            assert_eq!(result, Err("cleanup_shutdown_failed"));
+            assert_eq!(
+                result,
+                if graceful {
+                    Ok(())
+                } else {
+                    Err("cleanup_shutdown_failed")
+                }
+            );
             assert!(matches!(
                 retained_workers.transact(|_| Ok(())).await,
                 Err(WorkerError::Closed)

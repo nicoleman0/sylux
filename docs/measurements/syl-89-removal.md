@@ -7,7 +7,9 @@ with the normal writer and reader, WAL, synchronous FULL and foreign keys.
 Timing probes ran in a disposable source copy. The benchmark used local
 storage and a single client.
 
-## Removal confirmation
+## Removal confirmation before the query fix
+
+These baseline figures predate the tree-first query fix below.
 
 Each file had one revision and one verified empty payload. The folder case
 had 1,000 active children beneath one trashed root. Other cases used flat
@@ -36,6 +38,45 @@ time of 12.37 s [12.10–12.85] and execute HTTP time of 12.75 s
 [12.45–13.24]. The writer remained occupied for essentially the full
 request.
 
+## Tree-first query replay
+
+On 2026-11-18, an instrumented release build of `b49ebe30` plus patch
+SHA-256 `92b3df2b666874b835a611baca0da43e88501c46d5bf8703fea95933e6b5cb6a`
+was measured on the same class of host. Each case ran five times, rotating
+order, with fresh isolated roots and OS-assigned loopback ports. Each file had
+one revision. Values are median [minimum–maximum] milliseconds.
+
+| Selection | Unrelated live files | Preview fingerprint | Preview HTTP | Writer through commit | Execute HTTP |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One folder, 1,000 files | 0 | 1.96 [1.93–2.51] | 3.51 [3.44–10.63] | 13.60 [12.71–16.82] | 13.77 [12.89–17.04] |
+| One folder, 1,000 files | 20,000 | 4.10 [4.01–4.26] | 5.63 [5.50–5.77] | 19.58 [19.19–20.02] | 19.82 [19.44–20.27] |
+| All, 1 file | 20,000 | 2.04 [1.99–2.15] | 3.58 [3.51–3.72] | 4.21 [4.09–4.24] | 4.40 [4.26–4.44] |
+| All, 100 files | 20,000 | 6.58 [6.50–6.74] | 8.11 [8.00–8.26] | 11.48 [11.29–11.74] | 11.69 [11.49–12.03] |
+
+Preview runs the fingerprint on the single reader worker, so that worker is
+occupied for at least the fingerprint duration shown. The writer fingerprint
+for the 1,000-file folder with 20,000 live files was 3.75 ms [3.73–4.13].
+The previous query on this fixture held the writer 3.93–4.30 s in three
+review runs. The new plan walks the tree first and uses indexed parent,
+entry and revision lookups. A separate SQL comparison returned identical
+ordered rows for both queries on this fixture. The 10-second host monitor
+sampled one-minute load from 5.52 to 10.06 on ten logical CPUs, including
+other concurrent work; these measurements do not establish mixed-traffic
+latency or results on another host.
+
+To replay on macOS, build the web assets first and use a new evidence directory
+outside the checkout. The scripts archive the selected revision, instrument a
+disposable copy, and leave raw logs and fixtures in the evidence directory.
+The build expects the current `web/dist` to match that revision. The revision
+must contain the measured query fix.
+
+```sh
+export SYL89_EVIDENCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/syl89-bench.XXXXXXXX")"
+bash tools/benchmarks/syl-89-removal/build.sh "$PWD" HEAD
+bash tools/benchmarks/syl-89-removal/run.sh review review --repeats 5
+python3 tools/benchmarks/syl-89-removal/summarize.py "$SYL89_EVIDENCE_DIR/review.jsonl"
+```
+
 ## Idle runner and startup audit
 
 History fixtures used one removed revision per blob, authorized cleanup rows
@@ -62,17 +103,16 @@ and scheduling work, rather than process CPU utilization.
 
 ## Disposition and limits
 
-Separate CPU samples showed SQLite statement execution in the fingerprint
-and SQLite prepare work in the history audit. Timing the three statements
-prepared per root in the 10,000-root diagnostic attributed about 0.43 s
-of 12.38 s to preparation. Caching those statements would address a small
-part of the stress result. At 50,000 history rows the audit accounted for
-about 44% of time to listen. The one-second cleanup fallback had a small
-observed cost and covers committed work whose HTTP future drops before
-notification. SYL-89 records this baseline and defers query or scheduling
-tuning.
+The original query plan scanned the owner's entries during recursive steps
+and scanned entries and revisions at the final joins. The tree-first joins
+address that measured bottleneck without changing the rows or ordering.
+The idle runner and audit inputs did not change, so their earlier measurements
+remain above. At 50,000 history rows the audit accounted for about 44% of
+time to listen. The one-second cleanup fallback covers committed work whose
+HTTP future drops before notification; scheduling and audit tuning remain
+deferred.
 
 These runs use warm filesystem caches, synthetic single-owner data and no
-competing Sylux traffic. Sampled one-minute host load ranged from 1.95 to
-3.88 during timed runs on ten logical CPUs. Cold storage, mixed traffic,
+competing Sylux traffic. The earlier baseline sampled one-minute host load from 1.95 to
+3.88 on ten logical CPUs. Cold storage, mixed traffic,
 Linux x86_64, browser behavior and durability remain outside this evidence.
