@@ -6,7 +6,17 @@ export const PDF_PREVIEW_LIMIT = 20 * 1024 * 1024;
 const MAX_PIXELS = 16_000_000;
 const TEXT_EXTENSIONS = new Set(['txt', 'md', 'csv', 'json', 'log', 'yaml', 'yml', 'toml', 'rs', 'js', 'ts', 'css']);
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif']);
-export type Preview = { kind: 'text'; text: string } | { kind: 'image'; blob: Blob } | { kind: 'pdf'; bytes: Uint8Array<ArrayBuffer> } | { kind: 'unsupported'; message: string };
+const VIDEO_EXTENSIONS = new Set(['mp4', 'm4v', 'webm', 'ogv', 'mov']);
+const AUDIO_EXTENSIONS = new Set(['mp3', 'm4a', 'aac', 'wav', 'ogg', 'oga', 'opus', 'flac']);
+export type MediaPreview = { kind: 'video' | 'audio'; url: string };
+export type Preview = { kind: 'text'; text: string } | { kind: 'image'; blob: Blob } | { kind: 'pdf'; bytes: Uint8Array<ArrayBuffer> } | MediaPreview | { kind: 'unsupported'; message: string };
+
+export function mediaPreviewKind(name: string): MediaPreview['kind'] | null {
+  const extension = name.split('.').at(-1)?.toLowerCase() ?? '';
+  if (VIDEO_EXTENSIONS.has(extension)) return 'video';
+  if (AUDIO_EXTENSIONS.has(extension)) return 'audio';
+  return null;
+}
 
 function previewLimit(entry: FileEntry): number {
   return entry.name.split('.').at(-1)?.toLowerCase() === 'pdf' ? PDF_PREVIEW_LIMIT : PREVIEW_LIMIT;
@@ -17,6 +27,7 @@ function tooLarge(limit: number): Extract<Preview, { kind: 'unsupported' }> {
 }
 
 export function previewUnavailable(entry: FileEntry): string | null {
+  if (mediaPreviewKind(entry.name)) return null;
   const limit = previewLimit(entry);
   if (typeof entry.size === 'number' && entry.size > limit) return tooLarge(limit).message;
   const extension = entry.name.split('.').at(-1)?.toLowerCase() ?? '';
@@ -54,6 +65,8 @@ function imageFormat(bytes: Uint8Array): { type: string; width: number; height: 
 }
 
 export async function loadPreview(client: ApiClient, entry: FileEntry, url: string, signal: AbortSignal): Promise<Preview> {
+  const media = mediaPreviewKind(entry.name);
+  if (media) return { kind: media, url };
   const unavailable = previewUnavailable(entry);
   if (unavailable) return { kind: 'unsupported', message: unavailable };
   const limit = previewLimit(entry);

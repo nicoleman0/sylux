@@ -152,7 +152,7 @@ export class ApiClient {
     try { return await this.transport.request<T>(path, { ...options, headers }); }
     catch (error) {
       // Password verification and mutation tickets can fail without ending the session.
-      if (error instanceof HttpError && error.status === 401 && path !== '/me/password' &&
+      if (!options.signal?.aborted && error instanceof HttpError && error.status === 401 && path !== '/me/password' &&
         (!error.code || ['unauthorized', 'authentication_required'].includes(error.code))) onExpired?.();
       throw error;
     }
