@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use super::{
-    namespace::{Entry, MAX_ENTRY_DEPTH, NamespaceError, ResultSort},
+    namespace::{self, Entry, MAX_ENTRY_DEPTH, NamespaceError, ResultSort},
     upload::folder_etag,
 };
 
@@ -48,6 +48,7 @@ impl serde::Serialize for SearchHit {
 pub struct SearchResults {
     pub hits: Vec<SearchHit>,
     pub fingerprint: String,
+    pub folder_id: Option<String>,
 }
 
 pub fn fold(value: &str) -> String {
@@ -62,7 +63,7 @@ pub fn fold(value: &str) -> String {
 // Keep live outermost so each child lookup uses owner, parent and state.
 const LIVE_SQL: &str = "WITH RECURSIVE live(entry_id,parent_id,original_name,kind,generation,depth) AS (\
          SELECT entry_id,parent_id,original_name,kind,generation,0 FROM entry \
-         WHERE entry_id=?1 AND owner_account_id=?2 AND parent_id IS NULL AND state='active' \
+         WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder' AND state='active' \
          UNION ALL \
          SELECT child.entry_id,child.parent_id,child.original_name,child.kind,child.generation,live.depth+1 \
          FROM live CROSS JOIN entry child ON child.parent_id=live.entry_id \
@@ -75,19 +76,47 @@ const LIVE_SQL: &str = "WITH RECURSIVE live(entry_id,parent_id,original_name,kin
          ORDER BY live.entry_id";
 
 pub fn find(db: &Connection, owner: &str, query: &str) -> Result<SearchResults, NamespaceError> {
-    find_sorted(db, owner, query, ResultSort::NameAsc)
+    find_sorted(db, owner, None, query, ResultSort::NameAsc)
+}
+
+fn fingerprint_entry(
+    digest: &mut Sha256,
+    entry: &Entry,
+    size: Option<i64>,
+    modified_at: Option<i64>,
+) {
+    digest.update((entry.id.len() as u32).to_be_bytes());
+    digest.update(entry.id.as_bytes());
+    digest.update((entry.name.len() as u32).to_be_bytes());
+    digest.update(entry.name.as_bytes());
+    digest.update(entry.kind.as_bytes());
+    digest.update(entry.generation.to_be_bytes());
+    for value in [size, modified_at] {
+        digest.update([u8::from(value.is_some())]);
+        digest.update(value.unwrap_or_default().to_be_bytes());
+    }
+    digest.update(entry.parent_id.as_deref().unwrap_or("").as_bytes());
 }
 
 pub fn find_sorted(
     db: &Connection,
     owner: &str,
+    folder_id: Option<&str>,
     query: &str,
     sort: ResultSort,
 ) -> Result<SearchResults, NamespaceError> {
-    let root = super::namespace::private_root(db, owner)?;
+    let root = namespace::private_root(db, owner)?;
+    let folder_id = folder_id.filter(|id| *id != root);
+    let anchor = folder_id.unwrap_or(&root);
+    let mut ancestors = Vec::new();
+    if let Some(folder_id) = folder_id {
+        ancestors = namespace::folder_path(db, owner, folder_id)?;
+        ancestors.pop();
+    }
+    let remaining_depth = MAX_ENTRY_DEPTH - ancestors.len() as i64;
     let mut stmt = db.prepare(LIVE_SQL).map_err(|_| NamespaceError::Sql)?;
     let rows: Vec<(Entry, Option<i64>, Option<i64>)> = stmt
-        .query_map(params![root, owner, MAX_ENTRY_DEPTH], |r| {
+        .query_map(params![anchor, owner, remaining_depth], |r| {
             let id: String = r.get(0)?;
             let generation: i64 = r.get(4)?;
             Ok((
@@ -111,37 +140,34 @@ pub fn find_sorted(
         .map(|(entry, _, _)| (entry.id.as_str(), entry))
         .collect();
     let mut digest = Sha256::new();
+    for ancestor in &ancestors {
+        fingerprint_entry(&mut digest, ancestor, None, None);
+    }
     let needle = fold(query);
     let mut matches = Vec::new();
     for (entry, size, modified_at) in &rows {
-        digest.update((entry.id.len() as u32).to_be_bytes());
-        digest.update(entry.id.as_bytes());
-        digest.update((entry.name.len() as u32).to_be_bytes());
-        digest.update(entry.name.as_bytes());
-        digest.update(entry.kind.as_bytes());
-        digest.update(entry.generation.to_be_bytes());
-        for value in [size, modified_at] {
-            digest.update([u8::from(value.is_some())]);
-            digest.update(value.unwrap_or_default().to_be_bytes());
-        }
-        digest.update(entry.parent_id.as_deref().unwrap_or("").as_bytes());
-        if entry.id == root || !fold(&entry.name).contains(&needle) {
+        fingerprint_entry(&mut digest, entry, *size, *modified_at);
+        if entry.id == anchor || !fold(&entry.name).contains(&needle) {
             continue;
         }
         let mut location = Vec::new();
         let mut parent = entry.parent_id.as_deref();
         while let Some(id) = parent {
             let folder = by_id.get(id).ok_or(NamespaceError::Sql)?;
-            if folder.kind != "folder" || location.len() > MAX_ENTRY_DEPTH as usize {
+            if folder.kind != "folder" || location.len() > remaining_depth as usize {
                 return Err(NamespaceError::Sql);
             }
             location.push((*folder).clone());
+            if id == anchor {
+                break;
+            }
             parent = folder.parent_id.as_deref();
         }
-        location.reverse();
-        if location.first().map(|folder| folder.id.as_str()) != Some(root.as_str()) {
+        if location.last().map(|folder| folder.id.as_str()) != Some(anchor) {
             return Err(NamespaceError::Sql);
         }
+        location.extend(ancestors.iter().rev().cloned());
+        location.reverse();
         let location_key = location
             .iter()
             .skip(1)
@@ -199,6 +225,7 @@ pub fn find_sorted(
     Ok(SearchResults {
         hits,
         fingerprint: URL_SAFE_NO_PAD.encode(digest.finalize()),
+        folder_id: folder_id.map(str::to_owned),
     })
 }
 

@@ -53,8 +53,11 @@ export class ListingApi {
   path(folderId: string): Promise<{ items: Folder[] }> {
     return this.client.request(`/folders/${encodeURIComponent(folderId)}/path`);
   }
-  search(query: string, cursor?: string | null, signal?: AbortSignal, sort: ResultSort = 'name_asc'): Promise<SearchListing> {
-    return this.client.request(`/entries/search?q=${encodeURIComponent(query)}&limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
+  search(query: string, folderId: string | null, cursor?: string | null, signal?: AbortSignal, sort: ResultSort = 'name_asc'): Promise<SearchListing> {
+    const params = new URLSearchParams({ q: query, limit: '100', sort });
+    if (folderId !== null) params.set('folder_id', folderId);
+    if (cursor) params.set('cursor', cursor);
+    return this.client.request(`/entries/search?${params}`, { signal });
   }
   async createFolder(parentId: string, name: string, _etag: string): Promise<Folder> {
     return this.client.request('/folders/children', {

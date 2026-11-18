@@ -239,6 +239,8 @@ export class MockTransport implements ApiTransport {
       const limit = Number(params.get('limit') ?? '100');
       if (!query || new TextEncoder().encode(query).length > 255 || /[\u0000-\u001f\u007f]/.test(query)) throw new HttpError(400);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new HttpError(400);
+      const folder = params.get('folder_id') ?? root.id;
+      const scopePath = this.folderPath(folder);
       const locationFor = (entry: Entry): Folder[] | null => {
         const path: Folder[] = [];
         let parentId: string | null = entry.parent_id;
@@ -252,25 +254,30 @@ export class MockTransport implements ApiTransport {
         }
         return path[0]?.id === root.id ? path : null;
       };
-      const hits: SearchHit[] = this.entries.flatMap((entry) => {
+      const candidates = this.entries.flatMap((entry) => {
         const location = locationFor(entry);
-        return location && fold(entry.name).includes(fold(query)) ? [{ entry: resultMetadata(entry), location }] : [];
-      }).sort((a, b) => compareResults(a.entry, b.entry, sort, a.location.slice(1).map(part => part.name), b.location.slice(1).map(part => part.name), true));
-      const fingerprint = fingerprintOf([this.root, this.entries]);
+        return location?.some((part) => part.id === folder) ? [{ entry, location }] : [];
+      });
+      const needle = fold(query);
+      const hits: SearchHit[] = candidates
+        .filter(({ entry }) => fold(entry.name).includes(needle))
+        .map(({ entry, location }) => ({ entry: resultMetadata(entry), location }))
+        .sort((a, b) => compareResults(a.entry, b.entry, sort, a.location.slice(1).map(part => part.name), b.location.slice(1).map(part => part.name), true));
+      const fingerprint = fingerprintOf([scopePath, candidates.map(({ entry }) => entry)]);
       let offset = 0;
       if (params.has('cursor')) {
-        let cursor: { account: string; query: string; sort: ResultSort; offset: number; fingerprint: number };
+        let cursor: { account: string; folder: string; query: string; sort: ResultSort; offset: number; fingerprint: number };
         let parsed: unknown;
         try { parsed = decodeResultCursor(params.get('cursor')!); } catch { throw invalidResultCursor(); }
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw invalidResultCursor();
         cursor = parsed as typeof cursor;
-        if (cursor.account !== this.user.id || cursor.sort !== sort || cursor.query !== query || !Number.isInteger(cursor.offset) || cursor.offset < 1) throw invalidResultCursor();
+        if (cursor.account !== this.user.id || cursor.folder !== folder || cursor.sort !== sort || cursor.query !== query || !Number.isInteger(cursor.offset) || cursor.offset < 1) throw invalidResultCursor();
         if (cursor.fingerprint !== fingerprint) throw new HttpError(409, { code: 'listing_changed', message: 'Search changed', request_id: 'mock' });
         if (cursor.offset >= hits.length) throw invalidResultCursor();
         offset = cursor.offset;
       }
       const end = Math.min(offset + limit, hits.length);
-      return { items: hits.slice(offset, end), next_cursor: end < hits.length ? encodeResultCursor({ account: this.user.id, query, sort, offset: end, fingerprint }) : null, has_more: end < hits.length } as T;
+      return { items: hits.slice(offset, end), next_cursor: end < hits.length ? encodeResultCursor({ account: this.user.id, folder, query, sort, offset: end, fingerprint }) : null, has_more: end < hits.length } as T;
     }
     if ((route === '/folders/children' || /^\/folders\/[^/]+\/children$/.test(route)) && method === 'GET') {
       const params = new URLSearchParams(path.split('?')[1]);
