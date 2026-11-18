@@ -49,6 +49,7 @@ async function servePreview(vite: string) {
     }
 
     const replies: Record<string, unknown> = {
+      '/me': { account_id: 'owner', handle: 'owner', role: 'user' },
       '/auth/csrf': { csrf_token: 'csrf' },
       '/auth/local': { account_id: 'owner', handle: 'owner', role: 'user', csrf_token: 'csrf' },
       '/folders/children': { root, items, next_cursor: null, has_more: false },
@@ -200,3 +201,92 @@ for (const [theme, width] of [['light', 1280], ['light', 390], ['dark', 1280], [
     }
   });
 }
+
+
+test('media failure revalidates the session after playback', async ({ page, baseURL }) => {
+  const fixture = await servePreview(baseURL!);
+  try {
+    await page.goto(fixture.origin);
+    await page.getByLabel('Account name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill('password');
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await page.getByRole('button', { name: 'Preview tone.mp3' }).click();
+    const media = dialog.locator('audio');
+    await media.evaluate((element: HTMLMediaElement) => { element.muted = true; void element.play(); });
+    await expect.poll(() => media.evaluate((element: HTMLMediaElement) => element.currentTime)).toBeGreaterThan(0.1);
+    await page.route('**/me', route => route.fulfill({ status: 401 }));
+    await media.evaluate((element: HTMLMediaElement) => {
+      Object.defineProperty(element, 'error', { value: { code: 2 } });
+      element.dispatchEvent(new Event('error'));
+    });
+    await expect(page.getByText('Your session ended. Sign in again to continue.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+  } finally { fixture.close(); }
+});
+
+test('media probe failure and retired probes preserve the current preview', async ({ page, baseURL }) => {
+  const fixture = await servePreview(baseURL!);
+  try {
+    await page.goto(fixture.origin);
+    await page.getByLabel('Account name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill('password');
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    const open = (name: string) => page.getByRole('button', { name: `Preview ${name}` });
+    const fail = () => dialog.locator('audio').evaluate((element: HTMLMediaElement) => {
+      Object.defineProperty(element, 'error', { value: { code: 2 } });
+      element.dispatchEvent(new Event('error'));
+    });
+    await page.route('**/me', route => route.fulfill({ status: 500 }));
+    await open('tone.mp3').click();
+    await fail();
+    await expect(dialog.getByRole('status')).toHaveText('Could not verify your session. Try again or download the file.');
+    await dialog.getByRole('button', { name: 'Close preview' }).click();
+    await page.unroute('**/me');
+    await open('tone.mp3').click();
+    await fail();
+    await expect(dialog.getByRole('status')).toHaveText('Could not load this media. Try again or download the file.');
+    await dialog.getByRole('button', { name: 'Close preview' }).click();
+    for (const next of ['close', 'switch']) {
+      let release!: () => void;
+      let requested!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const seen = new Promise<void>(resolve => { requested = resolve; });
+      await page.route('**/me', async route => { requested(); await held; await route.fulfill({ status: 401 }).catch(() => {}); });
+      await open('tone.mp3').click();
+      await fail();
+      await seen;
+      await dialog.getByRole('button', { name: 'Close preview' }).click();
+      if (next === 'switch') {
+        await open('pattern.mp4').click();
+        await expect(dialog.locator('video')).toBeVisible();
+      }
+      release();
+      await page.unroute('**/me', undefined, { behavior: 'wait' });
+      await expect(page.getByText('Your session ended. Sign in again to continue.')).toHaveCount(0);
+      if (next === 'switch') {
+        await expect(dialog.locator('video')).toBeVisible();
+        await dialog.getByRole('button', { name: 'Close preview' }).click();
+      }
+    }
+  } finally { fixture.close(); }
+});
+
+test('a late 401 from an aborted probe cannot expire credentials', async ({ page, baseURL }) => {
+  await page.goto(baseURL!);
+  const expirations = await page.evaluate(async () => {
+    const { ApiClient, HttpError } = await import('/src/lib/api.ts');
+    let reject!: (error: Error) => void;
+    const client = new ApiClient({ request: () => new Promise((_resolve, fail) => { reject = fail; }) });
+    let expired = 0;
+    client.setSessionExpiredHandler(() => { expired++; });
+    const controller = new AbortController();
+    const request = client.request('/me', { signal: controller.signal }).catch(() => {});
+    controller.abort();
+    reject(new HttpError(401));
+    await request;
+    return expired;
+  });
+  expect(expirations).toBe(0);
+});

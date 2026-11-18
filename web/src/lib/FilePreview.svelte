@@ -25,15 +25,29 @@
 
   function attachMedia(element: HTMLMediaElement, media: MediaPreview) {
     const target = entry;
-    function fail() {
-      if (!element.error || entry !== target || preview !== media || url !== media.url) return;
+    const controller = new AbortController();
+    let probing = false;
+    async function fail() {
+      if (!element.error || probing || entry !== target || preview !== media || url !== media.url) return;
+      probing = true;
+      const code = element.error.code;
+      let message = code === MediaError.MEDIA_ERR_NETWORK
+        ? 'Could not load this media. Try again or download the file.'
+        : 'This media could not be played. Download the file to open it.';
+      try {
+        await client.request('/me', { signal: controller.signal });
+      } catch {
+        message = 'Could not verify your session. Try again or download the file.';
+      }
+      if (controller.signal.aborted || entry !== target || preview !== media || url !== media.url) return;
       if (document.activeElement === element) downloadButton?.focus();
-      preview = { kind: 'unsupported', message: 'This media could not be played. Download the file to open it.' };
+      preview = { kind: 'unsupported', message };
     }
     element.addEventListener('error', fail);
     element.setAttribute('src', media.url);
     return {
       destroy() {
+        controller.abort();
         element.removeEventListener('error', fail);
         element.pause();
         // Reset resource selection so the browser cancels the old request.
