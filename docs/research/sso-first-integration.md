@@ -41,7 +41,7 @@ Relative effort is a design assessment for Sylux, not a measured benchmark.
 | --- | --- | --- | --- |
 | OIDC code + PKCE | Register a web client, exact callback, issuer and secret. Sylux needs an OIDC/JWT validation library, bounded HTTPS client, discovery/key cache and short-lived login transactions. | IdP proves identity; Sylux decides account access. Risks include callback substitution, replay, issuer confusion, bad signature/key handling and outbound URL abuse. Provider downtime blocks fresh external sign-in. | Best first fit. Existing self-hosted IdPs can remain separate from Sylux. AD can sit behind an IdP. One protocol avoids vendor-specific authentication code. |
 | SAML 2.0 browser SSO | Exchange SP/IdP metadata, entity IDs, assertion consumer service URL, bindings and signing certificates. Needs a maintained XML signature/schema stack, assertion replay cache and certificate rotation handling. | Validate the signed element actually consumed, issuer, audience, recipient, request correlation and validity. XML signature wrapping adds a distinct parser boundary. | Useful for an operator with a SAML-only IdP. Defer until such a need is confirmed; adds a second validation stack without an identified first user. |
-| Trusted proxy headers | Operator runs an authentication proxy/outpost, configures protected routes and headers, and prevents direct access to Sylux. Sylux still needs stable identity mapping and sessions/authorization. | The proxy and every path to the upstream become part of the identity boundary. Forged headers or a bypass route can impersonate users. Proxy outage can block local recovery too. | Potentially short application code, greater topology dependence. Defer native header trust. Putting a proxy gate in front of today's local login alone does not implement external account sign-in. |
+| Trusted proxy headers | Operator runs an authentication proxy/outpost, configures protected routes and headers, and prevents direct access to Sylux. Sylux still needs stable identity mapping and sessions/authorization. | The proxy and every path to the upstream become part of the identity boundary. Forged headers or a bypass route can impersonate users. Proxy outage can block local administrator browser sign-in too; host CLI recovery is unaffected. | Potentially short application code, greater topology dependence. Defer native header trust. Putting a proxy gate in front of today's local login alone does not implement external account sign-in. |
 
 OIDC's [core validation rules](https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation)
 define token checks; the [OAuth security BCP, sections 2.1 and 4](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.1)
@@ -62,8 +62,10 @@ copies identity from the auth subrequest into upstream headers. A future Sylux
 integration would need explicit trusted peer authentication or isolated transport,
 replacement of all incoming identity headers, rejection of missing/duplicate
 identity, and bypass tests on every listener. A trusted forwarded IP alone is
-insufficient identity evidence. Local recovery would need a separately protected
-route, not a public bypass with spoofable headers.
+insufficient identity evidence. Local administrator browser sign-in would need a
+separately protected route, not a public bypass with spoofable headers. The
+[host CLI recovery path](../docker-beta.md#recover-administrator-access) does not
+use the proxy and remains available during a proxy outage.
 
 ## Researched compatibility
 
@@ -95,7 +97,7 @@ Do not accept an issuer URL from a login form.
 | --- | --- |
 | Enablement and display label | Disabled by default; an explicit external sign-in button alongside local login. No forced redirect loop. |
 | Issuer URL | Exact HTTPS issuer, including realm/path. Derive discovery from it; require the returned issuer to match. No wildcard or email-domain discovery. |
-| Client ID and client authentication | Registered confidential client. First profile uses `client_secret_basic`; qualify provider metadata before enabling it. |
+| Client ID and client authentication | Registered confidential client. First profile uses `client_secret_basic` for simpler operator setup without client signing-key registration; qualify provider metadata before enabling it. This shared-secret tradeoff departs from [RFC 9700 section 2.5](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.5), which recommends asymmetric client authentication (mTLS or `private_key_jwt`) to reduce shared-key leakage risk. Defer `private_key_jwt` qualification as later hardening. |
 | Client secret reference | Read a restricted server-side secret file; never send it to the web bundle, command arguments or logs. Define rotation and configuration reload behavior before implementation. |
 | Public Sylux origin | Canonical HTTPS origin used to generate one exact callback and one post-logout URI. Never build these from arbitrary Host/Forwarded headers. |
 | Scopes and claims | Require `openid`; request profile/email only if the agreed lifecycle/display contract needs them. No `offline_access`, directory scopes or group scope by default. |
@@ -149,9 +151,14 @@ The numbered steps are a proposed implementation contract.
 5. **Sign out.** Revoke the local session and clear its cookie first, using the
    existing CSRF protection. Local sign-out must succeed with the IdP down. A
    separate explicit provider sign-out can use discovered `end_session_endpoint`,
-   an ID-token hint held only server-side, registered post-logout URI and fresh
-   correlated logout state. If supported, retain the hint only for the local
-   session lifetime and redact it from proxy logs. If unavailable/failing, say
+   a registered post-logout URI and fresh correlated logout state. Store any
+   `id_token_hint` server-side only for the local session lifetime, but recognize
+   that sending it to the provider transits the browser in a Sylux response.
+   Prefer a form POST with a non-cacheable response; do not persist the hint in
+   browser storage and redact it from Sylux, proxy and IdP logs. GET would also
+   expose it in URLs, potentially browser history and URL/access logs; record
+   that exposure if qualifying GET. This logout-only transit is the explicit
+   exception to V1's response restriction, checked in V6. If unavailable/failing, say
    local sign-out completed and provider sign-out was not confirmed. The
    [RP-Initiated Logout standard](https://openid.net/specs/openid-connect-rpinitiated-1_0.html#RPLogout)
    defines that separate request. Local sign-out alone leaves IdP SSO active, so
@@ -216,12 +223,12 @@ and network failures. A mock issuer alone is not provider compatibility evidence
 
 | Check | Action and required observation |
 | --- | --- |
-| V1 Login and reload | Sign in as approved synthetic user A through the real provider, land on Files, reload and upload/download a known fixture. No provider tokens in browser storage, responses or logs. |
+| V1 Login and reload | Sign in as approved synthetic user A through the real provider, land on Files, reload and upload/download a known fixture. No provider tokens in browser storage or logs, or in responses except the explicit logout-only ID-token hint transit checked in V6. |
 | V2 Isolation | Sign in as B in a separate browser context. Neither can list, download, mutate or recover the other's files, including guessed IDs. Unknown identity and same-email identity cannot acquire A's account. |
 | V3 Callback attacks | Change/remove state, nonce, browser cookie, code verifier, issuer, audience, signature, key ID, algorithm and timestamps independently. Try duplicate parameters, transaction expiry, callback replay and two simultaneous callbacks. Each rejects without session issuance; the valid control still succeeds. |
 | V4 URL and transport | Reject unregistered callback/return URLs, Host/Forwarded manipulation, discovery issuer mismatch, endpoint redirect escapes, untrusted/expired certificates and unapproved destinations. Exercise configured private CA success as a separate control. |
 | V5 Outage and rotation | Stop provider; delay/drop discovery, token and JWKS responses; return oversized/malformed bodies; rotate a signing key. Check bounded failures, capped refresh, cache expiry and successful fresh login after recovery. Local login/logout stays usable. |
-| V6 Logout | Confirm old local cookie fails after logout with provider up and down. Separately test provider sign-out, rejected post-logout redirect, canceled provider logout and logout-state replay. Record whether the next sign-in reuses IdP SSO; never report global logout from a local-cookie check. |
+| V6 Logout | Confirm old local cookie fails after logout with provider up and down. Separately test provider sign-out, rejected post-logout redirect, canceled provider logout and logout-state replay. Verify the V1 exception is limited to the ID-token hint in the logout form POST, with a non-cacheable response, no persistent browser storage and no token logging; record URL/history and access-log exposure if qualifying GET instead. Record whether the next sign-in reuses IdP SSO; never report global logout from a local-cookie check. |
 | V7 Authority and recovery | Disable/demote A locally while callback exchange is held; issuance/access must respect current authority. With IdP unavailable, recover the existing local administrator using the guide; verify old credentials/session fail, setup stays closed and known file checksums survive. |
 | V8 Upstream lifecycle | Disable A at the IdP and measure existing/new session behavior against SYL-88's agreed bound. Only add AD disablement tests with SYL-87's disposable directory target. Record the actual delay, not an assumed instant revocation. |
 
