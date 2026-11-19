@@ -542,3 +542,60 @@ test('reload resumes real private chunks after matching file reselect', { annota
   expect(download.status).toBe(200); expect(download.length).toBe(original.length);
   expect(download.sha256).toBe(createHash('sha256').update(original).digest('hex'));
 });
+
+test('owner shares and revokes a file downloaded in a separate signed-out TLS context', {
+  annotation: { type: 'harness_case', description: 'storage_public_share' },
+}, async () => {
+  await signIn();
+  await page.getByRole('button', { name: `Open ${fixtures.folder}`, exact: true }).click();
+  await page.getByRole('button', { name: `Open ${fixtures.nested}`, exact: true }).click();
+  const options = page.getByRole('button', { name: `Options for ${fixtures.file}` });
+  await options.focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('menuitem', { name: 'Share', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: `Share ${fixtures.file}` });
+  await expect(dialog).toContainText('Anyone with a link can download the file');
+  await expect(dialog.getByLabel('Expires after')).toHaveValue('7');
+  await dialog.getByLabel('Expires after').selectOption('1');
+  await dialog.getByRole('button', { name: 'Create link', exact: true }).click();
+  const field = dialog.getByRole('textbox', { name: 'Download link' });
+  await expect(field).toBeFocused();
+  const share = new URL(await field.inputValue());
+  expect(share.origin).toBe(origin);
+  expect(/^\/share\/[A-Za-z0-9_-]{43}$/.test(share.pathname)).toBeTruthy();
+
+  const signedOut = await browser.newContext({ ignoreHTTPSErrors: false, acceptDownloads: true });
+  try {
+    const recipient = await signedOut.newPage();
+    await recipient.goto(origin);
+    await expect(recipient.getByRole('button', { name: 'Sign in' })).toBeVisible();
+    const downloadEvent = recipient.waitForEvent('download');
+    await recipient.evaluate(url => {
+      const link = document.createElement('a');
+      link.href = url;
+      link.referrerPolicy = 'no-referrer';
+      link.click();
+    }, share.href);
+    const download = await downloadEvent;
+    expect(download.suggestedFilename()).toBe(fixtures.file);
+    const downloaded = fs.readFileSync((await download.path())!);
+    expect(downloaded.length).toBe(fixtures.length);
+    expect(createHash('sha256').update(downloaded).digest('hex')).toBe(fixtures.sha256);
+
+    await dialog.getByRole('button', { name: 'Done' }).click();
+    await expect(options).toBeFocused();
+    await page.getByRole('button', { name: 'Account', exact: true }).click();
+    await page.getByRole('button', { name: 'Shared links' }).click();
+    const all = page.getByRole('dialog', { name: 'Shared links' });
+    await expect(all.getByRole('textbox', { name: 'Download link' })).toHaveCount(0);
+    await all.getByRole('button', { name: new RegExp(`Revoke link .* for ${fixtures.file}`) }).click();
+    await expect(all.getByRole('status')).toHaveText('Link revoked.');
+    const missing = await recipient.evaluate(async url => {
+      const response = await fetch(url, { cache: 'no-store', credentials: 'omit' });
+      return [response.status, await response.json()];
+    }, share.href);
+    expect(missing).toEqual([404, { code: 'share_not_found' }]);
+  } finally {
+    await signedOut.close();
+  }
+});

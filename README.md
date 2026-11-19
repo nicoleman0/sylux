@@ -17,7 +17,7 @@ Self-hosted multi-user file storage with a Rust server, Svelte interface and SQL
 
 ## Who it is for
 
-Self-hosters and small groups who want private file storage in a browser. Each account's files are private to it. Sylux favors everyday workflows and low operating overhead over broad feature parity.
+Self-hosters and small groups who want private file storage in a browser. Files are private by default. Owners can create [expiring download links](docs/sharing.md) for individual files. Sylux favors everyday workflows and low operating overhead over broad feature parity.
 
 ## Features
 

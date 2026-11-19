@@ -712,18 +712,27 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Complete the only supported schema/binding transition under the startup writer lock.
+/// Complete supported schema/binding transitions under the startup writer lock.
 pub fn upgrade_binding(
     bound: &BoundDatabase,
     root: &Path,
     manifest: &InstallationIdentity,
 ) -> Result<InstallationIdentity, BindingError> {
-    if manifest.schema_version != 1 {
+    if !matches!(manifest.schema_version, 1 | 2) {
         verify_binding(bound, root, manifest)?;
         super::contract_event("binding.verified");
         super::contract_event("migration.start");
         return Ok(manifest.clone());
     }
+    upgrade_binding_step(bound, root, manifest, true)
+}
+
+fn upgrade_binding_step(
+    bound: &BoundDatabase,
+    root: &Path,
+    manifest: &InstallationIdentity,
+    announce: bool,
+) -> Result<InstallationIdentity, BindingError> {
     verify_protected_material(root)?;
     let row = read_installation_row(&bound.connection)?;
     let mut expected = manifest.clone();
@@ -745,11 +754,20 @@ pub fn upgrade_binding(
     let bytes =
         serde_json::to_vec(manifest).map_err(|_| BindingError::Io("manifest_encode_failed"))?;
     let hash = Sha256::digest(&bytes);
-    if row.schema_version == 1 && version == 1 {
-        super::contract_event("migration.start");
-        schema::migrate_v1(&bound.connection, Some(hash.as_slice()))
+    let previous = manifest.schema_version;
+    let next = previous + 1;
+    if row.schema_version == previous && version == previous {
+        if announce {
+            super::contract_event("migration.start");
+        }
+        let migrate = if previous == 1 {
+            schema::migrate_v1
+        } else {
+            schema::migrate_v2
+        };
+        migrate(&bound.connection, Some(hash.as_slice()))
             .map_err(|_| BindingError::DatabaseInvalid("schema_migration_failed"))?;
-    } else if row.schema_version == 2 && version == 2 {
+    } else if row.schema_version == next && version == next {
         let recorded: Vec<u8> = bound
             .connection
             .query_row(
@@ -761,14 +779,16 @@ pub fn upgrade_binding(
         if recorded != hash.as_slice() {
             return Err(BindingError::IdentityMismatch("schema_version"));
         }
-        schema::verify_core_schema(&bound.connection)
+        schema::verify_schema_at(&bound.connection, next)
             .map_err(|_| BindingError::DatabaseInvalid("schema_invalid"))?;
-        super::contract_event("migration.start");
+        if announce {
+            super::contract_event("migration.start");
+        }
     } else {
         return Err(BindingError::UnsupportedVersion("schema_version"));
     }
     let mut upgraded = manifest.clone();
-    upgraded.schema_version = 2;
+    upgraded.schema_version = next;
     let bytes =
         serde_json::to_vec(&upgraded).map_err(|_| BindingError::Io("manifest_encode_failed"))?;
     let root_fd = open_root_directory(root)?;
@@ -793,6 +813,9 @@ pub fn upgrade_binding(
     fs::renameat(&root_fd, MANIFEST_TMP_NAME, &root_fd, MANIFEST_NAME)
         .map_err(|_| BindingError::Io("manifest_publish_failed"))?;
     fs::fsync(&root_fd).map_err(|_| BindingError::Io("manifest_sync_failed"))?;
+    if next < schema::SUPPORTED_SCHEMA_VERSION {
+        return upgrade_binding_step(bound, root, &upgraded, false);
+    }
     verify_binding(bound, root, &upgraded)?;
     super::contract_event("binding.verified");
     Ok(upgraded)

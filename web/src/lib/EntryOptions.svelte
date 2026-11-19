@@ -13,14 +13,14 @@
     moveDisabled?: boolean;
     downloadDisabled?: boolean;
     downloading?: boolean;
-    onaction: (action: 'download' | 'rename' | 'move' | 'delete', trigger: HTMLElement) => void;
+    onaction: (action: 'download' | 'share' | 'rename' | 'move' | 'delete', trigger: HTMLElement) => void;
   } = $props();
   let trigger = $state<HTMLButtonElement | null>(null);
   let open = $state(false);
   let openingDialog = false;
   const modified = $derived(modifiedTime(entry));
 
-  async function select(action: 'download' | 'rename' | 'move' | 'delete'): Promise<void> {
+  async function select(action: 'download' | 'share' | 'rename' | 'move' | 'delete'): Promise<void> {
     openingDialog = action !== 'download';
     open = false;
     await tick();
@@ -38,6 +38,7 @@
     <DropdownMenu.Content preventScroll={false} sideOffset={4} align="end" class="bg-popover text-popover-foreground z-50 min-w-40 rounded-md border p-1 shadow-md outline-none" onInteractOutside={(event) => { if (event.target instanceof Node && trigger?.contains(event.target)) event.preventDefault(); }} onCloseAutoFocus={(event) => { if (openingDialog) event.preventDefault(); }}>
       {#if modified}<div class="px-3 py-2 text-xs text-muted-foreground max-w-72 border-b mb-1"><span class="block">Modified</span><time datetime={modified.datetime}>{modified.full}</time></div>{/if}
       <DropdownMenu.Item class="menu-item" disabled={downloadDisabled} onSelect={() => select('download')}>Download</DropdownMenu.Item>
+      {#if entry.kind === 'file'}<DropdownMenu.Item class="menu-item" onSelect={() => select('share')}>Share</DropdownMenu.Item>{/if}
       <DropdownMenu.Item class="menu-item" onSelect={() => select('rename')}>Rename</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item" disabled={moveDisabled} onSelect={() => select('move')}>Move</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item text-destructive" onSelect={() => select('delete')}>Delete</DropdownMenu.Item>

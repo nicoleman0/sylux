@@ -220,11 +220,11 @@ Send beta feedback and the host, Docker Engine/Compose versions, image ID, and a
 
 Docker reference: [Compose bind mounts](https://docs.docker.com/reference/compose-file/services/#volumes), [variable interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/), [`docker compose run`](https://docs.docker.com/reference/cli/docker/compose/run/), and [pull policy](https://docs.docker.com/reference/compose-file/services/#pull_policy).
 
-## Schema v2 upgrade
+## Schema upgrade
 
-`serve` upgrades a v1 root to v2 once, with recovery for an interrupted manifest
+`serve` upgrades v1 and v2 roots to v3 and resumes an interrupted manifest
 write. Take a complete stopped-service backup first; rollback needs that full
-backup and its matching release. Offline admin commands require the upgrade to
-finish first and report `*_schema_upgrade_required_run_serve` for a v1 manifest.
+backup and its matching release. Offline payload verification and password
+recovery require the upgrade to finish first and report `*_schema_upgrade_required_run_serve` for a v1 or v2 manifest.
 See [Trash upgrade and recovery](trash.md#schema-upgrade-and-offline-admin) before
 upgrading or using offline password recovery or payload verification.

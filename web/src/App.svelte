@@ -13,6 +13,7 @@
   import UserRoundIcon from '@lucide/svelte/icons/user-round';
   import LogOutIcon from '@lucide/svelte/icons/log-out';
   import EntryOptions from './lib/EntryOptions.svelte';
+  import ShareLinks from './lib/ShareLinks.svelte';
   import AccountOptions from './lib/AccountOptions.svelte';
   import AccountStatus from './lib/AccountStatus.svelte';
   import HeaderIconButton from './lib/HeaderIconButton.svelte';
@@ -1382,6 +1383,7 @@
     finally { if (generation === sessionGeneration) accountBusy = false; }
   }
   function clearWorkspace(): void {
+    share = null;
     clearSearch();
     archiveBusy = false; archiveTargets = [];
     actionNotice = ''; compactUnresolvedUpload = false;
@@ -1808,7 +1810,7 @@
 
   function canUploadDrop(): boolean {
     return !!user && !showTrash && !accountView && !settingsView && !searchQuery && !!currentFolder.id &&
-      !fileMutationBusy && !unresolvedUploadId && !replacementPrompt && !createOpen && !renameId && !moveTarget && !trashTarget;
+      !fileMutationBusy && !unresolvedUploadId && !replacementPrompt && !createOpen && !renameId && !moveTarget && !trashTarget && !share;
   }
 
   function acceptDesktopDrop(event: DragEvent, destination: Folder): void {
@@ -1957,9 +1959,24 @@
     previewEntry = null; previewTrigger = null;
     void tick().then(() => { if (generation === sessionGeneration && request === navigationRequest) restoreFocus(trigger); });
   }
-  function entryAction(action: 'download' | 'rename' | 'move' | 'delete', entry: Entry, trigger: HTMLElement): void {
+  let share = $state<{ entry: Entry | null; trigger: HTMLElement } | null>(null);
+
+  function closeShare(): void {
+    const trigger = share?.trigger ?? null;
+    const generation = sessionGeneration;
+    const navigation = navigationRequest;
+    share = null;
+    void tick().then(() => {
+      if (generation === sessionGeneration && navigation === navigationRequest) {
+        restoreFocus(trigger, accountView ? 'account-title' : 'folder-title');
+      }
+    });
+  }
+
+  function entryAction(action: 'download' | 'share' | 'rename' | 'move' | 'delete', entry: Entry, trigger: HTMLElement): void {
     if (bulkBusy || ((bulkNeedsRefresh || namespaceUnknown) && action !== 'download')) return;
     if (action === 'download') void (entry.kind === 'folder' ? downloadArchive([entry]) : download(entry));
+    else if (action === 'share') share = { entry, trigger };
     else if (action === 'rename') beginRename(entry, trigger);
     else if (action === 'move') void beginMove(entry, trigger);
     else { trashError = ''; trashTarget = entry; trashTrigger = trigger; }
@@ -2772,6 +2789,7 @@
             <h1 id="account-title" tabindex="-1">Account</h1>
             <section class="settings-section"><h2>Your account</h2><dl class="account-details"><dt>Account name</dt><dd>{user.handle}</dd><dt>Role</dt><dd>{user.role === 'administrator' ? 'Administrator' : 'User'}</dd></dl></section>
             <section class="settings-section" aria-labelledby="usage-heading" aria-busy={ownUsageState === 'loading'}><h2 id="usage-heading" tabindex="-1">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p>{/if}{#if ownUsageState === 'error' || ownUsageRetrying}<RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" keepFocus busy={ownUsageRetrying} onclick={() => void retryOwnUsage()} />{/if}</section>
+            <section class="settings-section account-setting-row"><div><h2>Public links</h2><p class="section-description">Review and revoke active download links.</p></div><Button variant="outline" onclick={(event) => { share = { entry: null, trigger: event.currentTarget }; }}>Shared links</Button></section>
             <section class="settings-section account-setting-row"><div><h2>Password</h2><p class="section-description">Change the password you use to sign in.</p></div><Button variant="outline" onclick={(event) => { passwordDialogTrigger = event.currentTarget; accountNotice = ''; currentPassword = ''; newPassword = ''; changePasswordOpen = true; }}>Change password</Button></section>
             <section class="settings-section account-setting-row"><div><h2>Session</h2><p class="section-description">Sign out of this browser.</p></div><Button variant="outline" disabled={loggingOut} onclick={signOut}>Sign out</Button></section>
             {#if accountNotice && !changePasswordOpen}<p role="status" class="form-notice">{accountNotice}</p>{/if}
@@ -2936,6 +2954,8 @@
         <form class="grid gap-6" aria-busy={folderBusy} onsubmit={createFolder}><div class="grid gap-2"><Label for="new-folder">Folder name</Label><Input id="new-folder" bind:ref={folderInput} bind:value={folderName} disabled={folderBusy} maxlength={255} aria-invalid={!!folderError} aria-describedby={folderError ? 'folder-error' : undefined} required /></div>{#if folderError}<p id="folder-error" role="alert">{folderError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={folderBusy} onclick={() => createOpen = false}>Cancel</Button><Button type="submit" disabled={folderBusy}>{folderBusy ? 'Creating…' : 'Create folder'}</Button></Dialog.Footer></form>
       </Dialog.Content>
     </Dialog.Root>
+    {#if share}<ShareLinks {client} entry={share.entry} onclose={closeShare} />{/if}
+
     <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !moveBusy && !bulkBusy) closeMove(); }}>
       <Dialog.Content showCloseButton={!bulkBusy} class="max-h-[85dvh] overflow-y-auto" onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger ?? moveTrigger); moveTrigger = null; bulkTrigger = null; }}>
         <Dialog.Header><Dialog.Title>Move {bulkAction === 'move' ? `${bulkTargets.length} selected items` : moveTarget?.name}</Dialog.Title><Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.{bulkAction === 'move' ? ' Each item is handled separately; some items may stay in place.' : ''}</Dialog.Description></Dialog.Header>

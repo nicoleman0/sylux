@@ -22,13 +22,13 @@ Removal uses the same coordinator admission gate as namespace mutations. The SQL
 
 ## Schema upgrade and offline admin
 
-Startup upgrades schema v1 to v2. The database transaction records the exact previous binding before atomically replacing the manifest. If interrupted between those writes, startup resumes only the recorded identity transition. Other mismatches still refuse startup. Functional checks do not qualify physical durability, upgrades on every deployment, secure erasure or deployment readiness. There is no automatic expiry or revision pruning.
+Startup upgrades a schema v1 root through v2 to the current schema v3. The database transaction records the exact previous binding before atomically replacing the manifest. If interrupted between those writes, startup resumes only the recorded identity transition. Other mismatches still refuse startup. Functional checks do not qualify physical durability, upgrades on every deployment, secure erasure or deployment readiness. There is no automatic expiry or revision pruning.
 
 The schema change is one-way. Take a complete stopped-service backup with the
 previous release before upgrading. Rollback requires restoring that whole backup
-with its matching release. Do not pair an old binary or manifest with v2 metadata.
+with its matching release. Do not pair an old binary or manifest with newer metadata.
 Offline payload verification and password recovery do not migrate a root. They
-report `*_schema_upgrade_required_run_serve` for a v1 manifest, including an
+report `*_schema_upgrade_required_run_serve` for a v1 or v2 manifest, including an
 interrupted upgrade. Run the new release's `serve` with the same root to complete
 the recorded transition, then stop it before using the offline admin command.
 Do not hand-edit versions or identity fields to bypass a refusal.

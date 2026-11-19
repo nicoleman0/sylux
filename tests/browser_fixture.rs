@@ -52,6 +52,7 @@ fn safe_reporter_events(log: &str) -> Vec<Value> {
         "storage_upload_cancel",
         "storage_lost_commit_response",
         "storage_pdf_preview",
+        "storage_public_share",
         "unregistered",
     ];
     const NETWORK_ERRORS: &[&str] = &[

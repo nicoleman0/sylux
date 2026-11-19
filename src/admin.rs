@@ -57,7 +57,7 @@ pub fn verify_payloads(
         _ => "verify_root_invalid",
     })?;
     let manifest = root::read_manifest(root_path).map_err(|_| "verify_binding_invalid")?;
-    if manifest.schema_version == 1 {
+    if matches!(manifest.schema_version, 1 | 2) {
         return Err("verify_schema_upgrade_required_run_serve");
     }
     root::verify_protected_material(root_path).map_err(|_| "verify_binding_invalid")?;
@@ -132,7 +132,7 @@ pub async fn reset_password_from_stdin(root_path: &Path, handle: &str) -> Result
         _ => "recovery_root_invalid",
     })?;
     let manifest = root::read_manifest(root_path).map_err(|_| "recovery_binding_invalid")?;
-    if manifest.schema_version == 1 {
+    if matches!(manifest.schema_version, 1 | 2) {
         return Err("recovery_schema_upgrade_required_run_serve");
     }
     root::verify_protected_material(root_path).map_err(|_| "recovery_binding_invalid")?;

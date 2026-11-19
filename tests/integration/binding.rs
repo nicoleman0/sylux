@@ -673,7 +673,7 @@ fn serve_upgrades_v1_and_recovers_committed_transition_with_partial_manifest_tem
         );
         assert!(!observed.watchdog_expired && !observed.trace_overflow);
         let upgraded = root::read_manifest(&case.store).unwrap();
-        assert_eq!(upgraded.schema_version, 2);
+        assert_eq!(upgraded.schema_version, schema::SUPPORTED_SCHEMA_VERSION);
         assert_eq!(upgraded.installation_id, legacy.installation_id);
         assert!(!case.store.join("installation.json.tmp").exists());
         let db = Connection::open(&path).unwrap();
@@ -689,7 +689,7 @@ fn serve_upgrades_v1_and_recovers_committed_transition_with_partial_manifest_tem
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            2
+            schema::SUPPORTED_SCHEMA_VERSION
         );
         drop(db);
         require_valid_root(&case);
