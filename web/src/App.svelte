@@ -407,6 +407,16 @@
   }
 
   let shortcutsOpen = $state(false);
+  let shortcutsInvoker: HTMLElement | null = null;
+  function openShortcuts(invoker: HTMLElement | null): void {
+    shortcutsInvoker = invoker;
+    shortcutsOpen = true;
+  }
+  function restoreShortcutFocus(event: Event): void {
+    event.preventDefault();
+    restoreFocus(shortcutsInvoker);
+    shortcutsInvoker = null;
+  }
   let listFocusId: string | null = null;
   // A move key pressed on the heading while rows are disabled by a load; applied when the load ends.
   let pendingMove: 'next' | 'previous' | 'first' | 'last' | null = null;
@@ -441,7 +451,7 @@
       if (!input || input.disabled) return;
       event.preventDefault(); input.focus(); input.select();
     } else if (intent.kind === 'help') {
-      event.preventDefault(); shortcutsOpen = true;
+      event.preventDefault(); openShortcuts(target);
     } else if (intent.kind === 'move') {
       // From the heading, arrows enter the list; this keeps keyboard flow after paging or refresh.
       const items = listItems();
@@ -2581,8 +2591,13 @@
             {/if}
 {/snippet}
 
-{#snippet betaNotice()}
-  <footer class="beta-notice">Beta · Durability not qualified. Keep independent copies.</footer>
+{#snippet betaNotice(withShortcuts: boolean)}
+  <footer class="beta-notice" class:beta-notice-with-shortcuts={withShortcuts}>
+    <span>Beta · Durability not qualified. Keep independent copies.</span>
+    {#if withShortcuts}
+      <Button variant="link" size="xs" class="footer-shortcuts" aria-haspopup="dialog" onclick={(event) => openShortcuts(event.currentTarget)}>Keyboard shortcuts</Button>
+    {/if}
+  </footer>
 {/snippet}
 
 <div class="app-shell">
@@ -2826,7 +2841,10 @@
 
             <div class="page-heading">
               {#if folderPath.length > 1}<nav class="breadcrumb" aria-label="Folder path">{#each folderPath.slice(0, -1) as folder (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" onclick={() => openFolder(folder)}>{folder.name}</Button><span aria-hidden="true">/</span>{/each}</nav>{/if}
-              <h1 id="folder-title" tabindex="-1">{currentFolder.name}</h1>
+              <h1 id="folder-title" tabindex="-1" aria-describedby={activeEntries.length ? 'folder-keyboard-hint' : undefined}>{currentFolder.name}</h1>
+              {#if activeEntries.length}
+                <p id="folder-keyboard-hint" class="folder-keyboard-hint text-xs text-muted-foreground">Press Down Arrow to focus the first item.</p>
+              {/if}
             </div>
             <div class="search-toolbar">
               <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || restorationPending} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : 'Search by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
@@ -2904,12 +2922,11 @@
             {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading || bulkBusy}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading || bulkBusy}>Next page</Button>{/if}</div>{/if}
             <p class="list-summary" role={loading && workspaceRefreshing && entries.length ? 'status' : undefined}>{loading ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
             {/if}
-            <div class="mt-2"><Button variant="link" size="sm" class="px-0" onclick={() => shortcutsOpen = true}>Keyboard shortcuts</Button></div>
             {#if notice}<Alert.Root role="status" class="workspace-notice"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
         {/if}
         </div>
-        {@render betaNotice()}
+        {@render betaNotice(!accountView && !settingsView && !showTrash)}
       </Sidebar.Inset>
     </Sidebar.Provider>
     <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client} onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }} />
@@ -2961,8 +2978,8 @@
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root bind:open={shortcutsOpen}>
-      <Dialog.Content>
-        <Dialog.Header><Dialog.Title>Keyboard shortcuts</Dialog.Title><Dialog.Description>Letter and symbol keys work only while focus is in the file list. They pause while you type or a dialog is open.</Dialog.Description></Dialog.Header>
+      <Dialog.Content onCloseAutoFocus={restoreShortcutFocus}>
+        <Dialog.Header><Dialog.Title>Keyboard shortcuts</Dialog.Title><Dialog.Description>To use item shortcuts, press Down Arrow from the folder heading or Tab to an item. Shortcuts pause while you type or use a dialog.</Dialog.Description></Dialog.Header>
         <dl class="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-2">
           {#each shortcutHelp as shortcut (shortcut.keys)}
             <dt class="flex flex-wrap gap-1">{#each shortcut.keys.split(', ') as key (key)}<kbd class="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">{key}</kbd>{/each}</dt>
@@ -2999,7 +3016,7 @@
     </Dialog.Root>
     <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. An administrator can enable the account again.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} aria-busy={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
   {/if}
-  {#if !user || loggingOut}{@render betaNotice()}{/if}
+  {#if !user || loggingOut}{@render betaNotice(false)}{/if}
 </div>
 
 <style>

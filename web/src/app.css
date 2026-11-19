@@ -118,6 +118,8 @@ h1:focus, h2:focus { outline: none; }
 .workspace-main { flex: 1; padding: 43px 48px 40px; min-width: 0; }
 .workspace-main:has(> .files-content) { padding: 24px 32px 32px; }
 .page-heading { margin-bottom: 16px; }
+.folder-keyboard-hint { visibility: hidden; margin-top: 4px; }
+#folder-title:focus + .folder-keyboard-hint { visibility: visible; }
 .breadcrumb { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; color: var(--muted-foreground); font-size: var(--type-ui); margin-bottom: 12px; }
 .breadcrumb [data-slot="button"] { min-height: var(--control-height); }
 .upload-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
@@ -233,6 +235,8 @@ h1:focus, h2:focus { outline: none; }
 .app-shell > .beta-notice { text-align: center; }
 @media (min-width: 621px) and (max-width: 1000px) { .beta-notice { padding-inline: 30px; } }
 @media (max-width: 620px) { .beta-notice { padding: 16px 17px; } }
+.beta-notice-with-shortcuts { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; padding-block: 6px; }
+.footer-shortcuts:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 .selection-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .selection-toolbar > span { font-variant-numeric: tabular-nums; min-width: 76px; }
