@@ -712,6 +712,12 @@
   let renameBusy = $state(false);
   let renameTrigger: HTMLElement | null = null;
   let renameInput = $state<HTMLInputElement | null>(null);
+  let destinationAction = $state<'move' | 'copy'>('move');
+  type PendingCopy = { ticket: string; destination: string };
+  let pendingCopy = $state<PendingCopy | null>(null);
+  let copyRecovery = $state<'status' | 'retry' | null>(null);
+  let copyRecoveryMessage = $state('');
+  let copyStorageFailed = $state(false);
   let moveTarget = $state<Entry | null>(null);
   let movePath = $state<Folder[]>([]);
   let moveFolders = $state<Folder[]>([]);
@@ -785,6 +791,7 @@
   function clearCompletedFeedback(): void {
     feedbackRevision++;
     if (!removalSubmitting) removalPreview = null;
+    if (!pendingCopy) copyRecoveryMessage = '';
     notice = ''; actionNotice = ''; removalError = ''; removalSelection = [];
     if (!bulkBusy) {
       if (!bulkNeedsRefresh) { bulkReport = null; bulkError = ''; }
@@ -1247,6 +1254,7 @@
         return;
       }
       recoverRemoval();
+      recoverCopy();
       client.setSessionExpiredHandler(() => expireSession(generation));
       try {
         const pending = transfers.restore(user.id);
@@ -1404,6 +1412,7 @@
     draggedEntry = null; dropTarget = ''; dropPending = null; dropError = ''; moveNeedsRefresh = false; knownParents.clear();
     renameId = ''; renameName = ''; renameError = ''; renameBusy = false;
     closeMove(); moveBusy = false;
+    pendingCopy = null; copyRecovery = null; copyRecoveryMessage = ''; copyStorageFailed = false;
     removalSelection = []; removalPreview = null; removalPreparing = null; removalSubmitting = false; removalPending = null; removalChecking = false; removalError = '';
     trashRequest++; deletedItems = []; trashPageIndex = 0; trashPageCursors = [null]; trashNextCursor = null; trashHasMore = false; trashRetry = null; trashPaging = null; trashNotice = ''; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false; restoringId = ''; restoringName = ''; namespaceUnknown = null; namespaceInspecting = false;
   }
@@ -1515,7 +1524,7 @@
 
   function closeMove(): void {
     if (bulkAction === 'move') { bulkAction = null; bulkTargets = []; }
-    moveRequest++; moveCloseRefreshBusy = false; moveTarget = null; movePath = []; moveFolders = []; moveCursor = null; moveLoading = false; moveDestinationReady = false; moveError = '';
+    moveRequest++; moveCloseRefreshBusy = false; moveTarget = null; destinationAction = 'move'; movePath = []; moveFolders = []; moveCursor = null; moveLoading = false; moveDestinationReady = false; moveError = '';
   }
   async function closeMoveAndRefresh(): Promise<void> {
     if (moveCloseRefreshBusy) return;
@@ -1549,9 +1558,10 @@
       if (request === moveRequest && generation === sessionGeneration) moveError = 'Could not open this destination. Choose another folder or try again.';
     } finally { if (request === moveRequest) moveLoading = false; }
   }
-  async function beginMove(entry: Entry, trigger: HTMLElement): Promise<void> {
+  async function beginDestination(entry: Entry, trigger: HTMLElement, action: 'move' | 'copy'): Promise<void> {
     if (bulkBusy || bulkNeedsRefresh || dropPending || moveNeedsRefresh || namespaceUnknown) return;
-    closeMove(); moveTarget = entry; moveTrigger = trigger;
+    if (action === 'copy' && pendingCopy) return;
+    closeMove(); moveTarget = entry; moveTrigger = trigger; destinationAction = action;
     const root = folders[0];
     if (root) await loadMoveFolder([root]);
     else moveError = 'Your storage is unavailable. Close this dialog and refresh your files.';
@@ -1581,6 +1591,115 @@
       await refreshRoot();
       if (generation === sessionGeneration) await refresh();
     } catch { if (generation === sessionGeneration && feedbackRevision === completion) actionNotice = `Moved to ${destination.name}. Refresh your files to update the folder list.`; }
+  }
+
+  function saveCopy(pending: PendingCopy | null): void {
+    pendingCopy = pending;
+    if (!user) return;
+    const key = `sylux-copy:${user.id}`;
+    try {
+      if (pending) sessionStorage.setItem(key, JSON.stringify(pending));
+      else sessionStorage.removeItem(key);
+      copyStorageFailed = false;
+    } catch { copyStorageFailed = !!pending; }
+  }
+
+  function recoverCopy(): void {
+    if (!user) return;
+    try {
+      const saved = sessionStorage.getItem(`sylux-copy:${user.id}`);
+      if (!saved) return;
+      const pending = JSON.parse(saved) as PendingCopy;
+      if (typeof pending?.ticket !== 'string' || !pending.ticket || pending.ticket.length > 1024 ||
+          typeof pending.destination !== 'string' || !pending.destination) throw new Error('Invalid copy recovery');
+      pendingCopy = pending;
+      copyRecoveryMessage = 'Copy outcome unconfirmed.';
+    } catch { console.warn('Copy recovery could not be read.'); }
+  }
+
+  function copyFailure(error: unknown): string {
+    if (error instanceof HttpError) {
+      if (error.code === 'name_conflict') return 'An item with this name is already there. Choose another folder, or rename your item.';
+      if (error.code === 'invalid_destination') return 'A folder cannot be copied into itself or its children. Choose another folder.';
+      if (error.code === 'depth_limit') return 'Choose a destination closer to Files. This copy would nest folders too deeply.';
+      if (error.code === 'copy_ticket_expired') return 'The copy request expired. Choose a destination again.';
+      if (error.status === 404 || error.status === 412) return 'The item or destination changed. Refresh Files before trying again.';
+    }
+    return 'Could not copy this item. Try again.';
+  }
+
+  async function finishCopy(pending: PendingCopy, feedback: number): Promise<void> {
+    saveCopy(null);
+    copyRecoveryMessage = '';
+    const generation = sessionGeneration;
+    if (feedback === feedbackRevision) {
+      clearCompletedFeedback();
+      actionNotice = `Copied to ${pending.destination}`;
+    }
+    if (!accountView && !settingsView && !showTrash) {
+      const completion = feedbackRevision;
+      const refreshed = await refresh();
+      if (!refreshed && generation === sessionGeneration && completion === feedbackRevision &&
+          actionNotice === `Copied to ${pending.destination}`) {
+        actionNotice += '. Refresh Files to see the copy.';
+      }
+    } else {
+      entriesFolderId = '';
+    }
+  }
+
+  function copyMayBeUnconfirmed(error: unknown): boolean {
+    return moveOutcomeUncertain(error) || (error instanceof HttpError && [400, 401, 403].includes(error.status));
+  }
+
+  async function copyEntry(): Promise<void> {
+    const target = moveTarget, destination = movePath.at(-1);
+    if (!target || !destination || pendingCopy || moveBusy || moveLoading || !moveDestinationReady ||
+        namespaceUnknown || destination.id === target.parent_id || movePath.some(folder => folder.id === target.id)) return;
+    const generation = sessionGeneration, feedback = feedbackRevision;
+    moveBusy = true; moveError = '';
+    let pending: PendingCopy | null = null;
+    try {
+      const ticket = await listing.prepareCopy(target.id, destination.id, target.etag);
+      if (generation !== sessionGeneration) return;
+      pending = { ticket, destination: destination.name };
+      saveCopy(pending);
+      const state = await listing.copyStatus(ticket, false);
+      if (generation !== sessionGeneration) return;
+      closeMove();
+      if (state === 'committed') await finishCopy(pending, feedback);
+      else copyRecoveryMessage = 'Copy outcome unconfirmed.';
+    } catch (error) {
+      if (generation !== sessionGeneration) return;
+      if (pending && copyMayBeUnconfirmed(error)) {
+        closeMove();
+        copyRecoveryMessage = 'Copy outcome unconfirmed.';
+        await reconcileCopy('status', true, feedback);
+      } else {
+        if (pending) saveCopy(null);
+        moveError = copyFailure(error);
+      }
+    } finally { if (generation === sessionGeneration) moveBusy = false; }
+  }
+
+  async function reconcileCopy(mode: 'status' | 'retry', automatic = false, feedback = feedbackRevision): Promise<void> {
+    if (!pendingCopy || copyRecovery || (moveBusy && !automatic)) return;
+    const pending = pendingCopy, generation = sessionGeneration;
+    copyRecovery = mode;
+    try {
+      const state = await listing.copyStatus(pending.ticket, mode === 'status');
+      if (generation !== sessionGeneration) return;
+      if (state === 'committed') await finishCopy(pending, feedback);
+      else copyRecoveryMessage = 'Copy outcome unconfirmed. Retry the same copy to resolve it.';
+    } catch (error) {
+      if (generation !== sessionGeneration) return;
+      if (mode === 'retry' && !copyMayBeUnconfirmed(error) && !(error instanceof HttpError && error.code === 'copy_not_committed')) {
+        saveCopy(null);
+        if (feedback === feedbackRevision) copyRecoveryMessage = copyFailure(error);
+      } else {
+        copyRecoveryMessage = 'Copy outcome unconfirmed. Check your connection and try again.';
+      }
+    } finally { if (generation === sessionGeneration) copyRecovery = null; }
   }
 
   function trashRoots(targets: Entry[]): Entry[] {
@@ -1957,11 +2076,11 @@
     previewEntry = null; previewTrigger = null;
     void tick().then(() => { if (generation === sessionGeneration && request === navigationRequest) restoreFocus(trigger); });
   }
-  function entryAction(action: 'download' | 'rename' | 'move' | 'delete', entry: Entry, trigger: HTMLElement): void {
+  function entryAction(action: 'download' | 'rename' | 'move' | 'copy' | 'delete', entry: Entry, trigger: HTMLElement): void {
     if (bulkBusy || ((bulkNeedsRefresh || namespaceUnknown) && action !== 'download')) return;
     if (action === 'download') void (entry.kind === 'folder' ? downloadArchive([entry]) : download(entry));
     else if (action === 'rename') beginRename(entry, trigger);
-    else if (action === 'move') void beginMove(entry, trigger);
+    else if (action === 'move' || action === 'copy') void beginDestination(entry, trigger, action);
     else { trashError = ''; trashTarget = entry; trashTrigger = trigger; }
   }
 
@@ -2673,6 +2792,19 @@
                 <p role="status">Restoring {restoringName}…</p><Button variant="ghost" onclick={openTrash}>Open Trash</Button>
               </div>
             {/if}
+            {#if pendingCopy && (!moveBusy || !moveTarget)}
+              <section class="upload-batch-report" aria-label="Copy status" aria-busy={!!copyRecovery}>
+                <p role="status">{copyRecoveryMessage || 'Checking copy status…'}</p>
+                {#if copyStorageFailed}<p>Keep this tab open until the copy is confirmed. This browser could not save recovery.</p>{/if}
+                <Button variant="outline" size="sm" disabled={!!copyRecovery || moveBusy} onclick={() => reconcileCopy('status')}>{copyRecovery === 'status' ? 'Checking…' : 'Check copy status'}</Button>
+                <Button variant="outline" size="sm" disabled={!!copyRecovery || moveBusy} onclick={() => reconcileCopy('retry')}>{copyRecovery === 'retry' ? 'Retrying…' : 'Retry same copy'}</Button>
+              </section>
+            {:else if !pendingCopy && copyRecoveryMessage}
+              <div class="action-feedback workspace-feedback">
+                <p role="alert">{copyRecoveryMessage}</p>
+                <Button variant="ghost" size="icon" aria-label="Dismiss copy notification" onclick={() => copyRecoveryMessage = ''}><XIcon /></Button>
+              </div>
+            {/if}
             {#if removalPending}
               <section class="upload-batch-report" aria-label="Permanent removal status">
                 <p role="status">{removalPending.message}</p>
@@ -2870,7 +3002,7 @@
                       <div role="cell" class="search-item-main name-cell"><button type="button" class="item-name" disabled={bulkBusy} title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{hit.entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : 'Size unknown'} · {@render modifiedDateLabel(hit.entry)}</span></span></button></div>
                         <div role="cell" class="search-location file-location"><span>Files{#each hit.location.slice(1) as folder (folder.id)}{' / '}{folder.name}{/each}</span><Button variant="link" size="sm" disabled={bulkBusy} onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
                       <span role="cell" class="file-modified">{@render modifiedDateLabel(hit.entry)}</span><span role="cell" class="file-size">{hit.entry.kind === 'folder' ? '—' : typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : '—'}</span>
-                      <div role="cell" class="options-cell"><EntryOptions entry={hit.entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(hit.entry.id)} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} /></div>
+                      <div role="cell" class="options-cell"><EntryOptions entry={hit.entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} copyDisabled={moveNeedsRefresh || !!pendingCopy} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(hit.entry.id)} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} /></div>
                     </div>
                   {/each}
                 {/if}</div></div>
@@ -2913,7 +3045,7 @@
               <div role="row" tabindex="-1" aria-label={entry.name} data-entry-id={entry.id} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row modified-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
                 <div role="cell" class="entry-selection"><label><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, entry.id)} /></label></div>
                 <div role="cell" class="name-cell"><button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'} · {@render modifiedDateLabel(entry)}</span></span></button></div><span role="cell" class="file-modified">{@render modifiedDateLabel(entry)}</span><span role="cell" class="file-size">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span>
-                <div role="cell" class="options-cell"><EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(entry.id)} onaction={(action, trigger) => entryAction(action, entry, trigger)} /></div>
+                <div role="cell" class="options-cell"><EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} copyDisabled={moveNeedsRefresh || !!pendingCopy} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(entry.id)} onaction={(action, trigger) => entryAction(action, entry, trigger)} /></div>
               </div>
             {/each}</div>{/if}
             </section>
@@ -2937,18 +3069,18 @@
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !moveBusy && !bulkBusy) closeMove(); }}>
-      <Dialog.Content showCloseButton={!bulkBusy} class="max-h-[85dvh] overflow-y-auto" onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger ?? moveTrigger); moveTrigger = null; bulkTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Move {bulkAction === 'move' ? `${bulkTargets.length} selected items` : moveTarget?.name}</Dialog.Title><Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.{bulkAction === 'move' ? ' Each item is handled separately; some items may stay in place.' : ''}</Dialog.Description></Dialog.Header>
-        <nav aria-label="Move destination path" class="flex flex-wrap gap-2">{#each movePath as folder, index (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => loadMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>{/each}</nav>
+      <Dialog.Content showCloseButton={!bulkBusy && (destinationAction === 'move' || !moveBusy)} class="max-h-[85dvh] overflow-y-auto" onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger ?? moveTrigger); moveTrigger = null; bulkTrigger = null; }}>
+        <Dialog.Header><Dialog.Title>{destinationAction === 'copy' ? 'Copy' : 'Move'} {bulkAction === 'move' ? `${bulkTargets.length} selected items` : moveTarget?.name}</Dialog.Title><Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.{bulkAction === 'move' ? ' Each item is handled separately; some items may stay in place.' : ''}</Dialog.Description></Dialog.Header>
+        <nav aria-label={destinationAction === 'copy' ? 'Copy destination path' : 'Move destination path'} class="flex flex-wrap gap-2">{#each movePath as folder, index (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => loadMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>{/each}</nav>
         <div class="grid gap-2 rounded-lg border p-3" aria-label="Destination folders" aria-busy={moveLoading}>
           {#if moveLoading}<p role="status">Loading destinations...</p>{:else if moveFolders.length === 0}<p class="text-muted-foreground text-sm">No folders here.</p>{/if}
-          {#each moveFolders as folder (folder.id)}<Button variant="ghost" class="h-auto min-h-9 justify-start text-left break-all whitespace-normal" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy || folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder))} onclick={() => loadMoveFolder([...movePath, folder])}><FolderIcon class="size-4 shrink-0" />{folder.name}{folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder)) ? ' (cannot move into itself)' : ''}</Button>{/each}
+          {#each moveFolders as folder (folder.id)}<Button variant="ghost" class="h-auto min-h-9 justify-start text-left break-all whitespace-normal" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy || folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder))} onclick={() => loadMoveFolder([...movePath, folder])}><FolderIcon class="size-4 shrink-0" />{folder.name}{folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder)) ? ` (cannot ${destinationAction} into itself)` : ''}</Button>{/each}
           {#if moveCursor}<Button variant="outline" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy} onclick={() => loadMoveFolder(movePath, moveCursor)}>More destination folders</Button>{/if}
         </div>
         <p class="text-sm break-all">Destination: {movePath.map((folder) => folder.name).join(' / ') || 'Choose a folder'}</p>
         {#if movePath.at(-1)?.id === moveTarget?.parent_id || (bulkAction === 'move' && bulkTargets.every((entry) => entry.parent_id === movePath.at(-1)?.id))}<p class="text-muted-foreground text-sm">{bulkAction === 'move' ? 'The selected items are already here.' : 'This item is already here.'} Open another folder or choose an ancestor above.</p>{/if}
         {#if moveError}<p role="alert">{moveError}</p>{/if}{#if moveNeedsRefresh || moveCloseRefreshBusy}<RefreshButton label="Close and refresh files" busyLabel="Refreshing files…" busy={moveCloseRefreshBusy} disabled={moveBusy || moveLoading} onclick={closeMoveAndRefresh} />{:else if moveError || moveLoading}<RefreshButton label="Refresh destinations" busyLabel="Refreshing destinations…" busy={moveLoading} disabled={moveBusy} onclick={() => loadMoveFolder(movePath.length ? movePath : folders.slice(0, 1))} />{/if}
-        <Dialog.Footer><Button variant="outline" disabled={moveBusy || bulkBusy} onclick={closeMove}>Cancel</Button><Button disabled={moveBusy || bulkBusy || moveNeedsRefresh || moveLoading || !moveDestinationReady || !movePath.length || movePath.at(-1)?.id === moveTarget?.parent_id || (bulkAction === 'move' && bulkTargets.every((entry) => entry.parent_id === movePath.at(-1)?.id))} onclick={() => bulkAction === 'move' ? runBulk() : moveEntry()}>{moveBusy || bulkBusy ? 'Moving...' : 'Move here'}</Button></Dialog.Footer>
+        <Dialog.Footer><Button variant="outline" disabled={moveBusy || bulkBusy} onclick={closeMove}>Cancel</Button><Button disabled={moveBusy || bulkBusy || moveNeedsRefresh || moveLoading || !moveDestinationReady || !movePath.length || movePath.at(-1)?.id === moveTarget?.parent_id || (bulkAction === 'move' && bulkTargets.every((entry) => entry.parent_id === movePath.at(-1)?.id))} aria-busy={moveBusy || bulkBusy} onclick={() => bulkAction === 'move' ? runBulk() : destinationAction === 'copy' ? copyEntry() : moveEntry()}>{destinationAction === 'copy' ? (moveBusy ? 'Copying…' : 'Copy here') : (moveBusy || bulkBusy ? 'Moving...' : 'Move here')}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={bulkAction === 'trash'} onOpenChange={(open) => { if (!open) closeBulk(); }}>

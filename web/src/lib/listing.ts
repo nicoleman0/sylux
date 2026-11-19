@@ -77,6 +77,20 @@ export class ListingApi {
       method: 'POST', headers: { 'If-Match': etag }, body: { parent_id: parentId },
     });
   }
+  async prepareCopy(entryId: string, parentId: string, etag: string): Promise<string> {
+    const result = await this.client.request<{ ticket: string }>(`/entries/${encodeURIComponent(entryId)}/copy-ticket`, {
+      method: 'POST', headers: { 'If-Match': etag }, body: { parent_id: parentId },
+    });
+    if (typeof result?.ticket !== 'string' || !result.ticket || result.ticket.length > 1024) throw new Error('Invalid copy ticket');
+    return result.ticket;
+  }
+  async copyStatus(ticket: string, checkOnly: boolean): Promise<'committed' | 'unknown'> {
+    const result = await this.client.request<{ state: string }>(checkOnly ? '/copies/status' : '/copies', {
+      method: 'POST', body: { ticket },
+    });
+    if (result?.state !== 'committed' && result?.state !== 'unknown') throw new Error('Invalid copy result');
+    return result.state;
+  }
   async deleted(cursor?: string | null, sort: ResultSort = 'name_asc'): Promise<TrashPage> {
     const page = await this.client.request<TrashPage>(`/trash?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
     if (!Array.isArray(page.items) || page.items.length > 100 || typeof page.has_more !== 'boolean' ||

@@ -458,6 +458,114 @@ pub fn move_entry(
     })
 }
 
+/// Copy the reachable live tree inside a transaction that rolls back on any error.
+pub(crate) fn copy_entry(
+    db: &Transaction<'_>,
+    owner: &str,
+    source: &str,
+    destination: &str,
+    if_match: &str,
+    copy_root: &str,
+    now: i64,
+) -> Result<(), NamespaceError> {
+    let (parent, generation): (String, i64) = db
+        .query_row(
+            "SELECT parent_id,generation FROM entry
+             WHERE entry_id=?1 AND owner_account_id=?2 AND state='active' AND parent_id IS NOT NULL",
+            params![source, owner],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| NamespaceError::Sql)?
+        .ok_or(NamespaceError::NotFound)?;
+    folder_path(db, owner, &parent)?;
+    if if_match != folder_etag(source, generation as u64) {
+        return Err(NamespaceError::Stale);
+    }
+    let path = folder_path(db, owner, destination)?;
+    if path.iter().any(|folder| folder.id == source) {
+        return Err(NamespaceError::InvalidDestination);
+    }
+    let conflict: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM entry source CROSS JOIN entry sibling ON sibling.name_key=source.name_key
+         WHERE source.entry_id=?1 AND sibling.owner_account_id=?2 AND sibling.parent_id=?3 AND sibling.state='active')",
+        params![source, owner, destination],
+        |row| row.get(0),
+    ).map_err(|_| NamespaceError::Sql)?;
+    if conflict {
+        return Err(NamespaceError::Conflict);
+    }
+
+    let mut tree = db
+        .prepare(
+            "WITH RECURSIVE tree(id,parent,kind,depth) AS (
+            SELECT entry_id,parent_id,kind,0 FROM entry WHERE entry_id=?1
+            UNION ALL
+            SELECT e.entry_id,e.parent_id,e.kind,t.depth+1 FROM tree t
+            CROSS JOIN entry e ON e.parent_id=t.id
+            WHERE t.kind='folder' AND e.owner_account_id=?2 AND e.state='active'
+         ) SELECT id,parent,kind='folder',depth FROM tree ORDER BY depth",
+        )
+        .map_err(|_| NamespaceError::Sql)?;
+    let members: Vec<(String, String, bool, i64)> = tree
+        .query_map(params![source, owner], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .and_then(|rows| rows.collect())
+        .map_err(|_| NamespaceError::Sql)?;
+    if members
+        .last()
+        .is_some_and(|member| path.len() as i64 + member.3 > MAX_ENTRY_DEPTH)
+    {
+        return Err(NamespaceError::DepthLimit);
+    }
+
+    let mut create_entry = db.prepare(
+        "INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version)
+         SELECT ?2,owner_account_id,?3,kind,original_name,name_key,name_key_version FROM entry WHERE entry_id=?1",
+    ).map_err(|_| NamespaceError::Sql)?;
+    let mut create_revision = db.prepare(
+        "INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id)
+         SELECT ?2,?3,r.blob_id,r.length,r.sha256,?4,e.owner_account_id FROM entry e
+         JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id WHERE e.entry_id=?1",
+    ).map_err(|_| NamespaceError::Sql)?;
+    let mut set_revision = db
+        .prepare("UPDATE entry SET current_revision_id=?2 WHERE entry_id=?1")
+        .map_err(|_| NamespaceError::Sql)?;
+    let mut copied_folders = std::collections::HashMap::new();
+    for (entry, parent, is_folder, depth) in members {
+        let (copy, copy_parent) = if depth == 0 {
+            (copy_root.to_owned(), destination)
+        } else {
+            let copy_parent: &String = copied_folders.get(&parent).ok_or(NamespaceError::Sql)?;
+            (id()?, copy_parent.as_str())
+        };
+        create_entry
+            .execute(params![entry, copy, copy_parent])
+            .map_err(|_| NamespaceError::Sql)?;
+        if is_folder {
+            copied_folders.insert(entry, copy);
+        } else {
+            let revision = id()?;
+            let inserted = create_revision
+                .execute(params![entry, revision, copy, now])
+                .map_err(|_| NamespaceError::Sql)?;
+            if inserted != 1 {
+                return Err(NamespaceError::Sql);
+            }
+            set_revision
+                .execute(params![copy, revision])
+                .map_err(|_| NamespaceError::Sql)?;
+        }
+    }
+    db.execute(
+        "UPDATE entry SET generation=generation+1 WHERE entry_id=?1",
+        [destination],
+    )
+    .map_err(|_| NamespaceError::Sql)?;
+    Ok(())
+}
+
 /// Hide a tree behind its root marker while retaining payloads and earlier deletions.
 pub fn trash(
     db: &Transaction<'_>,
