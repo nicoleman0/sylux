@@ -12,6 +12,7 @@ pub enum CommandKind {
     AdminResetPassword,
     AdminVerifyPayloads,
     AdminExport,
+    AdminBackup,
 }
 
 #[derive(Debug)]
@@ -63,6 +64,7 @@ where
             Some("reset-password") => CommandKind::AdminResetPassword,
             Some("verify-payloads") => CommandKind::AdminVerifyPayloads,
             Some("export") => CommandKind::AdminExport,
+            Some("backup") => CommandKind::AdminBackup,
             _ => return Err(ConfigError::Usage("admin_subcommand_required")),
         },
         _ => return Err(ConfigError::Usage("subcommand_required")),
@@ -80,18 +82,21 @@ where
         let flag = argument
             .to_str()
             .ok_or(ConfigError::Usage("argument_not_utf8"))?;
-        // Offline admin commands accept only their own flags.
+        // Admin commands accept only their own flags.
         let allowed: Option<&[&str]> = match command {
             CommandKind::AdminResetPassword => Some(&["--root", "--handle", "--password-stdin"]),
             CommandKind::AdminVerifyPayloads => Some(&["--root"]),
             CommandKind::AdminExport => Some(&["--root", "--handle", "--destination"]),
+            CommandKind::AdminBackup => Some(&["--root", "--destination"]),
             CommandKind::Init | CommandKind::Serve => None,
         };
         if allowed.is_some_and(|flags| !flags.contains(&flag)) {
             return Err(ConfigError::Usage("unknown_argument"));
         }
         match flag {
-            "--destination" if command == CommandKind::AdminExport => {
+            "--destination"
+                if matches!(command, CommandKind::AdminExport | CommandKind::AdminBackup) =>
+            {
                 set_once(
                     &mut destination,
                     value_path(&mut arguments, "destination_value_missing")?,
@@ -165,13 +170,13 @@ where
             return Err(ConfigError::Usage("password_stdin_required"));
         }
     }
-    if command == CommandKind::AdminExport {
-        if admin_handle.as_deref().is_none_or(str::is_empty) {
-            return Err(ConfigError::Usage("handle_required"));
-        }
-        if destination.is_none() {
-            return Err(ConfigError::Usage("destination_required"));
-        }
+    if command == CommandKind::AdminExport && admin_handle.as_deref().is_none_or(str::is_empty) {
+        return Err(ConfigError::Usage("handle_required"));
+    }
+    if matches!(command, CommandKind::AdminExport | CommandKind::AdminBackup)
+        && destination.is_none()
+    {
+        return Err(ConfigError::Usage("destination_required"));
     }
     let listen = listen
         .or_else(|| {
