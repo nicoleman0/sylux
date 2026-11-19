@@ -1057,10 +1057,11 @@
     onRequest?.(request);
     const generation = sessionGeneration;
     const query = searchQuery;
+    const folderId = currentFolder.id === folders[0]?.id ? null : currentFolder.id;
     clearSelection();
     searchLoading = true; searchError = '';
     try {
-      const page = await listing.search(query, cursor, controller.signal, searchSort);
+      const page = await listing.search(query, folderId, cursor, controller.signal, searchSort);
       if (request !== searchRequest || generation !== sessionGeneration || query !== searchQuery || accountView || settingsView || showTrash) return false;
       searchItems = page.items;
       moveNeedsRefresh = false;
@@ -2846,8 +2847,7 @@
               {/if}
             </div>
             <div class="search-toolbar">
-              <Label for="file-search">Search files and folders</Label>
-              <div class="search-controls"><Input id="file-search" disabled={bulkBusy || restorationPending} type="search" placeholder="Search by name" maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
+              <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || restorationPending} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : 'Search by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
                   oncompositionstart={searchCompositionStarted} oncompositionend={(event) => { searchComposing = false; searchInput = event.currentTarget.value; searchChanged(); }} />
                 {#if searchQuery}<Button variant="outline" type="button" disabled={bulkBusy || restorationPending} onclick={clearSearchFromButton}>Clear search</Button>{/if}
               </div>

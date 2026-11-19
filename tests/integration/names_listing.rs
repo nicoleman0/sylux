@@ -507,6 +507,190 @@ async fn search_reaches_nested_literal_matches_and_isolates_paths_and_pages() {
 }
 
 #[tokio::test]
+async fn search_scopes_descendants_before_pagination_and_binds_cursors_to_the_folder() {
+    let fixture = HttpFixture::new("folder-search", 0).await;
+    let (parent, scope, child, sibling, hidden, hidden_child, foreign, file) = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            let folder = |parent, name| namespace::create_folder(tx, OWNER, parent, name).unwrap();
+            let parent = folder(ROOT, "Projects");
+            let scope = folder(&parent.id, "match-scope");
+            let child = folder(&scope.id, "Drafts");
+            let sibling = folder(&parent.id, "Sibling");
+            folder(&sibling.id, "match-a-sibling");
+            let hidden = folder(&scope.id, "match-hidden");
+            let hidden_child = folder(&hidden.id, "match-hidden-child");
+            let hidden_etag = namespace::folder_path(tx, OWNER, &hidden.id)
+                .unwrap()
+                .pop()
+                .unwrap()
+                .etag;
+            namespace::trash(tx, OWNER, &hidden.id, &hidden_etag).unwrap();
+            let foreign = namespace::create_folder(tx, OTHER, OTHER_ROOT, "match-private").unwrap();
+            let file = "0000000000000000000000000000fa01";
+            insert_sized_file_at(tx, file, "match-b-local", 12, 1);
+            tx.execute(
+                "UPDATE entry SET parent_id=?1 WHERE entry_id=?2",
+                params![scope.id, file],
+            )
+            .unwrap();
+            folder(&child.id, "match-c-descendant");
+            Ok((
+                parent.id,
+                scope.id,
+                child.id,
+                sibling.id,
+                hidden.id,
+                hidden_child.id,
+                foreign.id,
+                file,
+            ))
+        })
+        .await
+        .unwrap();
+
+    let query = "?q=match&limit=1";
+    let scoped = format!("{query}&folder_id={scope}");
+    let mut first_cursors = Vec::new();
+    for (path, expected) in [
+        (scoped.as_str(), vec!["match-b-local", "match-c-descendant"]),
+        (
+            query,
+            vec![
+                "match-a-sibling",
+                "match-b-local",
+                "match-c-descendant",
+                "match-scope",
+            ],
+        ),
+    ] {
+        let mut cursor = None;
+        for (index, name) in expected.iter().enumerate() {
+            let suffix = cursor
+                .as_ref()
+                .map(|value| format!("&cursor={value}"))
+                .unwrap_or_default();
+            let (status, body) = fixture.search(&format!("{path}{suffix}")).await;
+            assert_eq!(status, 200, "{path}: {}", String::from_utf8_lossy(&body));
+            let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let items = page["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["entry"]["name"], *name);
+            if *name == "match-c-descendant" {
+                let location = items[0]["location"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|entry| entry["id"].as_str().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(location, [ROOT, &parent, &scope, &child]);
+            }
+            cursor = page["next_cursor"].as_str().map(str::to_owned);
+            assert_eq!(page["has_more"], index + 1 < expected.len());
+            assert_eq!(cursor.is_some(), index + 1 < expected.len());
+            if index == 0 {
+                first_cursors.push(cursor.clone().unwrap());
+            }
+        }
+    }
+    let nested_cursor = &first_cursors[0];
+    let root_cursor = &first_cursors[1];
+    for (path, cursor) in [
+        (query.to_owned(), nested_cursor),
+        (format!("{query}&folder_id={sibling}"), nested_cursor),
+        (scoped.clone(), root_cursor),
+    ] {
+        let (status, body) = fixture.search(&format!("{path}&cursor={cursor}")).await;
+        assert_eq!(status, 400);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+            "invalid_cursor"
+        );
+    }
+    assert_eq!(
+        fixture
+            .search(&format!("{query}&folder_id={ROOT}&cursor={root_cursor}"))
+            .await
+            .0,
+        200
+    );
+    for invalid in ["bogus", file, &hidden, &hidden_child, &foreign] {
+        let (status, body) = fixture
+            .search(&format!("{query}&folder_id={invalid}"))
+            .await;
+        assert_eq!(status, 404, "{invalid}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+            "not_found"
+        );
+    }
+
+    fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(move |tx| {
+            let etag = namespace::folder_path(tx, OWNER, &parent).unwrap()[1]
+                .etag
+                .clone();
+            namespace::rename(tx, OWNER, &parent, "Renamed", &etag).unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (status, body) = fixture
+        .search(&format!("{scoped}&cursor={nested_cursor}"))
+        .await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+        "listing_changed"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn scoped_search_reaches_match_at_maximum_absolute_depth() {
+    let fixture = HttpFixture::new("deep-folder-search", 0).await;
+    let (scope, deepest) = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .transact(|tx| {
+            let mut parent = ROOT.to_owned();
+            let mut scope = String::new();
+            for depth in 1..=128 {
+                let name = if depth == 128 {
+                    "boundary-match".to_owned()
+                } else {
+                    format!("depth-{depth}")
+                };
+                parent = namespace::create_folder(tx, OWNER, &parent, &name)
+                    .unwrap()
+                    .id;
+                if depth == 120 {
+                    scope = parent.clone();
+                }
+            }
+            Ok((scope, parent))
+        })
+        .await
+        .unwrap();
+    let (status, body) = fixture
+        .search(&format!("?q=boundary-match&folder_id={scope}"))
+        .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["entry"]["id"], deepest);
+    assert_eq!(items[0]["location"].as_array().unwrap().len(), 128);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn search_page_moves_fifty_files_through_http_with_ownership_etags_and_conflicts() {
     let fixture = HttpFixture::new("search-bulk-move", 0).await;
     let (destination, blocker) = fixture.workers.as_ref().unwrap().transact(|tx| {

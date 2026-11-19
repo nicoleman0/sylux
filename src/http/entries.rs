@@ -136,6 +136,7 @@ const MAX_CURSOR_BYTES: usize = 4096;
 #[serde(deny_unknown_fields)]
 pub struct SearchQuery {
     q: String,
+    folder_id: Option<String>,
     sort: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
@@ -160,6 +161,8 @@ fn result_sort(value: Option<&str>) -> Result<namespace::ResultSort, Response> {
 struct SearchCursor {
     version: u8,
     actor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder_id: Option<String>,
     query: String,
     sort: namespace::ResultSort,
     fingerprint: String,
@@ -249,15 +252,21 @@ fn build_search(
         return Err(error(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
     let sort = result_sort(q.sort.as_deref())?;
-    let found = domain_search::find_sorted(db, &account, &q.q, sort)
-        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?;
+    let found = domain_search::find_sorted(db, &account, q.folder_id.as_deref(), &q.q, sort)
+        .map_err(|failure| match failure {
+            NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
+            _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        })?;
+    // Keep existing root cursors valid and make older servers reject folder cursors.
+    let version = if found.folder_id.is_some() { 3 } else { 2 };
     let offset = if let Some(token) = q.cursor {
         let Some(cursor) = search_cursor_decode(&key, &token) else {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
         };
-        if cursor.version != 2
+        if cursor.version != version
             || cursor.sort != sort
             || cursor.actor != account
+            || cursor.folder_id != found.folder_id
             || cursor.query != q.q
             || cursor.offset == 0
         {
@@ -278,9 +287,10 @@ fn build_search(
         search_cursor_encode(
             &key,
             &SearchCursor {
-                version: 2,
+                version,
                 sort,
                 actor: account,
+                folder_id: found.folder_id,
                 query: q.q,
                 fingerprint: found.fingerprint,
                 offset: end,

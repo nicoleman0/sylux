@@ -1,10 +1,11 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 
 const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: 'root:1' };
+const projects = { id: 'projects', parent_id: root.id, name: 'Projects', kind: 'folder', etag: 'projects:1' };
 const file = (name: string) => ({ id: name, parent_id: 'root', name, kind: 'file', size: 3, etag: 'file:1' });
 const result = (query: string) => ({ items: [{ entry: file(`${query}.txt`), location: [root] }], next_cursor: null, has_more: false });
 
-async function login(page: Page) {
+async function login(page: Page, includeProjects = false) {
   await page.route('**/*', route => {
     const path = new URL(route.request().url()).pathname;
     const json = (value: unknown) => route.fulfill({ json: value });
@@ -14,7 +15,9 @@ async function login(page: Page) {
     if (path === '/accounts') return json([{ account_id: 'owner', handle: 'owner', role: 'administrator', enabled: true }]);
     if (path === '/folders/children') return json({ root, items: [], next_cursor: null, has_more: false });
     if (path === '/folders/root/path') return json({ items: [root] });
-    if (path === '/folders/root/children') return json({ items: [file('notes.txt')], next_cursor: null, has_more: false });
+    if (path === '/folders/root/children') return json({ items: [file('notes.txt'), ...(includeProjects ? [projects] : [])], next_cursor: null, has_more: false });
+    if (path === '/folders/projects/path') return json({ items: [root, projects] });
+    if (path === '/folders/projects/children') return json({ items: [{ ...file('Draft.txt'), parent_id: projects.id }], next_cursor: null, has_more: false });
     if (path === '/trash') return json({ items: [], next_cursor: null, has_more: false });
     return route.continue();
   });
@@ -22,8 +25,74 @@ async function login(page: Page) {
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password', { exact: true }).fill('password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.locator('.file-row')).toBeVisible();
+  await expect(page.getByRole('row', { name: 'notes.txt', exact: true })).toBeVisible();
 }
+
+test('keyboard search sends the current folder and clearing restores its listing', async ({ page }) => {
+  await login(page, true);
+  await page.getByRole('button', { name: 'Open Projects', exact: true }).click();
+  const draft = page.getByRole('row', { name: 'Draft.txt', exact: true });
+  await expect(draft).toBeVisible();
+  const input = page.getByRole('searchbox', { name: 'Search files and folders', exact: true });
+  await expect(page.getByText('Search files and folders', { exact: true })).toHaveCount(0);
+  await expect(input).toHaveAttribute('placeholder', 'Search this folder by name');
+  await page.route('**/entries/search?*', route => route.fulfill({
+    json: { items: [{ entry: { ...file('Draft.txt'), parent_id: projects.id }, location: [root, projects] }], next_cursor: null, has_more: false },
+  }));
+  await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(input).toBeFocused();
+  const request = page.waitForRequest(url => new URL(url.url()).pathname === '/entries/search');
+  await page.keyboard.type('Draft');
+  await page.keyboard.press('Enter');
+  expect(new URL((await request).url()).searchParams.get('folder_id')).toBe(projects.id);
+  const results = page.getByRole('region', { name: 'Search results' });
+  await expect(results.getByRole('row', { name: 'Draft.txt', exact: true })).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'Clear search', exact: true })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(results).toHaveCount(0);
+  await expect(input).toHaveValue('');
+  await expect(input).toBeFocused();
+  await expect(draft).toBeVisible();
+});
+
+test('scoped search retains its folder across pages, sorting and Back', async ({ page }) => {
+  await login(page, true);
+  await page.getByRole('button', { name: 'Open Projects', exact: true }).click();
+  const requests: URL[] = [];
+  await page.route('**/entries/search?*', route => {
+    const url = new URL(route.request().url());
+    requests.push(url);
+    const second = url.searchParams.has('cursor');
+    const name = second ? 'Draft-two.txt' : 'Draft-one.txt';
+    return route.fulfill({ json: {
+      items: [{ entry: { ...file(name), parent_id: projects.id }, location: [root, projects] }],
+      next_cursor: second ? null : 'next', has_more: !second,
+    } });
+  });
+  const input = page.getByRole('searchbox', { name: 'Search files and folders' });
+  await input.fill('Draft');
+  await input.press('Enter');
+  await expect(page.getByRole('row', { name: 'Draft-one.txt', exact: true })).toBeVisible();
+  expect(requests.at(-1)?.searchParams.get('folder_id')).toBe(projects.id);
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await expect(page.getByRole('row', { name: 'Draft-two.txt', exact: true })).toBeVisible();
+  expect(requests.at(-1)?.searchParams.get('cursor')).toBe('next');
+  expect(requests.at(-1)?.searchParams.get('folder_id')).toBe(projects.id);
+  await page.getByRole('region', { name: 'Search results' }).getByRole('button', { name: 'Sort by name, descending', exact: true }).click();
+  await expect.poll(() => requests.at(-1)?.searchParams.get('sort')).toBe('name_desc');
+  expect(requests.at(-1)?.searchParams.get('folder_id')).toBe(projects.id);
+  expect(requests.at(-1)?.searchParams.has('cursor')).toBe(false);
+  await expect(page.getByRole('row', { name: 'Draft-one.txt', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
+  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  const previousCount = requests.length;
+  await page.goBack();
+  await expect.poll(() => requests.length).toBeGreaterThan(previousCount);
+  await expect(page.getByRole('row', { name: 'Draft-one.txt', exact: true })).toBeVisible();
+  expect(requests.at(-1)?.searchParams.get('folder_id')).toBe(projects.id);
+});
 
 // Opt-in measurement of the real input/render path. Change only the timer between runs.
 test('measure search scheduling', async ({ page }, info) => {
