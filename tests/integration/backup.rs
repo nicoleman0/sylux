@@ -624,6 +624,30 @@ async fn cli_refuses_overlap_aliases_and_nonempty_destinations() {
 }
 
 #[tokio::test]
+async fn cli_rejects_invalid_setup_authorization_without_publishing() {
+    let _serial = CLI_FIXTURES.lock().await;
+    let fixture = Fixture::new("setup-authorization");
+    let authorization = fixture.live.join("secrets/setup.authorization");
+    let original = fs::read(&authorization).unwrap();
+    let wrong = if original[0] == b'a' { b"b" } else { b"a" };
+    let mut mismatch = original.clone();
+    mismatch[0] = wrong[0];
+    fs::write(&authorization, &mismatch).unwrap();
+    backup_failed(
+        fixture.backup_to(&fixture.backup).await,
+        "backup_setup_authorization_does_not_match_snapshot",
+    );
+    assert!(!fixture.backup.exists());
+    fs::write(&authorization, b"malformed").unwrap();
+    backup_failed(
+        fixture.backup_to(&fixture.backup).await,
+        "setup_authorization_invalid",
+    );
+    assert!(!fixture.backup.exists());
+    fixture.close();
+}
+
+#[tokio::test]
 async fn cli_discards_failed_payload_copy_and_does_not_write_live_data() {
     let _serial = CLI_FIXTURES.lock().await;
     let fixture = Fixture::new("bad-payload");

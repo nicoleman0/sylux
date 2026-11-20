@@ -99,7 +99,9 @@ settings. Keep it as private as the live root.
 
 With the default install paths, create a backup under `/mnt/backup/sylux`.
 Use a new name for each backup. If you changed `SYLUX_DATA_DIR`, replace
-`/srv/sylux` with the actual path.
+`/srv/sylux` with the actual path. The service must be running for this
+read-only mount so SQLite WAL sidecars are available. For a stopped instance,
+use the [stopped-service archive](#4-stop-back-up-and-restore) instead.
 
 ```sh
 findmnt -T /mnt/backup -o TARGET,SOURCE,FSTYPE,OPTIONS || exit 1
@@ -114,15 +116,16 @@ docker run --rm --network none --read-only --cap-drop ALL \
 For a native install, run `sylux admin backup --root ROOT --destination DIRECTORY`
 as the service user. The parent must exist and the destination must be new or
 empty. Use a parent outside the live root, with no other writable mount of the
-live tree under it. A native backup opens SQLite read-only and can still
-participate in SQLite's WAL coordination through its sidecar files.
+live tree under it. A native or writable-mount backup opens SQLite read-only
+but may create or update SQLite WAL sidecar files.
 
 Exit 0 and `backup_complete payloads=N` mean Sylux checked the SQLite snapshot
 and the copied bytes, then ran startup reconciliation on the copy. The count
 includes any complete bodies awaiting upload commit. Use only the named output
 of a successful command. An interruption can leave a private sibling directory
 named `.sylux-backup-incomplete-*`. Discard it after confirming the command has
-stopped.
+stopped. A failed command leaves live database data, payloads and secrets
+unchanged and publishes no valid backup.
 
 The metadata records one SQLite snapshot taken near the start of the command.
 Files committed and present at that point, including retained Trash contents,

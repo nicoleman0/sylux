@@ -374,6 +374,61 @@ mod tests {
     }
 
     #[test]
+    fn backup_parser_accepts_root_and_destination() {
+        let parsed = parse(args(&[
+            "admin",
+            "backup",
+            "--root",
+            "/x",
+            "--destination",
+            "/y",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.command, CommandKind::AdminBackup);
+        assert_eq!(parsed.root, Path::new("/x"));
+        assert_eq!(parsed.destination.as_deref(), Some(Path::new("/y")));
+        for (input, reason) in [
+            (vec!["admin", "backup"], "root_required"),
+            (
+                vec!["admin", "backup", "--root", "/x"],
+                "destination_required",
+            ),
+            (
+                vec!["admin", "backup", "--root", "/x", "--destination"],
+                "destination_value_missing",
+            ),
+            (
+                vec![
+                    "admin",
+                    "backup",
+                    "--root",
+                    "/x",
+                    "--destination",
+                    "/y",
+                    "--destination",
+                    "/z",
+                ],
+                "duplicate_destination",
+            ),
+            (
+                vec![
+                    "admin",
+                    "backup",
+                    "--root",
+                    "/x",
+                    "--destination",
+                    "/y",
+                    "--handle",
+                    "h",
+                ],
+                "unknown_argument",
+            ),
+        ] {
+            assert_eq!(parse(args(&input)).unwrap_err().reason(), reason);
+        }
+    }
+
+    #[test]
     fn serve_requires_root_and_tls_pair() {
         assert_eq!(
             parse(args(&["serve", "--root", "/tmp/x"]))
