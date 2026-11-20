@@ -90,6 +90,10 @@ ssh -N -L 127.0.0.1:3000:127.0.0.1:3000 operator@private-host
 
 The SSH host must be reachable privately and the browser must trust the TLS certificate for `127.0.0.1`. A mobile client needs an SSH app that provides a local forward to its browser, plus certificate trust on that device. This route was tested only from a separate container network namespace, not a physical desktop or phone. If forwarding is unavailable, use a reviewed private reverse proxy with a matching hostname certificate and a configured `--public-origin`; that deployment is outside this Compose example.
 
+## Restrict share access before restoring
+
+Before restoring, restrict recipient access at the proxy or network. An unexpired share link revoked after the snapshot can become usable again. Keep recipient access restricted through owner review and revocation: each owner can inspect and revoke their own links, but there is no administrator-wide inventory. If owners cannot review, retain the restriction.
+
 ## Back up while serving
 
 Use a release that includes `admin backup`. Run as the Sylux service identity.
@@ -137,6 +141,8 @@ unpublished. Retry with a fresh destination after removal finishes.
 
 ### Restore an online backup
 
+[Restrict recipient access](#restrict-share-access-before-restoring) before starting the restored copy.
+
 Use the same release, UID/GID and TLS setup. Stop the live service before
 starting the restored copy. Keep the backup and the original root private and
 intact. Copy the completed backup into a new empty directory on the supported
@@ -182,6 +188,8 @@ docker compose up -d || exit 1
 ```
 
 Confirm the backup mount is a separate filesystem before archiving. If `SYLUX_DATA_DIR` differs from `/srv/sylux`, replace that source path in the archive command. Copy the archive and checksum off the host. Test a restore with disposable data before relying on this procedure. An archive listing and checksum do not prove storage durability.
+
+[Restrict recipient access](#restrict-share-access-before-restoring) before starting the restored copy.
 
 To restore, stop Sylux, verify the checksum, and extract into a **new empty directory** on the same supported host filesystem. Never serve the old and restored roots together:
 
@@ -286,17 +294,17 @@ For a plain-file copy of one account, stop Sylux and follow the
 
 Keep the current release archive, `.env`, and local image ID. Stop the service and make a verified pre-upgrade archive as in step 4 **without starting it again**. Download and verify all assets for the new release into a new directory as in step 1, then load and inspect its version tag. Copy the prior `.env` into the new directory, set `SYLUX_IMAGE` to the newly inspected local ID, run `docker compose config -q`, and start there with `docker compose up -d`. Check sign-in and known file downloads.
 
-If the new image fails before it starts, restore the prior image ID in `.env` and start it against the unchanged root. If the new image starts or may have written to the root, stop it, restore the pre-upgrade archive into a new empty directory, set both the prior image ID and `SYLUX_DATA_DIR` in `.env`, and start. Do not run a previous image against a root that a newer image may have changed. Upgrade and schema rollback have not been qualified.
+If the new image fails before it starts, restore the prior image ID in `.env` and start it against the unchanged root. If the new image starts or may have written to the root, stop it, restore the pre-upgrade archive into a new empty directory after applying the [recipient restriction in §4](#4-stop-back-up-and-restore), set both the prior image ID and `SYLUX_DATA_DIR` in `.env`, and start. Do not run a previous image against a root that a newer image may have changed. Upgrade and schema rollback have not been qualified.
 
 Send beta feedback and the host, Docker Engine/Compose versions, image ID, and a brief reproduction to **hello@corvus-dev.com**. Remove setup tokens, passwords, private keys, and file contents before sharing logs.
 
 Docker reference: [Compose bind mounts](https://docs.docker.com/reference/compose-file/services/#volumes), [variable interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/), [`docker compose run`](https://docs.docker.com/reference/cli/docker/compose/run/), and [pull policy](https://docs.docker.com/reference/compose-file/services/#pull_policy).
 
-## Schema v2 upgrade
+## Schema upgrade
 
-`serve` upgrades a v1 root to v2 once, with recovery for an interrupted manifest
+`serve` upgrades v1 and v2 roots to v3 and resumes an interrupted manifest
 write. Take a complete stopped-service backup first; rollback needs that full
-backup and its matching release. Offline admin commands require the upgrade to
-finish first and report `*_schema_upgrade_required_run_serve` for a v1 manifest.
+backup and its matching release. Offline payload verification and password
+recovery require the upgrade to finish first and report `*_schema_upgrade_required_run_serve` for a v1 or v2 manifest.
 See [Trash upgrade and recovery](trash.md#schema-upgrade-and-offline-admin) before
 upgrading or using offline password recovery or payload verification.

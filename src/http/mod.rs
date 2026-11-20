@@ -10,6 +10,7 @@ pub mod middleware;
 pub mod mutations;
 pub mod removals;
 pub mod setup;
+mod shares;
 pub mod status;
 pub mod uploads;
 pub mod usage;
@@ -45,6 +46,7 @@ pub struct AuthState {
     pub cleanup_wake: Arc<tokio::sync::Notify>,
     pub storage: Option<Arc<UploadStorage>>,
     pub instance_settings: Option<Arc<crate::persistence::instance::InstanceSettings>>,
+    share_downloads: Arc<tokio::sync::Semaphore>,
     pub archive_tickets: Arc<Mutex<archives::ArchiveTickets>>,
     /// Held by each live archive body and payload verification; tests count the holders.
     #[cfg(feature = "test-harness")]
@@ -81,6 +83,7 @@ impl AuthState {
             cleanup_wake: Arc::default(),
             storage: None,
             instance_settings: None,
+            share_downloads: Arc::new(tokio::sync::Semaphore::new(shares::DOWNLOAD_SLOTS)),
             archive_tickets: Arc::default(),
             #[cfg(feature = "test-harness")]
             archive_activity: Arc::default(),
@@ -193,6 +196,11 @@ pub fn router(state: AuthState) -> Router {
             put(uploads::content).patch(uploads::append),
         )
         .route("/uploads/{id}/commit", post(uploads::commit))
+        .route("/share-links", get(shares::list).post(shares::create))
+        .route("/share-links/{id}", axum::routing::delete(shares::revoke))
+        .route("/share/{*token}", axum::routing::any(shares::download))
+        .route("/share/", axum::routing::any(shares::missing))
+        .route("/share", axum::routing::any(shares::missing))
         .route("/archives", post(archives::issue))
         .route("/archives/{token}", get(archives::download))
         .route(

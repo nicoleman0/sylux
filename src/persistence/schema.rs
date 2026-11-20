@@ -6,7 +6,11 @@ use super::{root::InstallationIdentity, sqlite};
 
 /// Versions this build understands and serves. A bound database reporting
 /// anything else refuses startup instead of migrating guesses.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 3;
+
+pub fn is_older_schema(version: i64) -> bool {
+    (1..SUPPORTED_SCHEMA_VERSION).contains(&version)
+}
 pub const SUPPORTED_LAYOUT_VERSION: i64 = 1;
 pub const SUPPORTED_NAME_KEY_VERSION: i64 = 1;
 pub const SUPPORTED_KEY_VERSION: i64 = 1;
@@ -119,8 +123,8 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
             verify_core_schema(connection)?;
             Ok(MigrationOutcome::AlreadyCurrent)
         }
-        1 => Err(SchemaError::Inconsistent(
-            "v1 requires verified binding upgrade through serve",
+        version if is_older_schema(version) => Err(SchemaError::Inconsistent(
+            "older schema requires verified binding upgrade through serve",
         )),
         0 => {
             let tables: i64 = connection
@@ -139,6 +143,7 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
                 .execute_batch(MIGRATION_0001_S1)
                 .map_err(sql_error)?;
             migrate_v1(connection, None)?;
+            migrate_v2(connection, None)?;
             Ok(MigrationOutcome::Applied)
         }
         _ => Err(SchemaError::Inconsistent("unsupported user_version")),
@@ -147,10 +152,35 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
 
 /// Require every core object to exist exactly once.
 pub fn verify_core_schema(connection: &Connection) -> Result<(), SchemaError> {
+    verify_schema_at(connection, SUPPORTED_SCHEMA_VERSION)
+}
+
+pub(super) fn verify_schema_at(connection: &Connection, version: i64) -> Result<(), SchemaError> {
     for (kind, names) in [
         ("table", CORE_TABLES),
         ("index", CORE_INDEXES),
         ("trigger", CORE_TRIGGERS),
+        ("table", if version >= 3 { &["share_link"] } else { &[] }),
+        (
+            "index",
+            if version >= 3 {
+                &["share_link_owner", "share_link_entry", "share_link_expiry"]
+            } else {
+                &[]
+            },
+        ),
+        (
+            "trigger",
+            if version >= 3 {
+                &[
+                    "share_link_disable",
+                    "share_link_replace",
+                    "share_link_trash",
+                ]
+            } else {
+                &[]
+            },
+        ),
     ] {
         for name in names {
             let found: i64 = connection
@@ -216,21 +246,48 @@ pub fn insert_installation_row(
     transaction.commit().map_err(sql_error)
 }
 
-/// Upgrade metadata atomically, optionally recording the sole permitted binding transition.
+/// Upgrade metadata atomically, optionally recording the verified prior manifest.
 pub fn migrate_v1(
     connection: &Connection,
     manifest_hash: Option<&[u8]>,
 ) -> Result<(), SchemaError> {
+    migrate(
+        connection,
+        2,
+        include_str!("../../migrations/sqlite/0002_removal.sql"),
+        manifest_hash,
+    )
+}
+
+pub fn migrate_v2(
+    connection: &Connection,
+    manifest_hash: Option<&[u8]>,
+) -> Result<(), SchemaError> {
+    verify_schema_at(connection, 2)?;
+    migrate(
+        connection,
+        3,
+        include_str!("../../migrations/sqlite/0003_share_links.sql"),
+        manifest_hash,
+    )
+}
+
+fn migrate(
+    connection: &Connection,
+    next: i64,
+    sql: &str,
+    manifest_hash: Option<&[u8]>,
+) -> Result<(), SchemaError> {
     let tx = connection.unchecked_transaction().map_err(sql_error)?;
-    tx.execute_batch(include_str!("../../migrations/sqlite/0002_removal.sql"))
-        .map_err(sql_error)?;
+    tx.execute_batch(sql).map_err(sql_error)?;
     if let Some(hash) = manifest_hash {
         tx.execute(
-            "INSERT INTO binding_transition(singleton,legacy_manifest_hash) VALUES(1,?1)",
+            "INSERT INTO binding_transition(singleton,legacy_manifest_hash) VALUES(1,?1)
+             ON CONFLICT(singleton) DO UPDATE SET legacy_manifest_hash=excluded.legacy_manifest_hash",
             [hash],
         )
         .map_err(sql_error)?;
     }
-    verify_core_schema(&tx)?;
+    verify_schema_at(&tx, next)?;
     tx.commit().map_err(sql_error)
 }

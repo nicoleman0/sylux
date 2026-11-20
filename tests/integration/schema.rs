@@ -826,12 +826,8 @@ fn valid_seed_passes_product_recovery_checks() {
 #[test]
 fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication() {
     use sylux::persistence::root;
-    for interrupted in [false, true] {
-        let (owner, path) = fixture(if interrupted {
-            "legacy-interrupted"
-        } else {
-            "legacy-upgrade"
-        });
+    for (version, interrupted) in [(1, false), (1, true), (2, false), (2, true)] {
+        let (owner, path) = fixture(&format!("legacy-v{version}-{interrupted}"));
         fs::remove_file(&path).unwrap();
         fs::remove_dir(path.parent().unwrap()).unwrap();
         let product = owner.path().join("product");
@@ -839,7 +835,7 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
         let path = product.join("metadata/sylux.sqlite3");
         let initialized = root::initialize_empty_root(&product, BUSY).unwrap();
         let mut legacy = initialized.identity;
-        legacy.schema_version = 1;
+        legacy.schema_version = version;
         fs::write(
             product.join(root::MANIFEST_NAME),
             serde_json::to_vec(&legacy).unwrap(),
@@ -857,15 +853,23 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
         schema::insert_installation_row(&db, &legacy, digest()).unwrap();
         insert_account(&db, &id(10), "owner-a", "user");
         insert_root(&db, &id(20), &id(10));
+        if version == 2 {
+            schema::migrate_v1(&db, None).unwrap();
+        }
         if interrupted {
             use sha2::{Digest, Sha256};
             let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
-            schema::migrate_v1(&db, Some(hash.as_slice())).unwrap();
+            let migrate = if version == 1 {
+                schema::migrate_v1
+            } else {
+                schema::migrate_v2
+            };
+            migrate(&db, Some(hash.as_slice())).unwrap();
         }
         drop(db);
         let bound = root::open_bound_database(&product, BUSY).unwrap();
         let upgraded = root::upgrade_binding(&bound, &product, &legacy).unwrap();
-        assert_eq!(upgraded.schema_version, 2);
+        assert_eq!(upgraded.schema_version, schema::SUPPORTED_SCHEMA_VERSION);
         assert_eq!(root::read_manifest(&product).unwrap(), upgraded);
         root::verify_binding(&bound, &product, &upgraded).unwrap();
         assert_eq!(

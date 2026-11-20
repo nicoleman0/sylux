@@ -21,7 +21,7 @@ A focused file server for self-hosters and small groups: pleasant to use, fast a
 ## Capabilities and Constraints
 
 - Local accounts with administrator and user roles.
-- Files are private to each account.
+- Files are private to each account by default. An owner can share one file through a revocable, expiring download link.
 - Preserve existing upload reconciliation, replacement confirmation and recovery boundaries.
 - Instance naming belongs in administrator Settings, persists on the server and applies to all users.
 - PDF previews render locally, with page and zoom controls and a download fallback.

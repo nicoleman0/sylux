@@ -43,8 +43,9 @@ if sudo systemctl is-active --quiet sylux.service; then exit 1; fi
 Make a stopped-service archive on a separate mounted filesystem as in the
 [Docker backup procedure](docker-beta.md#4-stop-back-up-and-restore), using the
 guest's actual data root. Omit the Docker stop/start commands. Keep numeric
-ownership and the whole root, including secrets and SQLite siblings. Verify its
-checksum before recovery:
+ownership and the whole root, including secrets and SQLite siblings. Before any snapshot restore, restrict recipient access at the proxy or network: an unexpired link revoked after the snapshot can become usable again. Keep recipient access restricted through owner review and revocation. Owners can inspect and revoke their own links; there is no administrator-wide inventory, so retain the restriction if owners cannot review.
+
+Verify the checksum:
 
 ```sh
 sudo sha256sum -c /mnt/backup/sylux/backup.tar.sha256 || exit 1
@@ -77,11 +78,11 @@ requires stopping the remaining writer. On an uncertain commit, restart and test
 the new credentials before another reset. This procedure still needs native LXC
 qualification on the operator's storage and service configuration.
 
-## Schema v2 upgrade
+## Schema upgrade
 
-`serve` upgrades a v1 root to v2 once, with recovery for an interrupted manifest
+`serve` upgrades v1 and v2 roots to v3 and resumes an interrupted manifest
 write. Take a complete stopped-service backup first; rollback needs that full
-backup and its matching release. Offline admin commands require the upgrade to
-finish first and report `*_schema_upgrade_required_run_serve` for a v1 manifest.
+backup and its matching release. Offline payload verification and password
+recovery require the upgrade to finish first and report `*_schema_upgrade_required_run_serve` for a v1 or v2 manifest.
 See [Trash upgrade and recovery](trash.md#schema-upgrade-and-offline-admin) before
 upgrading or using offline password recovery or payload verification.

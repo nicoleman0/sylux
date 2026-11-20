@@ -630,6 +630,54 @@ fn legacy_installation(case: &Case) -> (sylux::persistence::root::InstallationId
 }
 
 #[test]
+fn offline_commands_refuse_v2_manifest() {
+    use sylux::persistence::root;
+    let case = Case::new("syl-82-fix-offline-v2");
+    let (mut legacy, path) = legacy_installation(&case);
+    let db = sylux::persistence::sqlite::open_writer(&path, Duration::from_millis(375)).unwrap();
+    sylux::persistence::schema::migrate_v1(&db, None).unwrap();
+    drop(db);
+    legacy.schema_version = 2;
+    fs::write(
+        case.store.join(root::MANIFEST_NAME),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    let verify = Command::new(env!("CARGO_BIN_EXE_sylux"))
+        .args(["admin", "verify-payloads", "--root"])
+        .arg(&case.store)
+        .output()
+        .unwrap();
+    assert!(!verify.status.success());
+    assert!(
+        String::from_utf8_lossy(&verify.stderr)
+            .contains("verify_schema_upgrade_required_run_serve")
+    );
+    let mut recovery = Command::new(env!("CARGO_BIN_EXE_sylux"))
+        .args(["admin", "reset-password", "--root"])
+        .arg(&case.store)
+        .args(["--handle", "legacy-owner", "--password-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    recovery
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"synthetic test password long enough\n")
+        .unwrap();
+    let output = recovery.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("recovery_schema_upgrade_required_run_serve")
+    );
+    case.cleanup();
+}
+
+#[test]
 fn serve_upgrades_v1_and_recovers_committed_transition_with_partial_manifest_temp() {
     use sha2::{Digest, Sha256};
     use sylux::persistence::{root, schema, sqlite};
@@ -673,7 +721,7 @@ fn serve_upgrades_v1_and_recovers_committed_transition_with_partial_manifest_tem
         );
         assert!(!observed.watchdog_expired && !observed.trace_overflow);
         let upgraded = root::read_manifest(&case.store).unwrap();
-        assert_eq!(upgraded.schema_version, 2);
+        assert_eq!(upgraded.schema_version, schema::SUPPORTED_SCHEMA_VERSION);
         assert_eq!(upgraded.installation_id, legacy.installation_id);
         assert!(!case.store.join("installation.json.tmp").exists());
         let db = Connection::open(&path).unwrap();
@@ -689,7 +737,7 @@ fn serve_upgrades_v1_and_recovers_committed_transition_with_partial_manifest_tem
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            2
+            schema::SUPPORTED_SCHEMA_VERSION
         );
         drop(db);
         require_valid_root(&case);

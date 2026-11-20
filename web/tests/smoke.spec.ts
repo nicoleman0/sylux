@@ -1287,6 +1287,9 @@ test('options menu supports keyboard dismissal and create dialog restores focus'
   const download = page.getByRole('menuitem', { name: 'Download', exact: true });
   await expect(download).toBeFocused();
   await page.keyboard.press('ArrowDown');
+  const share = page.getByRole('menuitem', { name: 'Share', exact: true });
+  await expect(share).toBeFocused();
+  await page.keyboard.press('ArrowDown');
   await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menu')).toHaveCount(0);
