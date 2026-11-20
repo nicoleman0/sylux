@@ -136,3 +136,78 @@ impl Ticket {
         Ok(CopyState::Committed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        domain::{names::EntryName, upload::folder_etag},
+        persistence::schema::MIGRATION_0001_S1,
+    };
+
+    const OWNER: &str = "00000000000000000000000000000001";
+    const ROOT: &str = "00000000000000000000000000000002";
+
+    fn hex(n: usize) -> String {
+        format!("{n:032x}")
+    }
+
+    fn fixture() -> (Connection, String, String, String) {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        db.execute_batch(MIGRATION_0001_S1).unwrap();
+        crate::persistence::schema::migrate_v1(&db, None).unwrap();
+        db.execute("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES(?1,?1,'user',1,0)", [OWNER]).unwrap();
+        db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,NULL,'folder','',x'',1)", params![ROOT,OWNER]).unwrap();
+        let folder = |id: &str, parent: &str, name: &str| {
+            let n = EntryName::parse(name).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id,OWNER,parent,n.display,n.key]).unwrap();
+        };
+        let src = hex(0x10);
+        let dst = hex(0x11);
+        folder(&src, ROOT, "source");
+        folder(&dst, ROOT, "dest");
+        db.execute("INSERT INTO blob(blob_id,shard,length,sha256,lifecycle) VALUES(?1,substr(?1,1,2),1,zeroblob(32),'live')", [hex(0xb)]).unwrap();
+        for i in 0..2 {
+            let e = hex(0x100000 + i);
+            let r = hex(0x900000 + i);
+            let n = EntryName::parse(&format!("f{i:07}")).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'file',?4,?5,1)", params![e,OWNER,src,n.display,n.key]).unwrap();
+            db.execute("INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES(?1,?2,?3,1,zeroblob(32),1,?4)", params![r,e,hex(0xb),OWNER]).unwrap();
+            db.execute(
+                "UPDATE entry SET current_revision_id=?2 WHERE entry_id=?1",
+                params![e, r],
+            )
+            .unwrap();
+        }
+        let generation: i64 = db
+            .query_row(
+                "SELECT generation FROM entry WHERE entry_id=?1",
+                [&src],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let etag = folder_etag(&src, generation as u64);
+        (db, src, dst, etag)
+    }
+
+    #[test]
+    fn ticket_expiry_and_committed_replay() {
+        let key = [7u8; 32];
+        let (mut db, src, dst, etag) = fixture();
+        let token = Ticket::issue(&key, OWNER.into(), src, dst, etag, 1_000).unwrap();
+        let ticket = Ticket::verify(&key, OWNER, &token).unwrap();
+        let tx = db.transaction().unwrap();
+        let expired = ticket.execute(&tx, 1_600);
+        assert!(matches!(expired, Err(CopyError::Expired)));
+        let ok = ticket.execute(&tx, 1_599).unwrap();
+        assert!(matches!(ok, CopyState::Committed));
+        let replay = ticket.execute(&tx, 99_999).unwrap();
+        assert!(matches!(replay, CopyState::Committed));
+        assert!(matches!(
+            Ticket::verify(&key, "00000000000000000000000000000009", &token),
+            Err(CopyError::OtherAccount)
+        ));
+        tx.commit().unwrap();
+    }
+}

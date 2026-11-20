@@ -1062,11 +1062,6 @@ mod tests {
             );
         }
     }
-}
-
-#[cfg(test)]
-mod syl81_review_probe {
-    use super::*;
     use crate::{domain::names::EntryName, persistence::schema::MIGRATION_0001_S1};
     use rusqlite::Connection;
     const OWNER: &str = "00000000000000000000000000000001";
@@ -1117,6 +1112,17 @@ mod syl81_review_probe {
         (db, src, dst, etag)
     }
 
+    fn chain(db: &Connection, start: &str, base: usize, len: usize) -> String {
+        let mut parent = start.to_owned();
+        for i in 0..len {
+            let id = hex(base + i);
+            let n = EntryName::parse(&format!("d{i:03}")).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id,OWNER,parent,n.display,n.key]).unwrap();
+            parent = id;
+        }
+        parent
+    }
+
     #[test]
     fn copy_size_boundary_is_atomic() {
         for files in [9_999usize, 10_000] {
@@ -1161,22 +1167,11 @@ mod syl81_review_probe {
         }
     }
 
-    fn chain(db: &Connection, start: &str, base: usize, len: usize) -> String {
-        let mut parent = start.to_owned();
-        for i in 0..len {
-            let id = hex(base + i);
-            let n = EntryName::parse(&format!("d{i:03}")).unwrap();
-            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id,OWNER,parent,n.display,n.key]).unwrap();
-            parent = id;
-        }
-        parent
-    }
-
     #[test]
-    fn syl81_review_copy_depth_boundary() {
+    fn copy_depth_boundary_is_atomic() {
         // Source subtree depth 9 (root + 9 nested folders below it), destination at depth D below Files.
         for (dest_depth, expect_ok) in [(118usize, true), (119usize, false)] {
-            let (mut db, src, _dst, etag) = fixture(0);
+            let (mut db, src, _dst, _etag) = fixture(0);
             chain(&db, &src, 0x200000, 9);
             let dest = chain(&db, ROOT, 0x300000, dest_depth);
             let generation: i64 = db
@@ -1186,7 +1181,6 @@ mod syl81_review_probe {
                     |r| r.get(0),
                 )
                 .unwrap();
-            let _ = etag;
             let etag = folder_etag(&src, generation as u64);
             let tx = db.transaction().unwrap();
             let before: i64 = tx
@@ -1196,52 +1190,11 @@ mod syl81_review_probe {
             let after: i64 = tx
                 .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
                 .unwrap();
-            eprintln!(
-                "SYL-81-review depth dest_depth={dest_depth} result={:?} rows_before={before} rows_after={after}",
-                result.as_ref().err()
-            );
             assert_eq!(result.is_ok(), expect_ok);
             if !expect_ok {
                 assert!(matches!(result, Err(NamespaceError::DepthLimit)));
                 assert_eq!(before, after);
             }
         }
-    }
-
-    #[test]
-    fn syl81_review_ticket_expiry_and_committed_replay() {
-        use crate::domain::copy::{CopyError, CopyState, Ticket};
-        let key = [7u8; 32];
-        let (mut db, src, dst, etag) = fixture(2);
-        let token = Ticket::issue(
-            &key,
-            OWNER.into(),
-            src.clone(),
-            dst.clone(),
-            etag.clone(),
-            1_000,
-        )
-        .unwrap();
-        let ticket = Ticket::verify(&key, OWNER, &token).unwrap();
-        let tx = db.transaction().unwrap();
-        let expired = ticket.execute(&tx, 1_600);
-        eprintln!(
-            "SYL-81-review expiry uncommitted at +600s: {:?}",
-            expired.as_ref().err()
-        );
-        assert!(matches!(expired, Err(CopyError::Expired)));
-        let ok = ticket.execute(&tx, 1_599).unwrap();
-        assert!(matches!(ok, CopyState::Committed));
-        let replay = ticket.execute(&tx, 99_999).unwrap();
-        eprintln!(
-            "SYL-81-review committed replay long after expiry: committed={}",
-            matches!(replay, CopyState::Committed)
-        );
-        assert!(matches!(replay, CopyState::Committed));
-        assert!(matches!(
-            Ticket::verify(&key, "00000000000000000000000000000009", &token),
-            Err(CopyError::OtherAccount)
-        ));
-        tx.commit().unwrap();
     }
 }
