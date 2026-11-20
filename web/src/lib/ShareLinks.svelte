@@ -68,8 +68,10 @@
         error = 'You have 50 active links. Revoke one in Account to create another.';
       } else if (failure instanceof HttpError && failure.code === 'entry_not_found') {
         error = 'This file is no longer available to share.';
+      } else if (failure instanceof HttpError && failure.status >= 400 && failure.status < 500) {
+        error = 'Could not create the link. Check your access and try again.';
       } else {
-        error = 'Could not confirm the new link. Check Active links before creating another.';
+        error = 'Could not confirm the new link. Check Active links before creating another. An unconfirmed link cannot be copied; revoke it if it appears.';
         await load();
       }
     } finally {

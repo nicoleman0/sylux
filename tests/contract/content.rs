@@ -400,6 +400,64 @@ async fn assert_share_missing(f: &Fixture, path: &str) {
 }
 
 #[tokio::test]
+async fn share_create_requires_origin_csrf_and_obeys_active_limit() {
+    let f = Fixture::new("syl-82-fix-create-guards").await;
+    let body = serde_json::json!({"entry_id": SHARE_FILE}).to_string();
+    for headers in [
+        vec![
+            ("X-CSRF-Token", URL_SAFE_NO_PAD.encode(CSRF)),
+            ("Content-Type", "application/json".into()),
+        ],
+        vec![
+            ("Origin", "https://foreign.invalid".into()),
+            ("X-CSRF-Token", URL_SAFE_NO_PAD.encode(CSRF)),
+            ("Content-Type", "application/json".into()),
+        ],
+        vec![
+            ("Origin", SHARE_ORIGIN.into()),
+            ("X-CSRF-Token", URL_SAFE_NO_PAD.encode([0u8; 32])),
+            ("Content-Type", "application/json".into()),
+        ],
+    ] {
+        assert_eq!(
+            f.request_with_body(
+                "POST",
+                "/share-links",
+                Some(auth(SESSION, SECRET)),
+                &headers,
+                body.as_bytes()
+            )
+            .await
+            .0,
+            403
+        );
+    }
+    for _ in 0..50 {
+        assert_eq!(issue_share(&f, None).await.0, 201);
+    }
+    let (status, error) = issue_share(&f, None).await;
+    assert_eq!(status, 409);
+    assert_eq!(error["code"], "share_link_limit");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn missing_shared_payload_is_an_integrity_error() {
+    let f = Fixture::new("syl-82-fix-missing-payload").await;
+    let (_, share) = issue_share(&f, None).await;
+    fs::remove_file(
+        f.root
+            .path()
+            .join("product/payloads/ab/abcdef0123456789abcdef0123456789"),
+    )
+    .unwrap();
+    let (status, _, body) = f.request("GET", public_path(&share), None, &[]).await;
+    assert_eq!(status, 500);
+    assert_eq!(body, br#"{"code":"content_integrity_error"}"#);
+    f.close().await;
+}
+
+#[tokio::test]
 async fn file_shares_are_hash_only_owner_managed_and_download_exact_bytes_without_a_session() {
     let f = Fixture::new("syl-82-build-share-access").await;
     let (status, share) = issue_share(&f, None).await;

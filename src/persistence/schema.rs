@@ -7,6 +7,10 @@ use super::{root::InstallationIdentity, sqlite};
 /// Versions this build understands and serves. A bound database reporting
 /// anything else refuses startup instead of migrating guesses.
 pub const SUPPORTED_SCHEMA_VERSION: i64 = 3;
+
+pub fn is_older_schema(version: i64) -> bool {
+    (1..SUPPORTED_SCHEMA_VERSION).contains(&version)
+}
 pub const SUPPORTED_LAYOUT_VERSION: i64 = 1;
 pub const SUPPORTED_NAME_KEY_VERSION: i64 = 1;
 pub const SUPPORTED_KEY_VERSION: i64 = 1;
@@ -119,7 +123,7 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
             verify_core_schema(connection)?;
             Ok(MigrationOutcome::AlreadyCurrent)
         }
-        1 | 2 => Err(SchemaError::Inconsistent(
+        version if is_older_schema(version) => Err(SchemaError::Inconsistent(
             "older schema requires verified binding upgrade through serve",
         )),
         0 => {

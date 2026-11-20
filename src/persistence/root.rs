@@ -718,7 +718,7 @@ pub fn upgrade_binding(
     root: &Path,
     manifest: &InstallationIdentity,
 ) -> Result<InstallationIdentity, BindingError> {
-    if !matches!(manifest.schema_version, 1 | 2) {
+    if !schema::is_older_schema(manifest.schema_version) {
         verify_binding(bound, root, manifest)?;
         super::contract_event("binding.verified");
         super::contract_event("migration.start");
@@ -756,15 +756,15 @@ fn upgrade_binding_step(
     let hash = Sha256::digest(&bytes);
     let previous = manifest.schema_version;
     let next = previous + 1;
+    let migrate = match previous {
+        1 => schema::migrate_v1,
+        2 => schema::migrate_v2,
+        _ => return Err(BindingError::UnsupportedVersion("schema_version")),
+    };
     if row.schema_version == previous && version == previous {
         if announce {
             super::contract_event("migration.start");
         }
-        let migrate = if previous == 1 {
-            schema::migrate_v1
-        } else {
-            schema::migrate_v2
-        };
         migrate(&bound.connection, Some(hash.as_slice()))
             .map_err(|_| BindingError::DatabaseInvalid("schema_migration_failed"))?;
     } else if row.schema_version == next && version == next {

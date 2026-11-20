@@ -15,6 +15,7 @@ for (const { colorScheme, width } of [
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     let active = false;
     let createRequests = 0;
+    let failure: '400' | '403' | 'network' | '503' | null = null;
     let holdCreate!: () => void;
     let createArrived!: () => void;
     const held = new Promise<void>(resolve => { holdCreate = resolve; });
@@ -29,6 +30,8 @@ for (const { colorScheme, width } of [
       if (pathname === '/folders/children' || pathname === '/folders/root/children') return json({ root: folder, items: [nested, file], next_cursor: null, has_more: false });
       if (pathname === '/share-links' && route.request().method() === 'POST') {
         createRequests++;
+        if (failure === 'network') { active = true; return route.abort(); }
+        if (failure) return json({ code: 'synthetic_error' }, Number(failure));
         expect(route.request().postDataJSON()).toEqual({ entry_id: 'file', expiry_days: 30 });
         createArrived();
         await held;
@@ -64,6 +67,17 @@ for (const { colorScheme, width } of [
     expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
     await page.screenshot({ path: test.info().outputPath(`share-${colorScheme}-${width}.png`) });
 
+    for (const outcome of ['400', '403', 'network', '503'] as const) {
+      failure = outcome;
+      await dialog.getByRole('button', { name: 'Create link' }).click();
+      await expect(dialog).toContainText(outcome === '400' || outcome === '403'
+        ? 'Could not create the link. Check your access and try again.'
+        : 'Could not confirm the new link.');
+    }
+    await expect(dialog.getByRole('button', { name: /Revoke link/ })).toBeVisible();
+    await expect(dialog.getByRole('textbox', { name: 'Download link' })).toHaveCount(0);
+    await dialog.getByRole('button', { name: /Revoke link/ }).click();
+    failure = null;
     await dialog.getByLabel('Expires after').selectOption('30');
     const pending = dialog.getByRole('button', { name: 'Create link' }).click();
     await arrived;
@@ -72,7 +86,7 @@ for (const { colorScheme, width } of [
     await expect(dialog).toBeVisible();
     holdCreate();
     await pending;
-    expect(createRequests).toBe(1);
+    expect(createRequests).toBe(5);
     const url = dialog.getByRole('textbox', { name: 'Download link' });
     await expect(url).toBeFocused();
     await dialog.getByRole('button', { name: 'Copy link' }).click();

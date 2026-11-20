@@ -178,7 +178,7 @@ impl Fixture {
         Arc::clone(self.db.as_ref().unwrap())
     }
 
-    async fn restart(&mut self) {
+    async fn stop(&mut self) {
         if let Some(server) = self.server.take() {
             server.abort();
             let _ = server.await;
@@ -193,6 +193,10 @@ impl Fixture {
             workers.shutdown().await.unwrap();
         }
         self.db.take();
+    }
+
+    async fn restart(&mut self) {
+        self.stop().await;
         let connection = sqlite::open_writer(&self.db_path, BUSY).unwrap();
         self.start(connection, None).await;
     }
@@ -606,6 +610,146 @@ fn decode_chunked(mut bytes: &[u8]) -> Vec<u8> {
         bytes = &bytes[size + 2..];
     }
     decoded
+}
+
+#[tokio::test]
+async fn share_revoked_by_real_replacement_upload() {
+    let fixture = Fixture::new("syl-82-fix-replacement").await;
+    let old = fixture.upload("synthetic.bin", b"old bytes").await;
+    let share = fixture
+        .mutate(
+            "POST",
+            "/share-links",
+            &owner_auth(),
+            None,
+            &[("Content-Type", "application/json".into())],
+            serde_json::to_vec(&serde_json::json!({"entry_id":old["id"]})).unwrap(),
+        )
+        .await;
+    assert_eq!(share.status, 201);
+    let value = share.json();
+    let path = value["url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix(&fixture.origin)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .request("GET", path, None, &[], vec![])
+            .await
+            .body
+            .as_ref(),
+        b"old bytes"
+    );
+    let (id, ticket, admission) = fixture.replacement(&old, b"new bytes").await;
+    assert_eq!(
+        fixture
+            .replacement_content(&id, &ticket, b"new bytes")
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        fixture
+            .replacement_commit(&id, &ticket, &admission)
+            .await
+            .status,
+        201
+    );
+    assert_eq!(
+        fixture.request("GET", path, None, &[], vec![]).await.status,
+        404
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn stopped_snapshot_restore_revives_unexpired_revoked_share_until_owner_revokes() {
+    let mut fixture = Fixture::new("syl-82-fix-snapshot").await;
+    let old = fixture.upload("synthetic.bin", b"old bytes").await;
+    let share = fixture
+        .mutate(
+            "POST",
+            "/share-links",
+            &owner_auth(),
+            None,
+            &[("Content-Type", "application/json".into())],
+            serde_json::to_vec(&serde_json::json!({"entry_id":old["id"]})).unwrap(),
+        )
+        .await;
+    assert_eq!(share.status, 201);
+    let value = share.json();
+    let path = value["url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix(&fixture.origin)
+        .unwrap()
+        .to_owned();
+    let revoke = format!("/share-links/{}", value["id"].as_str().unwrap());
+    fixture.stop().await;
+    let archive = fixture.owner.path().join("syl-82-fix-snapshot.tar");
+    assert!(
+        std::process::Command::new("tar")
+            .arg("-cf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&fixture.product)
+            .arg(".")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let connection = sqlite::open_writer(&fixture.db_path, BUSY).unwrap();
+    fixture.start(connection, None).await;
+    assert_eq!(
+        fixture
+            .mutate("DELETE", &revoke, &owner_auth(), None, &[], vec![])
+            .await
+            .status,
+        204
+    );
+    assert_eq!(
+        fixture
+            .request("GET", &path, None, &[], vec![])
+            .await
+            .status,
+        404
+    );
+    fixture.stop().await;
+    let restored = fixture.owner.path().join("syl-82-fix-restored");
+    fs::DirBuilder::new().mode(0o700).create(&restored).unwrap();
+    assert!(
+        std::process::Command::new("tar")
+            .arg("-xf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&restored)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fixture.product = restored;
+    fixture.db_path = fixture.product.join("metadata/sylux.sqlite3");
+    let connection = sqlite::open_writer(&fixture.db_path, BUSY).unwrap();
+    fixture.start(connection, None).await;
+    let response = fixture.request("GET", &path, None, &[], vec![]).await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body.as_ref(), b"old bytes");
+    assert_eq!(
+        fixture
+            .mutate("DELETE", &revoke, &owner_auth(), None, &[], vec![])
+            .await
+            .status,
+        204
+    );
+    assert_eq!(
+        fixture
+            .request("GET", &path, None, &[], vec![])
+            .await
+            .status,
+        404
+    );
+    fixture.close().await;
 }
 
 #[tokio::test]

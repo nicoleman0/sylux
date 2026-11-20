@@ -111,6 +111,8 @@ docker compose up -d || exit 1
 
 Confirm the backup mount is a separate filesystem before archiving. If `SYLUX_DATA_DIR` differs from `/srv/sylux`, replace that source path in the archive command. Copy the archive and checksum off the host. Test a restore with disposable data before relying on this procedure. An archive listing and checksum do not prove storage durability.
 
+Before restoring, restrict recipient access at the proxy or network. An unexpired share link revoked after the snapshot can become usable again. Keep recipient access restricted through owner review and revocation: each owner can inspect and revoke their own links, but there is no administrator-wide inventory. If owners cannot review, retain the restriction.
+
 To restore, stop Sylux, verify the checksum, and extract into a **new empty directory** on the same supported host filesystem. Never serve the old and restored roots together:
 
 ```sh

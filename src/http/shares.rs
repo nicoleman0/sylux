@@ -387,7 +387,6 @@ pub async fn download(State(state): State<AuthState>, method: Method, uri: Uri) 
     .await;
     let (file, permit) = match opened {
         Ok(Ok(opened)) => opened,
-        Ok(Err(crate::persistence::payload::PayloadError::Missing)) => return missing().await,
         _ => return Failure::Integrity.into_response(),
     };
     let body = Body::from_stream(ReaderStream::new(tokio::fs::File::from_std(file.file)).map(
