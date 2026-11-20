@@ -43,7 +43,7 @@ fn failure(e: RemovalError) -> Response {
 fn key(s: &AuthState) -> Result<[u8; 32], Response> {
     s.storage
         .as_ref()
-        .map(|storage| storage.removal_signing_key())
+        .map(|storage| storage.namespace_signing_key())
         .ok_or_else(|| error(StatusCode::SERVICE_UNAVAILABLE, "removal_unavailable"))
 }
 fn csrf(s: &AuthState, headers: &HeaderMap) -> Result<[u8; 32], Response> {

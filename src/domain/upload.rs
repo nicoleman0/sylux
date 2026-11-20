@@ -103,7 +103,7 @@ impl UploadStorage {
         })
     }
 
-    pub(crate) fn removal_signing_key(&self) -> [u8; 32] {
+    pub(crate) fn namespace_signing_key(&self) -> [u8; 32] {
         self.mutation_key
     }
 

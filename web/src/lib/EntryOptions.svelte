@@ -7,20 +7,21 @@
   import { modifiedTime } from './modified-time';
   import type { Entry } from './listing';
 
-  let { entry, disabled = false, moveDisabled = false, downloadDisabled = false, downloading = false, onaction }: {
+  let { entry, disabled = false, moveDisabled = false, copyDisabled = false, downloadDisabled = false, downloading = false, onaction }: {
     entry: Entry;
     disabled?: boolean;
     moveDisabled?: boolean;
+    copyDisabled?: boolean;
     downloadDisabled?: boolean;
     downloading?: boolean;
-    onaction: (action: 'download' | 'share' | 'rename' | 'move' | 'delete', trigger: HTMLElement) => void;
+    onaction: (action: 'download' | 'share' | 'rename' | 'move' | 'copy' | 'delete', trigger: HTMLElement) => void;
   } = $props();
   let trigger = $state<HTMLButtonElement | null>(null);
   let open = $state(false);
   let openingDialog = false;
   const modified = $derived(modifiedTime(entry));
 
-  async function select(action: 'download' | 'share' | 'rename' | 'move' | 'delete'): Promise<void> {
+  async function select(action: 'download' | 'share' | 'rename' | 'move' | 'copy' | 'delete'): Promise<void> {
     openingDialog = action !== 'download';
     open = false;
     await tick();
@@ -41,6 +42,7 @@
       {#if entry.kind === 'file'}<DropdownMenu.Item class="menu-item" onSelect={() => select('share')}>Share</DropdownMenu.Item>{/if}
       <DropdownMenu.Item class="menu-item" onSelect={() => select('rename')}>Rename</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item" disabled={moveDisabled} onSelect={() => select('move')}>Move</DropdownMenu.Item>
+      <DropdownMenu.Item class="menu-item" disabled={copyDisabled} onSelect={() => select('copy')}>Copy</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item text-destructive" onSelect={() => select('delete')}>Delete</DropdownMenu.Item>
     </DropdownMenu.Content>
   </DropdownMenu.Portal>

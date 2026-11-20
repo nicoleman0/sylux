@@ -4,6 +4,7 @@ use super::upload::folder_etag;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 pub(super) const MAX_ENTRY_DEPTH: i64 = 128;
+const MAX_COPY_ENTRIES: usize = 10_000;
 pub const MAX_TRASH_PAGE_SIZE: usize = 200;
 
 #[derive(Debug)]
@@ -17,6 +18,7 @@ pub enum NamespaceError {
     ParentUnavailable,
     InvalidDestination,
     DepthLimit,
+    CopyTooLarge,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -456,6 +458,131 @@ pub fn move_entry(
         generation: generation + 1,
         etag: folder_etag(entry, (generation + 1) as u64),
     })
+}
+
+/// Copy the reachable live tree inside a transaction that rolls back on any error.
+pub(crate) fn copy_entry(
+    db: &Transaction<'_>,
+    owner: &str,
+    source: &str,
+    destination: &str,
+    if_match: &str,
+    copy_root: &str,
+    now: i64,
+) -> Result<(), NamespaceError> {
+    let (parent, generation): (String, i64) = db
+        .query_row(
+            "SELECT parent_id,generation FROM entry
+             WHERE entry_id=?1 AND owner_account_id=?2 AND state='active' AND parent_id IS NOT NULL",
+            params![source, owner],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| NamespaceError::Sql)?
+        .ok_or(NamespaceError::NotFound)?;
+    folder_path(db, owner, &parent)?;
+    if if_match != folder_etag(source, generation as u64) {
+        return Err(NamespaceError::Stale);
+    }
+    let path = folder_path(db, owner, destination)?;
+    if path.iter().any(|folder| folder.id == source) {
+        return Err(NamespaceError::InvalidDestination);
+    }
+    let conflict: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM entry source CROSS JOIN entry sibling ON sibling.name_key=source.name_key
+         WHERE source.entry_id=?1 AND sibling.owner_account_id=?2 AND sibling.parent_id=?3 AND sibling.state='active')",
+        params![source, owner, destination],
+        |row| row.get(0),
+    ).map_err(|_| NamespaceError::Sql)?;
+    if conflict {
+        return Err(NamespaceError::Conflict);
+    }
+
+    // Each indexed child lookup stops at the remaining budget, even for wide folders.
+    let mut children = db
+        .prepare(
+            "SELECT entry_id,parent_id,kind='folder' FROM entry
+         WHERE owner_account_id=?1 AND parent_id=?2 AND state='active'
+         ORDER BY name_key,entry_id LIMIT ?3",
+        )
+        .map_err(|_| NamespaceError::Sql)?;
+    let source_is_folder: bool = db
+        .query_row(
+            "SELECT kind='folder' FROM entry WHERE entry_id=?1",
+            [source],
+            |row| row.get(0),
+        )
+        .map_err(|_| NamespaceError::Sql)?;
+    let mut members = vec![(source.to_owned(), parent, source_is_folder, 0i64)];
+    let mut index = 0;
+    while index < members.len() {
+        let (ref folder, _, is_folder, depth) = members[index];
+        if is_folder {
+            let remaining = MAX_COPY_ENTRIES + 1 - members.len();
+            let found: Vec<(String, String, bool, i64)> = children
+                .query_map(params![owner, folder, remaining as i64], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, depth + 1))
+                })
+                .and_then(|rows| rows.collect())
+                .map_err(|_| NamespaceError::Sql)?;
+            members.extend(found);
+            if members.len() > MAX_COPY_ENTRIES {
+                return Err(NamespaceError::CopyTooLarge);
+            }
+        }
+        index += 1;
+    }
+    if members
+        .iter()
+        .any(|member| path.len() as i64 + member.3 > MAX_ENTRY_DEPTH)
+    {
+        return Err(NamespaceError::DepthLimit);
+    }
+
+    let mut create_entry = db.prepare(
+        "INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version)
+         SELECT ?2,owner_account_id,?3,kind,original_name,name_key,name_key_version FROM entry WHERE entry_id=?1",
+    ).map_err(|_| NamespaceError::Sql)?;
+    let mut create_revision = db.prepare(
+        "INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id)
+         SELECT ?2,?3,r.blob_id,r.length,r.sha256,?4,e.owner_account_id FROM entry e
+         JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id WHERE e.entry_id=?1",
+    ).map_err(|_| NamespaceError::Sql)?;
+    let mut set_revision = db
+        .prepare("UPDATE entry SET current_revision_id=?2 WHERE entry_id=?1")
+        .map_err(|_| NamespaceError::Sql)?;
+    let mut copied_folders = std::collections::HashMap::new();
+    for (entry, parent, is_folder, depth) in members {
+        let (copy, copy_parent) = if depth == 0 {
+            (copy_root.to_owned(), destination)
+        } else {
+            let copy_parent: &String = copied_folders.get(&parent).ok_or(NamespaceError::Sql)?;
+            (id()?, copy_parent.as_str())
+        };
+        create_entry
+            .execute(params![entry, copy, copy_parent])
+            .map_err(|_| NamespaceError::Sql)?;
+        if is_folder {
+            copied_folders.insert(entry, copy);
+        } else {
+            let revision = id()?;
+            let inserted = create_revision
+                .execute(params![entry, revision, copy, now])
+                .map_err(|_| NamespaceError::Sql)?;
+            if inserted != 1 {
+                return Err(NamespaceError::Sql);
+            }
+            set_revision
+                .execute(params![copy, revision])
+                .map_err(|_| NamespaceError::Sql)?;
+        }
+    }
+    db.execute(
+        "UPDATE entry SET generation=generation+1 WHERE entry_id=?1",
+        [destination],
+    )
+    .map_err(|_| NamespaceError::Sql)?;
+    Ok(())
 }
 
 /// Hide a tree behind its root marker while retaining payloads and earlier deletions.
@@ -933,6 +1060,141 @@ mod tests {
                     .any(|detail| detail.contains("SEARCH r USING INDEX")),
                 "{sort:?}: {details:?}"
             );
+        }
+    }
+    use crate::{domain::names::EntryName, persistence::schema::MIGRATION_0001_S1};
+    use rusqlite::Connection;
+    const OWNER: &str = "00000000000000000000000000000001";
+    const ROOT: &str = "00000000000000000000000000000002";
+
+    fn hex(n: usize) -> String {
+        format!("{n:032x}")
+    }
+
+    fn fixture(files: usize) -> (Connection, String, String, String) {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        db.execute_batch(MIGRATION_0001_S1).unwrap();
+        crate::persistence::schema::migrate_v1(&db, None).unwrap();
+        db.execute("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES(?1,?1,'user',1,0)", [OWNER]).unwrap();
+        db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,NULL,'folder','',x'',1)", params![ROOT,OWNER]).unwrap();
+        let folder = |id: &str, parent: &str, name: &str| {
+            let n = EntryName::parse(name).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id,OWNER,parent,n.display,n.key]).unwrap();
+        };
+        let src = hex(0x10);
+        let dst = hex(0x11);
+        folder(&src, ROOT, "source");
+        folder(&dst, ROOT, "dest");
+        db.execute("INSERT INTO blob(blob_id,shard,length,sha256,lifecycle) VALUES(?1,substr(?1,1,2),1,zeroblob(32),'live')", [hex(0xb)]).unwrap();
+        db.execute_batch("BEGIN").unwrap();
+        for i in 0..files {
+            let e = hex(0x100000 + i);
+            let r = hex(0x900000 + i);
+            let n = EntryName::parse(&format!("f{i:07}")).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'file',?4,?5,1)", params![e,OWNER,src,n.display,n.key]).unwrap();
+            db.execute("INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES(?1,?2,?3,1,zeroblob(32),1,?4)", params![r,e,hex(0xb),OWNER]).unwrap();
+            db.execute(
+                "UPDATE entry SET current_revision_id=?2 WHERE entry_id=?1",
+                params![e, r],
+            )
+            .unwrap();
+        }
+        db.execute_batch("COMMIT").unwrap();
+        let generation: i64 = db
+            .query_row(
+                "SELECT generation FROM entry WHERE entry_id=?1",
+                [&src],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let etag = folder_etag(&src, generation as u64);
+        (db, src, dst, etag)
+    }
+
+    fn chain(db: &Connection, start: &str, base: usize, len: usize) -> String {
+        let mut parent = start.to_owned();
+        for i in 0..len {
+            let id = hex(base + i);
+            let n = EntryName::parse(&format!("d{i:03}")).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id,OWNER,parent,n.display,n.key]).unwrap();
+            parent = id;
+        }
+        parent
+    }
+
+    #[test]
+    fn copy_size_boundary_is_atomic() {
+        for files in [9_999usize, 10_000] {
+            let (mut db, src, dst, etag) = fixture(files);
+            let tx = db.transaction().unwrap();
+            let before: i64 = tx
+                .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
+                .unwrap();
+            let generation: i64 = tx
+                .query_row(
+                    "SELECT generation FROM entry WHERE entry_id=?1",
+                    [&dst],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let result = copy_entry(&tx, OWNER, &src, &dst, &etag, &hex(0xc0ffee), 2);
+            if files == 9_999 {
+                result.unwrap();
+                let after: i64 = tx
+                    .query_row(
+                        "SELECT generation FROM entry WHERE entry_id=?1",
+                        [&dst],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(after, generation + 1);
+            } else {
+                assert!(matches!(result, Err(NamespaceError::CopyTooLarge)));
+                let after: i64 = tx
+                    .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
+                    .unwrap();
+                let after_generation: i64 = tx
+                    .query_row(
+                        "SELECT generation FROM entry WHERE entry_id=?1",
+                        [&dst],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(before, after);
+                assert_eq!(generation, after_generation);
+            }
+        }
+    }
+
+    #[test]
+    fn copy_depth_boundary_is_atomic() {
+        // Source subtree depth 9 (root + 9 nested folders below it), destination at depth D below Files.
+        for (dest_depth, expect_ok) in [(118usize, true), (119usize, false)] {
+            let (mut db, src, _dst, _etag) = fixture(0);
+            chain(&db, &src, 0x200000, 9);
+            let dest = chain(&db, ROOT, 0x300000, dest_depth);
+            let generation: i64 = db
+                .query_row(
+                    "SELECT generation FROM entry WHERE entry_id=?1",
+                    [&src],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let etag = folder_etag(&src, generation as u64);
+            let tx = db.transaction().unwrap();
+            let before: i64 = tx
+                .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
+                .unwrap();
+            let result = copy_entry(&tx, OWNER, &src, &dest, &etag, &hex(0xc0ffee), 2);
+            let after: i64 = tx
+                .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(result.is_ok(), expect_ok);
+            if !expect_ok {
+                assert!(matches!(result, Err(NamespaceError::DepthLimit)));
+                assert_eq!(before, after);
+            }
         }
     }
 }

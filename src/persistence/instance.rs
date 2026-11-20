@@ -13,6 +13,7 @@ use std::{
 
 const FILE_NAME: &str = "instance.json";
 const APPEARANCE_FILE: &str = "appearance.json";
+const NAME_FILE_BYTES: usize = 1024;
 pub const DEFAULT_NAME: &str = "Sylux";
 pub const LOGO_BYTES: usize = 512 * 1024;
 pub const LOGIN_IMAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -271,12 +272,21 @@ impl InstanceSettings {
         Ok(Some(bytes))
     }
 
+    pub(crate) fn backup_files(&self) -> io::Result<impl Iterator<Item = (&'static str, Vec<u8>)>> {
+        let name = self.read_private(FILE_NAME, NAME_FILE_BYTES)?;
+        let appearance = self.read_private(APPEARANCE_FILE, APPEARANCE_BODY_BYTES)?;
+        Ok(name
+            .into_iter()
+            .map(|bytes| (FILE_NAME, bytes))
+            .chain(appearance.into_iter().map(|bytes| (APPEARANCE_FILE, bytes))))
+    }
+
     pub fn name(&self) -> io::Result<String> {
         let _guard = self
             .access
             .lock()
             .map_err(|_| io::Error::other("settings lock poisoned"))?;
-        let Some(bytes) = self.read_private(FILE_NAME, 1024)? else {
+        let Some(bytes) = self.read_private(FILE_NAME, NAME_FILE_BYTES)? else {
             return Ok(DEFAULT_NAME.to_owned());
         };
         let settings: Settings = serde_json::from_slice(&bytes).map_err(io::Error::other)?;

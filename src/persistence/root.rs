@@ -338,7 +338,7 @@ fn connection_open_code(error: ConnectionError) -> &'static str {
 /// Verify the protected key before opening SQLite, avoiding WAL/SHM side effects.
 pub fn verify_protected_material(root: &Path) -> Result<(), BindingError> {
     let root_fd = open_root_directory(root)?;
-    verify_mutation_key(&root_fd)
+    read_mutation_key(&root_fd).map(drop)
 }
 
 /// Verify the protected key and agreement between manifest, database row and
@@ -518,7 +518,7 @@ fn read_installation_row(connection: &Connection) -> Result<InstallationIdentity
         .map_err(|_| BindingError::RowMissing)
 }
 
-fn verify_mutation_key(root_fd: &File) -> Result<(), BindingError> {
+fn read_mutation_key(root_fd: &File) -> Result<Vec<u8>, BindingError> {
     let secrets_fd = open_subdirectory(root_fd, SECRETS_DIR).map_err(|error| match error {
         SubdirectoryError::Missing => BindingError::KeyMissing,
         other => BindingError::LayoutInvalid(other.reason()),
@@ -555,9 +555,39 @@ fn verify_mutation_key(root_fd: &File) -> Result<(), BindingError> {
     if bytes.len() != KEY_LENGTH {
         return Err(BindingError::KeyInvalid("mutation_key_length"));
     }
-    // The key material is validated for shape only and never leaves this
-    // function: not compared, copied or logged.
-    Ok(())
+    Ok(bytes)
+}
+
+/// Only immutable installation secrets belong in a backup.
+pub(crate) fn backup_secrets(root: &Path) -> Result<(Vec<u8>, Vec<u8>), BindingError> {
+    let root_fd = open_root_directory(root)?;
+    let key = read_mutation_key(&root_fd)?;
+    let secrets = open_subdirectory(&root_fd, SECRETS_DIR)
+        .map_err(|error| BindingError::LayoutInvalid(error.reason()))?;
+    let invalid = BindingError::Io("setup_authorization_invalid");
+    let fd = fs::openat(
+        &secrets,
+        SETUP_AUTHORIZATION_NAME,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| BindingError::Io("setup_authorization_unavailable"))?;
+    let stat = fs::fstat(&fd).map_err(|_| BindingError::Io("setup_authorization_stat_failed"))?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file()
+        || stat.st_nlink != 1
+        || stat.st_mode & 0o777 != 0o600
+    {
+        return Err(invalid);
+    }
+    let mut authorization = Vec::new();
+    File::from(fd)
+        .take(65)
+        .read_to_end(&mut authorization)
+        .map_err(|_| BindingError::Io("setup_authorization_read_failed"))?;
+    if authorization.len() != 64 || !authorization.iter().all(u8::is_ascii_hexdigit) {
+        return Err(invalid);
+    }
+    Ok((key, authorization))
 }
 
 /// Open the root as a private (0700) directory through a validated
