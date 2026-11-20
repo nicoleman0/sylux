@@ -216,7 +216,7 @@ For a plain-file copy of one account, stop Sylux and follow the
 
 Keep the current release archive, `.env`, and local image ID. Stop the service and make a verified pre-upgrade archive as in step 4 **without starting it again**. Download and verify all assets for the new release into a new directory as in step 1, then load and inspect its version tag. Copy the prior `.env` into the new directory, set `SYLUX_IMAGE` to the newly inspected local ID, run `docker compose config -q`, and start there with `docker compose up -d`. Check sign-in and known file downloads.
 
-If the new image fails before it starts, restore the prior image ID in `.env` and start it against the unchanged root. If the new image starts or may have written to the root, stop it, restore the pre-upgrade archive into a new empty directory, set both the prior image ID and `SYLUX_DATA_DIR` in `.env`, and start. Do not run a previous image against a root that a newer image may have changed. Upgrade and schema rollback have not been qualified.
+If the new image fails before it starts, restore the prior image ID in `.env` and start it against the unchanged root. If the new image starts or may have written to the root, stop it, restore the pre-upgrade archive into a new empty directory after applying the [recipient restriction in §4](#4-stop-back-up-and-restore), set both the prior image ID and `SYLUX_DATA_DIR` in `.env`, and start. Do not run a previous image against a root that a newer image may have changed. Upgrade and schema rollback have not been qualified.
 
 Send beta feedback and the host, Docker Engine/Compose versions, image ID, and a brief reproduction to **hello@corvus-dev.com**. Remove setup tokens, passwords, private keys, and file contents before sharing logs.
 

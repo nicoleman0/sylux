@@ -43,8 +43,7 @@ if sudo systemctl is-active --quiet sylux.service; then exit 1; fi
 Make a stopped-service archive on a separate mounted filesystem as in the
 [Docker backup procedure](docker-beta.md#4-stop-back-up-and-restore), using the
 guest's actual data root. Omit the Docker stop/start commands. Keep numeric
-ownership and the whole root, including secrets and SQLite siblings. Verify its
-checksum before recovery. Before any snapshot restore, restrict recipient access at the proxy or network: an unexpired link revoked after the snapshot can become usable again. Keep recipient access restricted through owner review and revocation. Owners can inspect and revoke their own links; there is no administrator-wide inventory, so retain the restriction if owners cannot review.
+ownership and the whole root, including secrets and SQLite siblings. Before any snapshot restore, restrict recipient access at the proxy or network: an unexpired link revoked after the snapshot can become usable again. Keep recipient access restricted through owner review and revocation. Owners can inspect and revoke their own links; there is no administrator-wide inventory, so retain the restriction if owners cannot review.
 
 Verify the checksum:
 
