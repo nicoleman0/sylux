@@ -46,6 +46,26 @@ async fn main() -> ExitCode {
                 }
             }
             CommandKind::AdminVerifyPayloads => run_verify_payloads(&configuration),
+            CommandKind::AdminBackup => {
+                match sylux::backup::create(
+                    &configuration.root,
+                    configuration
+                        .destination
+                        .as_deref()
+                        .expect("parser requires destination"),
+                )
+                .await
+                {
+                    Ok(count) => {
+                        println!("backup_complete payloads={count}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(reason) => {
+                        eprintln!("sylux: {reason}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
             CommandKind::AdminExport => {
                 match sylux::export::export_account(
                     &configuration.root,
