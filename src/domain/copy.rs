@@ -16,6 +16,7 @@ const TICKET_DOMAIN: &[u8] = b"sylux:copy:v1\0";
 #[derive(Debug)]
 pub(crate) enum CopyError {
     InvalidTicket,
+    OtherAccount,
     Expired,
     Namespace(NamespaceError),
     Sql,
@@ -94,7 +95,7 @@ impl Ticket {
             .map_err(|_| CopyError::InvalidTicket)?;
         let ticket: Self = serde_json::from_slice(&body).map_err(|_| CopyError::InvalidTicket)?;
         if ticket.owner != owner {
-            return Err(CopyError::InvalidTicket);
+            return Err(CopyError::OtherAccount);
         }
         Ok(ticket)
     }

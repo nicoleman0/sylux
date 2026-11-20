@@ -4,6 +4,7 @@ use super::upload::folder_etag;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 pub(super) const MAX_ENTRY_DEPTH: i64 = 128;
+const MAX_COPY_ENTRIES: usize = 10_000;
 pub const MAX_TRASH_PAGE_SIZE: usize = 200;
 
 #[derive(Debug)]
@@ -17,6 +18,7 @@ pub enum NamespaceError {
     ParentUnavailable,
     InvalidDestination,
     DepthLimit,
+    CopyTooLarge,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -496,26 +498,43 @@ pub(crate) fn copy_entry(
         return Err(NamespaceError::Conflict);
     }
 
-    let mut tree = db
+    // Each indexed child lookup stops at the remaining budget, even for wide folders.
+    let mut children = db
         .prepare(
-            "WITH RECURSIVE tree(id,parent,kind,depth) AS (
-            SELECT entry_id,parent_id,kind,0 FROM entry WHERE entry_id=?1
-            UNION ALL
-            SELECT e.entry_id,e.parent_id,e.kind,t.depth+1 FROM tree t
-            CROSS JOIN entry e ON e.parent_id=t.id
-            WHERE t.kind='folder' AND e.owner_account_id=?2 AND e.state='active'
-         ) SELECT id,parent,kind='folder',depth FROM tree ORDER BY depth",
+            "SELECT entry_id,parent_id,kind='folder' FROM entry
+         WHERE owner_account_id=?1 AND parent_id=?2 AND state='active'
+         ORDER BY name_key,entry_id LIMIT ?3",
         )
         .map_err(|_| NamespaceError::Sql)?;
-    let members: Vec<(String, String, bool, i64)> = tree
-        .query_map(params![source, owner], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .and_then(|rows| rows.collect())
+    let source_is_folder: bool = db
+        .query_row(
+            "SELECT kind='folder' FROM entry WHERE entry_id=?1",
+            [source],
+            |row| row.get(0),
+        )
         .map_err(|_| NamespaceError::Sql)?;
+    let mut members = vec![(source.to_owned(), parent, source_is_folder, 0i64)];
+    let mut index = 0;
+    while index < members.len() {
+        let (ref folder, _, is_folder, depth) = members[index];
+        if is_folder {
+            let remaining = MAX_COPY_ENTRIES + 1 - members.len();
+            let found: Vec<(String, String, bool, i64)> = children
+                .query_map(params![owner, folder, remaining as i64], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, depth + 1))
+                })
+                .and_then(|rows| rows.collect())
+                .map_err(|_| NamespaceError::Sql)?;
+            members.extend(found);
+            if members.len() > MAX_COPY_ENTRIES {
+                return Err(NamespaceError::CopyTooLarge);
+            }
+        }
+        index += 1;
+    }
     if members
-        .last()
-        .is_some_and(|member| path.len() as i64 + member.3 > MAX_ENTRY_DEPTH)
+        .iter()
+        .any(|member| path.len() as i64 + member.3 > MAX_ENTRY_DEPTH)
     {
         return Err(NamespaceError::DepthLimit);
     }
@@ -1042,5 +1061,187 @@ mod tests {
                 "{sort:?}: {details:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod syl81_review_probe {
+    use super::*;
+    use crate::{domain::names::EntryName, persistence::schema::MIGRATION_0001_S1};
+    use rusqlite::Connection;
+    const OWNER: &str = "00000000000000000000000000000001";
+    const ROOT: &str = "00000000000000000000000000000002";
+
+    fn hex(n: usize) -> String {
+        format!("{n:032x}")
+    }
+
+    fn fixture(files: usize) -> (Connection, String, String, String) {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        db.execute_batch(MIGRATION_0001_S1).unwrap();
+        crate::persistence::schema::migrate_v1(&db, None).unwrap();
+        db.execute("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES(?1,?1,'user',1,0)", [OWNER]).unwrap();
+        db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,NULL,'folder','',x'',1)", params![ROOT,OWNER]).unwrap();
+        let folder = |id: &str, parent: &str, name: &str| {
+            let n = EntryName::parse(name).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id,OWNER,parent,n.display,n.key]).unwrap();
+        };
+        let src = hex(0x10);
+        let dst = hex(0x11);
+        folder(&src, ROOT, "source");
+        folder(&dst, ROOT, "dest");
+        db.execute("INSERT INTO blob(blob_id,shard,length,sha256,lifecycle) VALUES(?1,substr(?1,1,2),1,zeroblob(32),'live')", [hex(0xb)]).unwrap();
+        db.execute_batch("BEGIN").unwrap();
+        for i in 0..files {
+            let e = hex(0x100000 + i);
+            let r = hex(0x900000 + i);
+            let n = EntryName::parse(&format!("f{i:07}")).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'file',?4,?5,1)", params![e,OWNER,src,n.display,n.key]).unwrap();
+            db.execute("INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES(?1,?2,?3,1,zeroblob(32),1,?4)", params![r,e,hex(0xb),OWNER]).unwrap();
+            db.execute(
+                "UPDATE entry SET current_revision_id=?2 WHERE entry_id=?1",
+                params![e, r],
+            )
+            .unwrap();
+        }
+        db.execute_batch("COMMIT").unwrap();
+        let generation: i64 = db
+            .query_row(
+                "SELECT generation FROM entry WHERE entry_id=?1",
+                [&src],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let etag = folder_etag(&src, generation as u64);
+        (db, src, dst, etag)
+    }
+
+    #[test]
+    fn copy_size_boundary_is_atomic() {
+        for files in [9_999usize, 10_000] {
+            let (mut db, src, dst, etag) = fixture(files);
+            let tx = db.transaction().unwrap();
+            let before: i64 = tx
+                .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
+                .unwrap();
+            let generation: i64 = tx
+                .query_row(
+                    "SELECT generation FROM entry WHERE entry_id=?1",
+                    [&dst],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let result = copy_entry(&tx, OWNER, &src, &dst, &etag, &hex(0xc0ffee), 2);
+            if files == 9_999 {
+                result.unwrap();
+                let after: i64 = tx
+                    .query_row(
+                        "SELECT generation FROM entry WHERE entry_id=?1",
+                        [&dst],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(after, generation + 1);
+            } else {
+                assert!(matches!(result, Err(NamespaceError::CopyTooLarge)));
+                let after: i64 = tx
+                    .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
+                    .unwrap();
+                let after_generation: i64 = tx
+                    .query_row(
+                        "SELECT generation FROM entry WHERE entry_id=?1",
+                        [&dst],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(before, after);
+                assert_eq!(generation, after_generation);
+            }
+        }
+    }
+
+    fn chain(db: &Connection, start: &str, base: usize, len: usize) -> String {
+        let mut parent = start.to_owned();
+        for i in 0..len {
+            let id = hex(base + i);
+            let n = EntryName::parse(&format!("d{i:03}")).unwrap();
+            db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id,OWNER,parent,n.display,n.key]).unwrap();
+            parent = id;
+        }
+        parent
+    }
+
+    #[test]
+    fn syl81_review_copy_depth_boundary() {
+        // Source subtree depth 9 (root + 9 nested folders below it), destination at depth D below Files.
+        for (dest_depth, expect_ok) in [(118usize, true), (119usize, false)] {
+            let (mut db, src, _dst, etag) = fixture(0);
+            chain(&db, &src, 0x200000, 9);
+            let dest = chain(&db, ROOT, 0x300000, dest_depth);
+            let generation: i64 = db
+                .query_row(
+                    "SELECT generation FROM entry WHERE entry_id=?1",
+                    [&src],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let _ = etag;
+            let etag = folder_etag(&src, generation as u64);
+            let tx = db.transaction().unwrap();
+            let before: i64 = tx
+                .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
+                .unwrap();
+            let result = copy_entry(&tx, OWNER, &src, &dest, &etag, &hex(0xc0ffee), 2);
+            let after: i64 = tx
+                .query_row("SELECT COUNT(*) FROM entry", [], |r| r.get(0))
+                .unwrap();
+            eprintln!(
+                "SYL-81-review depth dest_depth={dest_depth} result={:?} rows_before={before} rows_after={after}",
+                result.as_ref().err()
+            );
+            assert_eq!(result.is_ok(), expect_ok);
+            if !expect_ok {
+                assert!(matches!(result, Err(NamespaceError::DepthLimit)));
+                assert_eq!(before, after);
+            }
+        }
+    }
+
+    #[test]
+    fn syl81_review_ticket_expiry_and_committed_replay() {
+        use crate::domain::copy::{CopyError, CopyState, Ticket};
+        let key = [7u8; 32];
+        let (mut db, src, dst, etag) = fixture(2);
+        let token = Ticket::issue(
+            &key,
+            OWNER.into(),
+            src.clone(),
+            dst.clone(),
+            etag.clone(),
+            1_000,
+        )
+        .unwrap();
+        let ticket = Ticket::verify(&key, OWNER, &token).unwrap();
+        let tx = db.transaction().unwrap();
+        let expired = ticket.execute(&tx, 1_600);
+        eprintln!(
+            "SYL-81-review expiry uncommitted at +600s: {:?}",
+            expired.as_ref().err()
+        );
+        assert!(matches!(expired, Err(CopyError::Expired)));
+        let ok = ticket.execute(&tx, 1_599).unwrap();
+        assert!(matches!(ok, CopyState::Committed));
+        let replay = ticket.execute(&tx, 99_999).unwrap();
+        eprintln!(
+            "SYL-81-review committed replay long after expiry: committed={}",
+            matches!(replay, CopyState::Committed)
+        );
+        assert!(matches!(replay, CopyState::Committed));
+        assert!(matches!(
+            Ticket::verify(&key, "00000000000000000000000000000009", &token),
+            Err(CopyError::OtherAccount)
+        ));
+        tx.commit().unwrap();
     }
 }

@@ -1621,6 +1621,8 @@
     if (error instanceof HttpError) {
       if (error.code === 'name_conflict') return 'An item with this name is already there. Choose another folder, or rename your item.';
       if (error.code === 'invalid_destination') return 'A folder cannot be copied into itself or its children. Choose another folder.';
+      if (error.code === 'copy_too_large') return 'This folder is too large to copy. Copy a smaller folder instead.';
+      if (error.code === 'invalid_copy_ticket') return 'This copy request is invalid. Check the destination for an earlier copy before trying again.';
       if (error.code === 'depth_limit') return 'Choose a destination closer to Files. This copy would nest folders too deeply.';
       if (error.code === 'copy_ticket_expired') return 'The copy request expired. Choose a destination again.';
       if (error.status === 404 || error.status === 412) return 'The item or destination changed. Refresh Files before trying again.';
@@ -1649,7 +1651,8 @@
   }
 
   function copyMayBeUnconfirmed(error: unknown): boolean {
-    return moveOutcomeUncertain(error) || (error instanceof HttpError && [400, 401, 403].includes(error.status));
+    return !(error instanceof HttpError && error.code === 'invalid_copy_ticket') &&
+      (moveOutcomeUncertain(error) || (error instanceof HttpError && [400, 401, 403].includes(error.status)));
   }
 
   async function copyEntry(): Promise<void> {
@@ -1693,7 +1696,10 @@
       else copyRecoveryMessage = 'Copy outcome unconfirmed. Retry the same copy to resolve it.';
     } catch (error) {
       if (generation !== sessionGeneration) return;
-      if (mode === 'retry' && !copyMayBeUnconfirmed(error) && !(error instanceof HttpError && error.code === 'copy_not_committed')) {
+      if (error instanceof HttpError && error.code === 'invalid_copy_ticket') {
+        saveCopy(null);
+        copyRecoveryMessage = copyFailure(error);
+      } else if (mode === 'retry' && !copyMayBeUnconfirmed(error) && !(error instanceof HttpError && error.code === 'copy_not_committed')) {
         saveCopy(null);
         if (feedback === feedbackRevision) copyRecoveryMessage = copyFailure(error);
       } else {

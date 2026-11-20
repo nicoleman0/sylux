@@ -49,6 +49,7 @@ fn not_committed() -> Response {
 fn failure(failure: CopyError) -> Response {
     match failure {
         CopyError::InvalidTicket => error(StatusCode::BAD_REQUEST, "invalid_copy_ticket"),
+        CopyError::OtherAccount => error(StatusCode::FORBIDDEN, "copy_other_account"),
         CopyError::Expired => error(StatusCode::CONFLICT, "copy_ticket_expired"),
         CopyError::Namespace(NamespaceError::NotFound) => error(StatusCode::NOT_FOUND, "not_found"),
         CopyError::Namespace(NamespaceError::Stale) => {
@@ -62,6 +63,9 @@ fn failure(failure: CopyError) -> Response {
         }
         CopyError::Namespace(NamespaceError::DepthLimit) => {
             error(StatusCode::UNPROCESSABLE_ENTITY, "depth_limit")
+        }
+        CopyError::Namespace(NamespaceError::CopyTooLarge) => {
+            error(StatusCode::UNPROCESSABLE_ENTITY, "copy_too_large")
         }
         _ => not_committed(),
     }

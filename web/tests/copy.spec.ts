@@ -15,7 +15,7 @@ async function signIn(page: Page, owner = 'owner') {
 async function fixture(page: Page) {
   const entries = [source, destination, child];
   const requests: Array<{ path: string; payload: unknown; etag: string | undefined }> = [];
-  let effect: 'healthy' | 'conflict' | 'lost' = 'healthy';
+  let effect: 'healthy' | 'conflict' | 'lost' | 'invalid' | 'other' | 'large' = 'healthy';
   let release: Promise<void> | null = null;
   let releasePreparation: Promise<void> | null = null;
   let unavailableStatus = false;
@@ -39,6 +39,9 @@ async function fixture(page: Page) {
         if (releasePreparation) await releasePreparation;
         return route.fulfill({ json: { ticket: 'original-ticket' } });
       }
+      if (effect === 'invalid') return route.fulfill({ status: 400, json: { code: 'invalid_copy_ticket' } });
+      if (effect === 'other') return route.fulfill({ status: 403, json: { code: 'copy_other_account' } });
+      if (effect === 'large') return route.fulfill({ status: 422, json: { code: 'copy_too_large' } });
       if (path === '/copies/status') {
         if (unavailableStatus) return route.fulfill({ status: 503, json: { code: 'copy_unavailable' } });
         return route.fulfill({ json: { state: copy() ? 'committed' : 'unknown' } });
@@ -176,4 +179,36 @@ test('browser navigation during preparation preserves the copy and does not revi
   await expect(page.getByRole('status').filter({ hasText: 'Copied to Destination' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
   await expect(page.getByRole('row', { name: 'Project', exact: true })).toBeVisible();
+});
+
+for (const mode of ['status', 'retry'] as const) {
+  test(`invalid saved ticket clears on ${mode} after reload`, async ({ page }) => {
+    const backend = await fixture(page);
+    const dialog = await chooser(page);
+    await dialog.getByRole('button', { name: 'Destination', exact: true }).click();
+    backend.effect('lost'); backend.unavailableStatus(true);
+    await dialog.getByRole('button', { name: 'Copy here', exact: true }).click();
+    const recovery = page.getByRole('region', { name: 'Copy status' });
+    await expect(recovery).toBeVisible();
+    await page.reload(); await signIn(page);
+    backend.effect('other');
+    await recovery.getByRole('button', { name: mode === 'status' ? 'Check copy status' : 'Retry same copy' }).click();
+    await expect(recovery).toContainText('unconfirmed');
+    expect(await page.evaluate(() => sessionStorage.getItem('sylux-copy:owner'))).not.toBeNull();
+    backend.effect('invalid');
+    await recovery.getByRole('button', { name: mode === 'status' ? 'Check copy status' : 'Retry same copy' }).click();
+    await expect(recovery).toHaveCount(0);
+    await expect(page.getByText('This copy request is invalid.', { exact: false })).toBeVisible();
+    expect(await page.evaluate(() => sessionStorage.getItem('sylux-copy:owner'))).toBeNull();
+    await chooser(page);
+  });
+}
+
+test('oversized copy gives actionable feedback', async ({ page }) => {
+  const backend = await fixture(page);
+  const dialog = await chooser(page);
+  await dialog.getByRole('button', { name: 'Destination', exact: true }).click();
+  backend.effect('large');
+  await dialog.getByRole('button', { name: 'Copy here', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Copy a smaller folder');
 });

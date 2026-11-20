@@ -380,6 +380,40 @@ fn etag(value: &Value) -> &str {
 }
 
 #[tokio::test]
+async fn oversized_copy_returns_422_without_changing_destination() {
+    let fixture = Fixture::new("too-large", None).await;
+    let source = fixture.folder(OWNER_ROOT, "Large source").await;
+    let destination = fixture.folder(OWNER_ROOT, "Destination").await;
+    {
+        let mut db = fixture.db();
+        let tx = db.transaction().unwrap();
+        for i in 0..10_000 {
+            let child_id = format!("{:032x}", 0x100000 + i);
+            let name = format!("child-{i:05}");
+            let key = sylux::domain::names::EntryName::parse(&name).unwrap();
+            tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![child_id, OWNER, id(&source), key.display, key.key]).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let ticket = fixture
+        .ticket(&ALICE, id(&source), id(&destination), etag(&source))
+        .await;
+    let response = fixture
+        .json("POST", "/copies", &ALICE, "", ticket, 422)
+        .await;
+    assert_eq!(response["code"], "copy_too_large");
+    assert!(fixture.items(id(&destination)).await.is_empty());
+    let current = fixture
+        .items(OWNER_ROOT)
+        .await
+        .into_iter()
+        .find(|entry| id(entry) == id(&destination))
+        .unwrap();
+    assert_eq!(etag(&destination), etag(&current));
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn tree_copy_preserves_live_structure_names_bytes_and_only_the_current_revision() {
     let fixture = Fixture::new("live-tree", None).await;
     let source = fixture.folder(OWNER_ROOT, "SYL-81 résumé").await;
@@ -395,6 +429,13 @@ async fn tree_copy_preserves_live_structure_names_bytes_and_only_the_current_rev
         .await;
     fixture.commit(&ticket).await;
 
+    let updated_destination = fixture
+        .items(OWNER_ROOT)
+        .await
+        .into_iter()
+        .find(|entry| id(entry) == id(&destination))
+        .unwrap();
+    assert_ne!(etag(&destination), etag(&updated_destination));
     let copy = fixture.items(id(&destination)).await.pop().unwrap();
     assert_eq!(copy["name"], source["name"]);
     assert_ne!(id(&copy), id(&source));
@@ -544,9 +585,9 @@ async fn copy_rejects_conflicts_cycles_stale_and_private_or_trashed_entries() {
     for path in ["/copies", "/copies/status"] {
         assert_eq!(
             fixture
-                .json("POST", path, &BOB, "", owner_ticket.clone(), 400)
+                .json("POST", path, &BOB, "", owner_ticket.clone(), 403)
                 .await["code"],
-            "invalid_copy_ticket"
+            "copy_other_account"
         );
         assert_eq!(
             fixture
