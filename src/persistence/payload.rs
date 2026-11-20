@@ -18,8 +18,8 @@ use std::sync::Arc;
 #[cfg(feature = "test-harness")]
 pub type PublishFaultHook = Arc<dyn Fn(&'static str) -> Result<(), PayloadError> + Send + Sync>;
 
-const PAYLOADS: &str = "payloads";
-const STAGING: &str = "staging";
+pub(crate) const PAYLOADS: &str = "payloads";
+pub(crate) const STAGING: &str = "staging";
 const ID_LENGTH: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -565,7 +565,7 @@ impl From<PayloadFault> for ExportCopyError {
     }
 }
 
-/// Read-only access to the payload directory for offline verification.
+/// Read-only access to the payload directory.
 /// Unlike `PayloadStore`, it never creates a directory.
 pub struct PayloadVerifier {
     payloads: File,
@@ -592,53 +592,43 @@ impl PayloadVerifier {
         digest: [u8; 32],
         output: &mut impl Write,
     ) -> Result<(), ExportCopyError> {
+        self.copy_verified_final(blob_id, length, digest, output)
+            .map_err(|error| match error {
+                ExportCopyError::Payload(PayloadFault::Io("payload_open_failed")) => {
+                    PayloadFault::Missing.into()
+                }
+                other => other,
+            })
+    }
+
+    pub(crate) fn copy_verified_final(
+        &self,
+        blob_id: &str,
+        length: u64,
+        digest: [u8; 32],
+        output: &mut impl Write,
+    ) -> Result<(), ExportCopyError> {
         validate_id(blob_id).map_err(|_| PayloadFault::InvalidId)?;
         let shard = open_directory(&self.payloads, &blob_id[..2]).map_err(fault_from_error)?;
-        let fd = fs::openat(
-            &shard,
-            blob_id,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        copy_verified_from(&shard, blob_id, length, digest, output)
+    }
+
+    pub(crate) fn copy_verified_staging(
+        root: &Path,
+        staging_name: &str,
+        length: u64,
+        digest: [u8; 32],
+        output: &mut impl Write,
+    ) -> Result<(), ExportCopyError> {
+        staging_ids(staging_name).map_err(|_| PayloadFault::InvalidId)?;
+        let root = fs::open(
+            root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| PayloadFault::Missing)?;
-        let stat = fs::fstat(&fd).map_err(|_| PayloadFault::Io("payload_stat_failed"))?;
-        if !FileType::from_raw_mode(stat.st_mode).is_file()
-            || stat.st_nlink != 1
-            || stat.st_mode & 0o777 != 0o600
-        {
-            return Err(PayloadFault::NotPrivateFile.into());
-        }
-        if stat.st_size < 0 || stat.st_size as u64 != length {
-            return Err(PayloadFault::LengthMismatch.into());
-        }
-        let mut file = File::from(fd);
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        let mut copied = 0u64;
-        loop {
-            let n = file
-                .read(&mut buffer)
-                .map_err(|_| PayloadFault::Io("payload_read_failed"))?;
-            if n == 0 {
-                break;
-            }
-            copied += n as u64;
-            if copied > length {
-                return Err(PayloadFault::LengthMismatch.into());
-            }
-            hasher.update(&buffer[..n]);
-            output
-                .write_all(&buffer[..n])
-                .map_err(ExportCopyError::Destination)?;
-        }
-        if copied != length {
-            return Err(PayloadFault::LengthMismatch.into());
-        }
-        let actual: [u8; 32] = hasher.finalize().into();
-        if actual != digest {
-            return Err(PayloadFault::DigestMismatch.into());
-        }
-        Ok(())
+        .map_err(|_| PayloadFault::Io("payload_root_open_failed"))?;
+        let staging = open_directory(&File::from(root), STAGING).map_err(fault_from_error)?;
+        copy_verified_from(&staging, staging_name, length, digest, output)
     }
 
     pub fn verify(
@@ -656,6 +646,63 @@ impl PayloadVerifier {
         )
         .map(|_| ())
     }
+}
+
+fn copy_verified_from(
+    directory: &File,
+    name: &str,
+    length: u64,
+    digest: [u8; 32],
+    output: &mut impl Write,
+) -> Result<(), ExportCopyError> {
+    let fd = fs::openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| match error {
+        rustix::io::Errno::NOENT => PayloadFault::Missing,
+        _ => PayloadFault::Io("payload_open_failed"),
+    })?;
+    let stat = fs::fstat(&fd).map_err(|_| PayloadFault::Io("payload_stat_failed"))?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file()
+        || stat.st_nlink != 1
+        || stat.st_mode & 0o777 != 0o600
+    {
+        return Err(PayloadFault::NotPrivateFile.into());
+    }
+    if stat.st_size < 0 || stat.st_size as u64 != length {
+        return Err(PayloadFault::LengthMismatch.into());
+    }
+    let mut file = File::from(fd);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut copied = 0u64;
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .map_err(|_| PayloadFault::Io("payload_read_failed"))?;
+        if n == 0 {
+            break;
+        }
+        copied += n as u64;
+        if copied > length {
+            return Err(PayloadFault::LengthMismatch.into());
+        }
+        hasher.update(&buffer[..n]);
+        output
+            .write_all(&buffer[..n])
+            .map_err(ExportCopyError::Destination)?;
+    }
+    if copied != length {
+        return Err(PayloadFault::LengthMismatch.into());
+    }
+    let actual: [u8; 32] = hasher.finalize().into();
+    if actual != digest {
+        return Err(PayloadFault::DigestMismatch.into());
+    }
+    Ok(())
 }
 
 /// The one rule for a valid stored payload: private regular file, recorded
@@ -868,7 +915,7 @@ impl StagingPayload {
     }
 }
 
-fn staging_ids(staging_name: &str) -> Result<(&str, &str), PayloadError> {
+pub(crate) fn staging_ids(staging_name: &str) -> Result<(&str, &str), PayloadError> {
     if staging_name.len() != ID_LENGTH * 2 + 1 || staging_name.as_bytes()[ID_LENGTH] != b'-' {
         return Err(PayloadError::InvalidId);
     }
@@ -879,7 +926,7 @@ fn staging_ids(staging_name: &str) -> Result<(&str, &str), PayloadError> {
     Ok((attempt, blob))
 }
 
-fn validate_id(id: &str) -> Result<(), PayloadError> {
+pub(crate) fn validate_id(id: &str) -> Result<(), PayloadError> {
     if id.len() != ID_LENGTH
         || !id
             .bytes()

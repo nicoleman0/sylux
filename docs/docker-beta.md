@@ -90,6 +90,78 @@ ssh -N -L 127.0.0.1:3000:127.0.0.1:3000 operator@private-host
 
 The SSH host must be reachable privately and the browser must trust the TLS certificate for `127.0.0.1`. A mobile client needs an SSH app that provides a local forward to its browser, plus certificate trust on that device. This route was tested only from a separate container network namespace, not a physical desktop or phone. If forwarding is unavailable, use a reviewed private reverse proxy with a matching hostname certificate and a configured `--public-origin`; that deployment is outside this Compose example.
 
+## Back up while serving
+
+Use a release that includes `admin backup`. Run as the Sylux service identity.
+Choose a private directory on a separate local filesystem. The backup includes
+file contents, account and session data, the installation keys and instance
+settings. Keep it as private as the live root.
+
+With the default install paths, create a backup under `/mnt/backup/sylux`.
+Use a new name for each backup. If you changed `SYLUX_DATA_DIR`, replace
+`/srv/sylux` with the actual path. The service must be running for this
+read-only mount so SQLite WAL sidecars are available. For a stopped instance,
+use the [stopped-service archive](#4-stop-back-up-and-restore) instead.
+
+```sh
+findmnt -T /mnt/backup -o TARGET,SOURCE,FSTYPE,OPTIONS || exit 1
+sudo install -d -o 10001 -g 10001 -m 0700 /mnt/backup/sylux || exit 1
+docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --user 10001:10001 \
+  --mount type=bind,src=/srv/sylux,dst=/live,readonly \
+  --mount type=bind,src=/mnt/backup/sylux,dst=/backups \
+  "$IMAGE_ID" admin backup --root /live --destination /backups/run-001 || exit 1
+```
+
+For a native install, run `sylux admin backup --root ROOT --destination DIRECTORY`
+as the service user. The parent must exist and the destination must be new or
+empty. Use a parent outside the live root, with no other writable mount of the
+live tree under it. A native or writable-mount backup opens SQLite read-only
+but may create or update SQLite WAL sidecar files.
+
+Exit 0 and `backup_complete payloads=N` mean Sylux checked the SQLite snapshot
+and the copied bytes, then ran startup reconciliation on the copy. The count
+includes any complete bodies awaiting upload commit. Use only the named output
+of a successful command. An interruption can leave a private sibling directory
+named `.sylux-backup-incomplete-*`. Discard it after confirming the command has
+stopped. A failed command leaves live database data, payloads and secrets
+unchanged and publishes no valid backup.
+
+The metadata records one SQLite snapshot taken near the start of the command.
+Files committed and present at that point, including retained Trash contents,
+are copied with their recorded lengths and SHA-256 digests. An upload still
+receiving bytes restarts from zero on restore. Instance name and appearance are
+read separately from SQLite. If permanent removal unlinks a required payload
+before it can be copied, the command fails and leaves the destination
+unpublished. Retry with a fresh destination after removal finishes.
+
+### Restore an online backup
+
+Use the same release, UID/GID and TLS setup. Stop the live service before
+starting the restored copy. Keep the backup and the original root private and
+intact. Copy the completed backup into a new empty directory on the supported
+host filesystem.
+
+```sh
+docker compose stop || exit 1
+RUNNING=$(docker compose ps --status running -q) || exit 1
+test -z "$RUNNING" || exit 1
+sudo mkdir -m 0700 /srv/sylux-restore || exit 1
+sudo cp -a /mnt/backup/sylux/run-001/. /srv/sylux-restore/ || exit 1
+```
+
+Set `SYLUX_DATA_DIR=/srv/sylux-restore` in `.env`. Start with `docker compose up -d`,
+check that the loopback listener is ready, sign in and compare inventory and
+known downloads. The startup process reconciles the restored root before serving.
+Keep the [stopped-service archive procedure](#4-stop-back-up-and-restore) for
+pre-upgrade rollback and offline administrator recovery.
+
+The online procedure was exercised with disposable data in a Linux arm64
+container, including a held upload, startup reconciliation and byte-exact
+downloads. The documented Ubuntu x86_64 install and its stopped-service
+archive have separate verification. Online backup has no qualification for
+power loss, production storage, or upgrades.
+
 ## 4. Stop, back up, and restore
 
 Use `docker compose stop` for a clean stop and `docker compose up -d` to start again. `docker compose ps` shows whether it is running. Keep the data directory when replacing a container.

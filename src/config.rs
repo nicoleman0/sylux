@@ -12,6 +12,7 @@ pub enum CommandKind {
     AdminResetPassword,
     AdminVerifyPayloads,
     AdminExport,
+    AdminBackup,
 }
 
 #[derive(Debug)]
@@ -63,6 +64,7 @@ where
             Some("reset-password") => CommandKind::AdminResetPassword,
             Some("verify-payloads") => CommandKind::AdminVerifyPayloads,
             Some("export") => CommandKind::AdminExport,
+            Some("backup") => CommandKind::AdminBackup,
             _ => return Err(ConfigError::Usage("admin_subcommand_required")),
         },
         _ => return Err(ConfigError::Usage("subcommand_required")),
@@ -80,18 +82,21 @@ where
         let flag = argument
             .to_str()
             .ok_or(ConfigError::Usage("argument_not_utf8"))?;
-        // Offline admin commands accept only their own flags.
+        // Admin commands accept only their own flags.
         let allowed: Option<&[&str]> = match command {
             CommandKind::AdminResetPassword => Some(&["--root", "--handle", "--password-stdin"]),
             CommandKind::AdminVerifyPayloads => Some(&["--root"]),
             CommandKind::AdminExport => Some(&["--root", "--handle", "--destination"]),
+            CommandKind::AdminBackup => Some(&["--root", "--destination"]),
             CommandKind::Init | CommandKind::Serve => None,
         };
         if allowed.is_some_and(|flags| !flags.contains(&flag)) {
             return Err(ConfigError::Usage("unknown_argument"));
         }
         match flag {
-            "--destination" if command == CommandKind::AdminExport => {
+            "--destination"
+                if matches!(command, CommandKind::AdminExport | CommandKind::AdminBackup) =>
+            {
                 set_once(
                     &mut destination,
                     value_path(&mut arguments, "destination_value_missing")?,
@@ -165,13 +170,13 @@ where
             return Err(ConfigError::Usage("password_stdin_required"));
         }
     }
-    if command == CommandKind::AdminExport {
-        if admin_handle.as_deref().is_none_or(str::is_empty) {
-            return Err(ConfigError::Usage("handle_required"));
-        }
-        if destination.is_none() {
-            return Err(ConfigError::Usage("destination_required"));
-        }
+    if command == CommandKind::AdminExport && admin_handle.as_deref().is_none_or(str::is_empty) {
+        return Err(ConfigError::Usage("handle_required"));
+    }
+    if matches!(command, CommandKind::AdminExport | CommandKind::AdminBackup)
+        && destination.is_none()
+    {
+        return Err(ConfigError::Usage("destination_required"));
     }
     let listen = listen
         .or_else(|| {
@@ -362,6 +367,61 @@ mod tests {
             (
                 vec!["admin", "verify-payloads", "--root", "/x", "--root", "/y"],
                 "duplicate_root",
+            ),
+        ] {
+            assert_eq!(parse(args(&input)).unwrap_err().reason(), reason);
+        }
+    }
+
+    #[test]
+    fn backup_parser_accepts_root_and_destination() {
+        let parsed = parse(args(&[
+            "admin",
+            "backup",
+            "--root",
+            "/x",
+            "--destination",
+            "/y",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.command, CommandKind::AdminBackup);
+        assert_eq!(parsed.root, Path::new("/x"));
+        assert_eq!(parsed.destination.as_deref(), Some(Path::new("/y")));
+        for (input, reason) in [
+            (vec!["admin", "backup"], "root_required"),
+            (
+                vec!["admin", "backup", "--root", "/x"],
+                "destination_required",
+            ),
+            (
+                vec!["admin", "backup", "--root", "/x", "--destination"],
+                "destination_value_missing",
+            ),
+            (
+                vec![
+                    "admin",
+                    "backup",
+                    "--root",
+                    "/x",
+                    "--destination",
+                    "/y",
+                    "--destination",
+                    "/z",
+                ],
+                "duplicate_destination",
+            ),
+            (
+                vec![
+                    "admin",
+                    "backup",
+                    "--root",
+                    "/x",
+                    "--destination",
+                    "/y",
+                    "--handle",
+                    "h",
+                ],
+                "unknown_argument",
             ),
         ] {
             assert_eq!(parse(args(&input)).unwrap_err().reason(), reason);
