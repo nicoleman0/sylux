@@ -3,6 +3,7 @@ pub mod archives;
 pub mod assets;
 pub mod auth;
 pub mod content;
+mod copies;
 pub mod entries;
 pub mod instance;
 pub mod middleware;
@@ -53,6 +54,8 @@ pub struct AuthState {
     #[cfg(feature = "test-harness")]
     pub upload_commit_test_barrier: Option<Arc<uploads::UploadCommitTestBarrier>>,
     #[cfg(feature = "test-harness")]
+    pub copy_commit_hook: Option<Arc<dyn Fn() -> rusqlite::Result<()> + Send + Sync>>,
+    #[cfg(feature = "test-harness")]
     pub removal_commit_hook:
         Option<Arc<dyn Fn(&'static str) -> rusqlite::Result<()> + Send + Sync>>,
 }
@@ -87,6 +90,8 @@ impl AuthState {
             upload_commit_test_barrier: None,
             #[cfg(feature = "test-harness")]
             removal_commit_hook: None,
+            #[cfg(feature = "test-harness")]
+            copy_commit_hook: None,
         }
     }
 
@@ -143,6 +148,9 @@ pub fn router(state: AuthState) -> Router {
         .route("/trash/removals/{id}", get(removals::status))
         .route("/entries/search", get(entries::search))
         .route("/entries/{id}/move", post(entries::move_entry))
+        .route("/entries/{id}/copy-ticket", post(copies::prepare))
+        .route("/copies", post(copies::execute))
+        .route("/copies/status", post(copies::status))
         .route("/trash/{id}/restore", axum::routing::post(entries::restore))
         .route("/instance", get(instance::get).patch(instance::update))
         .route(

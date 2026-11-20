@@ -119,6 +119,11 @@ path = "tests/contract/private_storage.rs"
 required-features = ["test-harness"]
 
 [[test]]
+name = "contract_copy"
+path = "tests/contract/copy.rs"
+required-features = ["test-harness"]
+
+[[test]]
 name = "contract_content"
 path = "tests/contract/content.rs"
 required-features = ["test-harness"]

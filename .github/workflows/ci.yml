@@ -178,7 +178,7 @@ jobs:
         run: scripts/check.sh
 
       - name: Check storage and folder recovery contracts
-        run: cargo test --locked --features test-harness --test integration_names_listing --test contract_uploads --test contract_private_storage --test contract_content --test contract_archives --test contract_isolation --test integration_poc_journey --test integration_retry_reconcile
+        run: cargo test --locked --features test-harness --test integration_names_listing --test contract_uploads --test contract_private_storage --test contract_content --test contract_archives --test contract_isolation --test contract_copy --test integration_poc_journey --test integration_retry_reconcile
 
   web-smoke:
     name: Browser shard ${{ matrix.shard }}/4
