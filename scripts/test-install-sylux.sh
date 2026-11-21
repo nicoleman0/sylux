@@ -77,6 +77,7 @@ printf 'Snap refusal and healthy Docker detection passed.\n'
 (
   # Used indirectly by check_existing_docker.
   # shellcheck disable=SC2329
+  # shellcheck disable=SC2317
   command() { if [[ "$*" == '-v docker' ]]; then return 1; fi; builtin command "$@"; }
   touch "$fixture/socket"
   if message=$(check_existing_docker "$fixture/snap" "$fixture/socket" 2>&1); then

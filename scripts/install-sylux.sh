@@ -106,6 +106,8 @@ compose() {
     --env-file "$install_dir/.env" --file "$install_dir/compose.yaml" "$@"
 }
 
+# The installer uses host paths; arguments only override them in private fixtures.
+# shellcheck disable=SC2120,SC2119
 check_existing_docker() {
   local snap_root=${1:-/snap} socket=${2:-/var/run/docker.sock}
   if [[ -e $snap_root/docker/current || -L $snap_root/docker/current || -e $snap_root/bin/docker || -L $snap_root/bin/docker ]] ||
