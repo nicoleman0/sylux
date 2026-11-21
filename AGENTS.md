@@ -27,6 +27,9 @@
 
 - For installation or release changes, read `docs/docker-beta.md`.
   Read `docs/lxc.md` before native deployment work.
+- For library or sharing behavior, read the [behavior contract](docs/specs/libraries-and-sharing.md).
+  Update the rule, scenario and behavior test together when behavior changes.
+  Refactors that preserve behavior can cite existing passing coverage.
 - For storage mutations, read `src/domain/coordinator.rs`,
   `src/persistence/mod.rs` and the affected contract tests.
 - Use `.agents/skills/verify-sylux-storage/SKILL.md` to select real storage
