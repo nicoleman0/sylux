@@ -114,8 +114,11 @@ test('file list is operable from the keyboard with visible focus', { annotation:
   // Hold the first listing so ArrowDown is pressed while rows are still disabled.
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
-  await page.route('**/folders/*/children**', async route => { await held; await route.continue(); }, { times: 1 });
+  let arrived!: () => void;
+  const requestArrived = new Promise<void>(resolve => { arrived = resolve; });
+  await page.route('**/folders/*/children**', async route => { arrived(); await held; await route.continue(); }, { times: 1 });
   await signIn();
+  await requestArrived;
   const folder = page.getByRole('button', { name: `Open ${fixture.folder}`, exact: true });
   await page.getByRole('heading', { name: 'Files', level: 1 }).focus();
   await page.keyboard.press('ArrowDown');

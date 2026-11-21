@@ -422,8 +422,8 @@
           const leavingSheet = trigger?.closest('[data-mobile=true]') && active?.matches('[data-sidebar=trigger]');
           const restoreScroll = !pendingMove && (!active?.closest('.account-content, .files-content, .trash-content, .settings-content') || watched.mayFocus());
           if (restoreScroll) window.scrollTo(0, scroll);
-          if (watched.mayFocus() || active === document.body || leavingSheet) {
-            const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title');
+          const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title');
+          if ((pendingMove && active === heading) || watched.mayFocus() || active === document.body || leavingSheet) {
             const retry = document.getElementById(restorationFailed && !restorationUnavailable ? 'folder-page-retry' : destination === 'trash' && trashError ? 'trash-page-retry' : '');
             const items = pendingMove && active === heading ? listItems() : [];
             const moved = pendingMove ? items[moveIndex(-1, items.length, pendingMove)] : null;

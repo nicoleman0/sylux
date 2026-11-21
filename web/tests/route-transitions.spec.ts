@@ -127,6 +127,28 @@ async function hold(page: Page, url: string) {
   };
 }
 
+for (const moveAway of [false, true]) {
+  test(`queued heading arrow ${moveAway ? 'does not steal moved focus' : 'focuses the loaded row'}`, async ({ page }) => {
+    await fixture(page);
+    const deferred = await hold(page, '**/folders/root/children?*');
+    await page.goto('/'); await login(page);
+    const request = await deferred();
+    const heading = page.getByRole('heading', { level: 1, name: 'Files', exact: true });
+    await heading.focus();
+    await page.keyboard.press('ArrowDown');
+    const logout = page.getByRole('button', { name: 'Log out', exact: true });
+    if (moveAway) await logout.focus();
+    await request.fulfill({ json: list([projects]) });
+    const row = page.getByRole('button', { name: 'Open Projects', exact: true });
+    await expect(row).toBeVisible();
+    if (moveAway) await expect(logout).toBeFocused();
+    else {
+      await expect(row).toBeFocused();
+      await expect(row).toHaveCSS('outline-style', 'solid');
+    }
+  });
+}
+
 test('slow route retains an inert view, reports pending once, and retries the failed destination', async ({ page }, info) => {
   await fixture(page); await page.goto('/'); await login(page);
   const heading = page.getByRole('heading', { level: 1, name: 'Files', exact: true });

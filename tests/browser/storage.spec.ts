@@ -112,7 +112,7 @@ test('loading, empty, and recoverable listing error are distinguishable', { anno
   await page.getByRole('button', { name: `Open ${fixtures.folder}`, exact: true }).click();
   await requestArrived;
   markListingProgress('first-folder-response-held');
-  await expect(page.getByRole('status').filter({ hasText: 'Loading files' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Opening files…' })).toBeVisible();
   release();
   await page.unrouteAll({ behavior: 'ignoreErrors' });
 
@@ -139,6 +139,8 @@ test('loading, empty, and recoverable listing error are distinguishable', { anno
   markListingProgress('error-state-complete');
 
   // Use an actual empty folder, created through the UI and real mutation routes.
+  await page.getByRole('navigation', { name: 'Folder path' }).getByRole('button', { name: 'Files' }).click();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   const emptyName = `empty-${phase}-${Date.now()}`;
   await page.getByRole('button', { name: 'New folder', exact: true }).click();
   await page.getByLabel('Folder name', { exact: true }).fill(emptyName);
