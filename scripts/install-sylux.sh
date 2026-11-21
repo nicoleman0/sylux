@@ -106,17 +106,30 @@ compose() {
     --env-file "$install_dir/.env" --file "$install_dir/compose.yaml" "$@"
 }
 
-install_packages() {
-  local packages=() utility
+check_existing_docker() {
+  local snap_root=${1:-/snap} socket=${2:-/var/run/docker.sock}
+  if [[ -e $snap_root/docker/current || -L $snap_root/docker/current || -e $snap_root/bin/docker || -L $snap_root/bin/docker ]] ||
+     { ! command -v docker >/dev/null && [[ -e $socket || -L $socket ]]; }; then
+    fail 'Found snap Docker or an ambiguous Docker socket. Resolve it before installation.'
+  fi
+}
+
+plan_packages() {
+  packages=()
+  tools=()
+  local utility
   for utility in curl openssl python3; do
-    command -v "$utility" >/dev/null || packages+=("$utility")
+    command -v "$utility" >/dev/null || tools+=("$utility")
   done
+  packages=("${tools[@]}")
   if ! command -v docker >/dev/null; then
     packages+=(docker.io docker-compose-v2)
   fi
-  if (( ${#packages[@]} )); then
-    apt-get update
-    NEEDRESTART_MODE=l apt-get install --yes --no-remove --no-install-recommends ca-certificates "${packages[@]}"
+}
+
+install_packages() {
+  if (( $# )); then
+    (umask 022; apt-get update; NEEDRESTART_MODE=l apt-get install --yes --no-remove --no-install-recommends ca-certificates "$@")
   fi
 }
 
@@ -212,13 +225,17 @@ confirm_plan() {
   local answer
   cat <<'PLAN'
 Sylux uses one local Docker Compose project and serves HTTPS on 127.0.0.1:3000.
-The installer may install missing tools and Ubuntu's docker.io and docker-compose-v2
-packages (which start the Docker daemon). It uses an existing compatible Engine
-and Compose as installed. It reserves the sylux service UID/GID 10001, stores the
+It uses an existing compatible Engine and Compose as installed. It reserves the
+sylux service UID/GID 10001, stores the
 verified release and generated TLS material in /opt/sylux, and initializes the
 private /srv/sylux data directory. It loads the versioned image and starts Sylux.
 Browser trust is a separate step you control.
 PLAN
+  if (( ${#packages[@]} )); then
+    printf 'It will run apt-get update and install ca-certificates and: %s\n' "${packages[*]}"
+  else
+    printf 'No packages will be installed.\n'
+  fi
   if [[ "${1:-}" != --yes ]]; then
     [[ -t 0 ]] || fail 'Review the plan and pass --yes to approve unattended installation.'
     read -r -p 'Apply this plan? [y/N] ' answer
@@ -278,6 +295,7 @@ start_service() {
     running=$(docker_local inspect --format '{{.State.Running}}' "$container")
     if [[ "$running" == true ]] && status=$(local_https readyz) && [[ "$status" == 204 ]]; then
       printf 'Sylux is ready at %s\n' "$origin"
+      printf 'From another computer, run: ssh -L 3000:127.0.0.1:3000 <host>\n'
       printf 'Export the public CA with: sudo cat %s/tls/ca.crt > sylux-loopback.crt\n' "$install_dir"
       printf 'Trust that certificate on the browser device before opening Sylux.\n'
       status=$(setup_status) || fail 'Could not check setup state.'
@@ -342,18 +360,23 @@ main() {
     init_digest=$(sha256sum "$data_dir/installation.json")
     [[ "${init_digest%% *}" == "$phase" ]] || fail 'The data directory does not match the installation record.'
   fi
+  check_existing_docker
+  plan_packages
   confirm_plan "${2:-}"
-  install_packages
+  install_packages "${tools[@]}"
+  if ! present "$install_dir"; then
+    revision=$(prepare_install "$version")
+  else
+    revision=$(verify_bundle "$install_dir" "$version")
+  fi
+  if ! command -v docker >/dev/null; then
+    install_packages docker.io docker-compose-v2
+  fi
   check_docker
   container=$(project_containers)
   if [[ -n "$container" ]]; then
     [[ "$phase" != prepared && "$container" =~ ^[a-f0-9]{64}$ ]] ||
       fail 'Unexpected containers in the sylux project. Inspect them before retrying.'
-  fi
-  if ! present "$install_dir"; then
-    revision=$(prepare_install "$version")
-  else
-    revision=$(verify_bundle "$install_dir" "$version")
   fi
   if [[ "$phase" == prepared ]]; then
     system_identity

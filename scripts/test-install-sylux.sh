@@ -61,3 +61,32 @@ if message=$(check_host 2>&1); then
 fi
 [[ "$message" == *'Requires Ubuntu 24.04 x86_64.'* ]]
 printf 'Unsupported-host guard passed.\n'
+
+# No host mutation: exercise snap and socket discovery against private fixtures.
+mkdir -p "$fixture/snap/docker"
+mkdir "$fixture/snap/docker/current"
+if message=$(check_existing_docker "$fixture/snap" "$fixture/socket" 2>&1); then
+  fail 'Accepted snap Docker.'
+fi
+[[ "$message" == *'ambiguous Docker socket'* ]]
+rmdir "$fixture/snap/docker/current"
+docker() { :; }
+check_existing_docker "$fixture/snap" "$fixture/socket"
+printf 'Snap refusal and healthy Docker detection passed.\n'
+
+(
+  # Used indirectly by check_existing_docker.
+  # shellcheck disable=SC2329
+  command() { if [[ "$*" == '-v docker' ]]; then return 1; fi; builtin command "$@"; }
+  touch "$fixture/socket"
+  if message=$(check_existing_docker "$fixture/snap" "$fixture/socket" 2>&1); then
+    fail 'Accepted a socket without a Docker client.'
+  fi
+  [[ "$message" == *'ambiguous Docker socket'* ]]
+)
+(
+  apt-get() { [[ "$(umask)" == 0022 ]]; }
+  umask 077
+  install_packages fixture-package
+)
+printf 'Ambiguous socket and package umask guards passed.\n'

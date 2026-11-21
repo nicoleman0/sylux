@@ -8,7 +8,8 @@ import path from 'node:path';
 const require = createRequire(new URL('../web/package.json', import.meta.url));
 const { chromium, expect } = require('@playwright/test');
 const fixture = process.argv[2];
-const version = 'v0.1.0-beta.9';
+const version = process.env.SYLUX_QUALIFY_VERSION || 'v0.1.0-beta.9';
+const mode = process.env.SYLUX_QUALIFY_DOCKER || 'clean';
 const origin = 'https://127.0.0.1:3000';
 const handle = 'fixture-admin';
 const password = randomBytes(24).toString('hex');
@@ -16,7 +17,10 @@ const payload = randomBytes(1024);
 const filename = 'first-upload.bin';
 const phasePath = '/opt/sylux/phase';
 const authorizationPath = '/srv/sylux/secrets/setup.authorization';
-const installer = ['bash', 'scripts/install-sylux.sh', version, '--yes'];
+const installer = process.env.SYLUX_QUALIFY_WRAPPER
+  ? ['bash', process.env.SYLUX_QUALIFY_WRAPPER, process.env.SYLUX_QUALIFY_INSTALLER, process.env.SYLUX_QUALIFY_BUNDLE, version, '--yes']
+  : ['bash', 'scripts/install-sylux.sh', version, '--yes'];
+const dockerPackageNames = mode === 'existing' ? ['docker-ce', 'docker-ce-cli', 'docker-compose-plugin'] : ['docker.io', 'docker-compose-v2'];
 const compose = ['docker', '--host', 'unix:///var/run/docker.sock', 'compose', '--project-directory', '/opt/sylux'];
 
 function run(file, args, input) {
@@ -78,13 +82,19 @@ async function verifyDownload(page) {
 let stage = 'installing Docker, Compose and Sylux on a clean host';
 let browser;
 try {
+  const initialPackages = mode === 'existing' ? run('dpkg-query', ['-W', ...dockerPackageNames]) : null;
+  const initialInvocation = mode === 'existing' ? sudo('systemctl', 'show', '--property=InvocationID', '--value', 'docker.service') : null;
   const first = sudo(...installer);
+  if (initialPackages) {
+    assert.equal(run('dpkg-query', ['-W', ...dockerPackageNames]), initialPackages);
+    assert.equal(sudo('systemctl', 'show', '--property=InvocationID', '--value', 'docker.service'), initialInvocation);
+  }
   assert(first.includes(`Sylux is ready at ${origin}`));
   assert(first.includes('Choose First-time setup.'));
   const token = sudo('-u', 'sylux', 'cat', authorizationPath);
   assert(/^[a-f0-9]{64}$/.test(token), 'Invalid fixture authorization');
   assert(!first.includes(token), 'Authorization appeared in installer output');
-  const dockerPackages = run('dpkg-query', ['-W', 'docker.io', 'docker-compose-v2']);
+  const dockerPackages = run('dpkg-query', ['-W', ...dockerPackageNames]);
   const tlsDir = '/opt/sylux/tls';
   sudo('openssl', 'verify', '-CAfile', `${tlsDir}/ca.crt`, '-verify_ip', '127.0.0.1', `${tlsDir}/cert.pem`);
   writeFileSync(path.join(fixture, 'ca.crt'), sudo('cat', `${tlsDir}/ca.crt`), { mode: 0o600 });
@@ -132,7 +142,7 @@ try {
   assert(/^[a-f0-9]{32}$/.test(dockerInvocation.trim()));
   rerun('Choose First-time setup.', token);
   assert.equal(sudo('systemctl', 'show', '--property=InvocationID', '--value', 'docker.service'), dockerInvocation);
-  assert.equal(run('dpkg-query', ['-W', 'docker.io', 'docker-compose-v2']), dockerPackages);
+  assert.equal(run('dpkg-query', ['-W', ...dockerPackageNames]), dockerPackages);
   assert(sudo('-u', 'sylux', 'cat', authorizationPath) === token);
   assert.equal(container(), id);
   assert.equal(started(id), before);
@@ -181,6 +191,17 @@ try {
   });
   console.log('A fresh sign-in and byte-exact download passed after restart and unchanged same-version rerun.');
 
+  stage = 'refusing a different release';
+  const wrongTag = [...installer];
+  wrongTag[wrongTag.length - 2] = 'v999.0.0-beta.1';
+  const stableStart = started(id);
+  const stablePhase = sudo('cat', phasePath);
+  assert.throws(() => sudo(...wrongTag), error => error.status === 1 && error.stderr.includes('install record does not match'));
+  assert.equal(container(), id);
+  assert.equal(started(id), stableStart);
+  assert.equal(sudo('cat', phasePath), stablePhase);
+  await session(browser, async page => { await signIn(page); await verifyDownload(page); });
+
   stage = 'starting the existing stopped service';
   sudo(...compose, 'stop', 'sylux');
   rerun('Sign in with your existing administrator credentials.', token);
@@ -191,7 +212,8 @@ try {
     await verifyDownload(page);
   });
   console.log('Same-version rerun also started the existing stopped container and preserved the upload.');
-} catch {
+} catch (error) {
+  if (error instanceof assert.AssertionError && !error.generatedMessage) console.error(error.message);
   // Browser errors may include form data. Report the failing journey only.
   console.error(`Installer qualification failed while ${stage}.`);
   process.exitCode = 1;

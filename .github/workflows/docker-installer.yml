@@ -19,7 +19,11 @@ permissions:
 
 jobs:
   install:
-    name: Ubuntu 24.04 installer and first upload
+    name: Ubuntu 24.04 installer and first upload (${{ matrix.docker }})
+    strategy:
+      fail-fast: false
+      matrix:
+        docker: [clean, existing]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -49,4 +53,6 @@ jobs:
           fetch_bundle v0.1.0-beta.9 "$assets"
           scripts/test-install-sylux.sh "$assets"
       - name: Qualify the checked-out installer with the published beta.9 release
+        env:
+          SYLUX_QUALIFY_DOCKER: ${{ matrix.docker }}
         run: scripts/qualify-install-sylux.sh

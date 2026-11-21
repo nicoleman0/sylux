@@ -21,7 +21,30 @@ The installer displays the privileged changes and asks before proceeding. It pre
 
 Run the installer again with the same tag to resume an unsubmitted browser setup or start an installer-managed stopped service. To restart it yourself, use `sudo docker --host unix:///var/run/docker.sock compose --project-directory /opt/sylux restart sylux`. The backup and restore examples below assume the manual install. For the installer, use a root shell, run Compose from `/opt/sylux`, and retain that directory and the private TLS material alongside your recovery plan.
 
-If the installer reports uncertain initialization or unfamiliar state, retain both directories and inspect the reported conflict before retrying. For a release change, take a backup and use the [manual upgrade procedure](#5-upgrade-and-roll-back). Releases without `install-sylux.sh` use the manual steps below.
+If the installer reports uncertain initialization or unfamiliar state, retain both directories and inspect the reported conflict before retrying. For a release change, take a backup and use the [manual upgrade procedure](#5-upgrade-and-roll-back). That moves the installation out of installer management; do not rerun the installer after upgrading. Releases without `install-sylux.sh` use the manual steps below.
+
+### Recover an empty interrupted initialization
+
+The installer refuses an `initializing` record. If init may have written data, retain both directories and investigate; do not reset it. Only reset after stopping all installer and init activity, confirming `/srv/sylux` is empty and owned by UID/GID 10001 with mode 700, and confirming there are no Compose project containers, including stopped or one-off containers. In a root shell, run this guarded reset. It holds the installer lock and changes only the phase record; it removes no data, accounts, images, or containers.
+
+```bash
+(
+  flock -n 9 || exit 1
+  test "$(stat -c '%u:%g:%a' /opt/sylux)" = 0:0:700 || exit 1
+  test -d /opt/sylux && test -d /srv/sylux || exit 1
+  test ! -L /opt/sylux && test ! -L /srv/sylux || exit 1
+  test "$(stat -c '%u:%g:%a' /srv/sylux)" = 10001:10001:700 || exit 1
+  test "$(cat /opt/sylux/phase)" = initializing || exit 1
+  contents=$(find /srv/sylux -mindepth 1 -maxdepth 1 -print -quit) || exit 1
+  test -z "$contents" || exit 1
+  containers=$(docker --host unix:///var/run/docker.sock ps -aq --filter label=com.docker.compose.project=sylux) || exit 1
+  test -z "$containers" || exit 1
+  printf 'prepared\n' > /opt/sylux/phase.new
+  mv -T /opt/sylux/phase.new /opt/sylux/phase
+) 9</opt
+```
+
+If any check fails, leave the state intact. After a successful reset, rerun the original installer tag. Do not use this procedure to reset an initialized installation or recover credentials.
 
 ## 1. Get and verify a published release
 

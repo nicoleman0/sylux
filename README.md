@@ -34,7 +34,7 @@ Not included: OIDC, shared folders, public sharing links and WebDAV.
 
 ## Install
 
-On Ubuntu 24.04 x86_64 with local ext4 storage, pick a [published beta release](https://github.com/nicoleman0/sylux/releases) that includes `install-sylux.sh`. Download and review the script from that release, then run it with the same tag.
+On Ubuntu 24.04 x86_64 with local ext4 storage, pick a [published beta release](https://github.com/nicoleman0/sylux/releases) that includes `install-sylux.sh`. Download and review the script from that release, then run it with the same tag. For a release with the installer, download it from `https://github.com/nicoleman0/sylux/releases/download/<tag>/install-sylux.sh`. Beta.9 does not include it; use the manual procedure for that release.
 
 ```sh
 sudo bash ./install-sylux.sh '<published beta tag>'

@@ -102,8 +102,38 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
+  installer-qualify:
+    name: Candidate installer and first upload
     needs: qualify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: beta-release
+          path: .local/candidate
+      - name: Install browser prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libnss3-tools
+          npm --prefix web ci
+          npm --prefix web exec -- playwright install --with-deps chromium
+      - name: Exercise packaged installer and candidate bundle
+        env:
+          SYLUX_QUALIFY_VERSION: ${{ inputs.version }}
+          SYLUX_QUALIFY_DOCKER: existing
+          SYLUX_QUALIFY_INSTALLER: .local/candidate/install-sylux.sh
+          SYLUX_QUALIFY_BUNDLE: .local/candidate
+        run: scripts/qualify-install-sylux.sh
+
+  publish:
+    needs: [qualify, installer-qualify]
     if: inputs.publish && !github.event.repository.private && github.repository == 'nicoleman0/sylux' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
