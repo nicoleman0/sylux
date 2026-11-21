@@ -35,6 +35,41 @@ assert_no_install() {
 assert_no_install
 printf 'Runner image: %s\n' "${ImageVersion:?}"
 
+# Hosted images make /opt writable by everyone; the installer requires a safe parent.
+[[ -d /opt && ! -L /opt ]] || fail 'Expected a real fixture directory at /opt.'
+opt_state=$(stat -c '%u:%g:%a' /opt)
+printf 'Fixture /opt ownership and mode: %s\n' "$opt_state"
+if [[ "$opt_state" == 0:0:777 ]]; then
+  sudo chmod 0755 /opt
+  echo 'Normalized disposable runner /opt to 0755.'
+fi
+check_system_dir /opt
+check_system_dir /srv
+for identity in 'passwd sylux' 'passwd 10001' 'group sylux' 'group 10001'; do
+  read -r database key <<< "$identity"
+  if getent "$database" "$key" >/dev/null; then
+    fail "Fixture identity collision: $database $key."
+  fi
+done
+for utility in python3 ss flock stat findmnt getent; do
+  command -v "$utility" >/dev/null || fail "Fixture utility missing: $utility."
+done
+
+expect_refusal() {
+  local output=$1 expected=$2 label=$3 known
+  [[ "$output" == *"$expected"* ]] && return 0
+  for known in 'must be root-owned and writable only by root' 'Expected a real system directory' \
+    'Requires local ext4 storage' 'service name, UID or GID is already in use' \
+    'Another installer is running' 'Could not check port 3000' \
+    'Port 3000 is already in use' 'Existing /srv/sylux has no installer record' \
+    'Unexpected /srv/sylux ownership or permissions' 'Data directory is not empty'; do
+    if [[ "$output" == *"$known"* ]]; then
+      fail "$label: unexpected installer refusal category: $known."
+    fi
+  done
+  fail "$label: unexpected installer output (withheld)."
+}
+
 # The candidate script is sourced unchanged; only its network transport is replaced.
 if [[ -n "$bundle" ]]; then
   bundle=$(cd "$bundle" && pwd)
@@ -66,7 +101,7 @@ for _ in {1..50}; do
   [[ ! -f "$fixture/listening" ]] || break
   sleep 0.1
 done
-[[ -f "$fixture/listening" ]]
+[[ -f "$fixture/listening" ]] || fail 'Port listener did not become ready.'
 install_command=(bash "$installer" "$version" --yes)
 if [[ -n "$bundle" ]]; then
   install_command=(bash "$fixture/candidate.sh" "$installer" "$bundle" "$version" --yes)
@@ -74,8 +109,8 @@ fi
 if conflict=$(sudo "${install_command[@]}" 2>&1); then
   fail 'The port conflict was accepted.'
 fi
-[[ "$conflict" == *'Port 3000 is already in use.'* ]]
-kill -0 "$listener"
+expect_refusal "$conflict" 'Port 3000 is already in use.' 'Port conflict fixture'
+kill -0 "$listener" || fail 'Port listener exited before the refusal was checked.'
 assert_no_install
 kill "$listener"
 wait "$listener" || true
@@ -87,9 +122,9 @@ sudo mkdir -m 0700 /srv/sylux
 printf 'unknown data\n' | sudo tee /srv/sylux/marker >/dev/null
 before=$(sudo sha256sum /srv/sylux/marker)
 if unknown=$(sudo "${install_command[@]}" 2>&1); then fail 'Unknown data was accepted.'; fi
-[[ "$unknown" == *'Existing /srv/sylux has no installer record.'* ]]
-[[ "$(sudo sha256sum /srv/sylux/marker)" == "$before" ]]
-sudo test ! -e /opt/sylux
+expect_refusal "$unknown" 'Existing /srv/sylux has no installer record.' 'Unknown data fixture'
+[[ "$(sudo sha256sum /srv/sylux/marker)" == "$before" ]] || fail 'Unknown data marker changed.'
+sudo test ! -e /opt/sylux || fail 'Unknown data fixture created an install record.'
 sudo rm -rf -- /srv/sylux
 
 # Exercise the documented reset on known disposable state before Docker removal.
@@ -105,22 +140,22 @@ sudo chown 10001:10001 /srv/sylux
 printf 'initializing\n' | sudo tee /opt/sylux/phase >/dev/null
 printf 'fixture\n' | sudo tee /srv/sylux/marker >/dev/null
 if sudo bash "$fixture/reset.sh"; then fail 'Reset accepted nonempty data.'; fi
-[[ "$(sudo cat /opt/sylux/phase)" == initializing ]]
-sudo test -f /srv/sylux/marker
+[[ "$(sudo cat /opt/sylux/phase)" == initializing ]] || fail 'Reset changed the initializing phase with data present.'
+sudo test -f /srv/sylux/marker || fail 'Reset removed the data marker.'
 sudo rm /srv/sylux/marker
 sudo docker pull alpine:3.20 >/dev/null
 reset_container=$(sudo docker create --label com.docker.compose.project=sylux alpine:3.20 true)
 if sudo bash "$fixture/reset.sh"; then fail 'Reset accepted an existing project container.'; fi
-[[ "$(sudo cat /opt/sylux/phase)" == initializing ]]
+[[ "$(sudo cat /opt/sylux/phase)" == initializing ]] || fail 'Reset changed the initializing phase with a container present.'
 sudo docker rm "$reset_container" >/dev/null
 sudo bash "$fixture/reset.sh"
-[[ "$(sudo cat /opt/sylux/phase)" == prepared ]]
+[[ "$(sudo cat /opt/sylux/phase)" == prepared ]] || fail 'Reset did not produce the prepared phase.'
 printf '%s\n' "$version" | sudo tee /opt/sylux/version >/dev/null
 printf 'fixture\n' | sudo tee /srv/sylux/marker >/dev/null
 if prepared=$(sudo "${install_command[@]}" 2>&1); then fail 'Prepared state accepted nonempty data.'; fi
-[[ "$prepared" == *'Data directory is not empty.'* ]]
-[[ "$(sudo cat /opt/sylux/phase)" == prepared ]]
-sudo test -f /srv/sylux/marker
+expect_refusal "$prepared" 'Data directory is not empty.' 'Prepared data fixture'
+[[ "$(sudo cat /opt/sylux/phase)" == prepared ]] || fail 'Prepared data refusal changed the phase.'
+sudo test -f /srv/sylux/marker || fail 'Prepared data refusal removed the marker.'
 sudo rm /srv/sylux/marker /opt/sylux/version
 sudo rm /opt/sylux/phase
 sudo rmdir /opt/sylux /srv/sylux
