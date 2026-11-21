@@ -4,6 +4,48 @@ This is a beta procedure for **one** Sylux instance on Ubuntu 24.04 x86_64, with
 
 The tested path used a disposable Ubuntu 24.04 x86_64 runner, an ext4 bind mount, TLS on host loopback, restart and replacement, and a stopped-service archive restore. Physical storage durability, a separate physical client, upgrades, interruption recovery, and this Compose file have not been qualified. Native LXC is a separate installation path.
 
+## Docker quick start
+
+Use an Ubuntu 24.04 x86_64 host running systemd, with `/srv` on local ext4 and TCP port 3000 free. The installer uses Ubuntu's Docker and Compose packages when Docker is absent. An existing installation needs a working local Docker Engine and the Compose v2 plugin. Download and review `install-sylux.sh` from a [published beta release](https://github.com/nicoleman0/sylux/releases) that includes it, then use that same version tag:
+
+```sh
+sudo bash ./install-sylux.sh '<published beta tag>'
+```
+
+The installer displays the privileged changes and asks before proceeding. It prepares UID/GID 10001, the verified release and TLS files under `/opt/sylux`, and the private data directory `/srv/sylux`. Use `--yes` only after reviewing the plan if you need unattended installation. Checksums detect mismatched downloads. The release and checksum share the same publisher.
+
+1. When the installer reports ready, export the public CA with `sudo cat /opt/sylux/tls/ca.crt > sylux-loopback.crt`. Import it into the browser device's trusted certificate store. The private TLS key stays on the host. Before the one-year expiry, [prepare a replacement loopback certificate](#2-prepare-the-host), keep the matching public trust certificate in `/opt/sylux/tls/ca.crt`, and update client trust.
+2. Open `https://127.0.0.1:3000`. From another computer, use the [SSH local forward](#3-initialize-and-create-the-administrator) first. Choose **First-time setup**.
+3. In a private terminal with recording disabled, run `sudo -u sylux cat /srv/sylux/secrets/setup.authorization`. Paste the one-use authorization into the browser setup form and create an administrator. Keep the authorization out of shell arguments, screenshots and logs.
+4. Sign in, choose **Choose files** to upload a disposable file, then download it and check the contents.
+
+Run the installer again with the same tag to resume an unsubmitted browser setup or start an installer-managed stopped service. To restart it yourself, use `sudo docker --host unix:///var/run/docker.sock compose --project-directory /opt/sylux restart sylux`. The backup and restore examples below assume the manual install. For the installer, use a root shell, run Compose from `/opt/sylux`, and retain that directory and the private TLS material alongside your recovery plan.
+
+If the installer reports uncertain initialization or unfamiliar state, retain both directories and inspect the reported conflict before retrying. For a release change, take a backup and use the [manual upgrade procedure](#5-upgrade-and-roll-back). That moves the installation out of installer management; do not rerun the installer after upgrading. Releases without `install-sylux.sh` use the manual steps below.
+
+### Recover an empty interrupted initialization
+
+The installer refuses an `initializing` record. If init may have written data, retain both directories and investigate; do not reset it. Only reset after stopping all installer and init activity, confirming `/srv/sylux` is empty and owned by UID/GID 10001 with mode 700, and confirming there are no Compose project containers, including stopped or one-off containers. In a root shell, run this guarded reset. It holds the installer lock and changes only the phase record; it removes no data, accounts, images, or containers.
+
+```bash
+(
+  flock -n 9 || exit 1
+  test "$(stat -c '%u:%g:%a' /opt/sylux)" = 0:0:700 || exit 1
+  test -d /opt/sylux && test -d /srv/sylux || exit 1
+  test ! -L /opt/sylux && test ! -L /srv/sylux || exit 1
+  test "$(stat -c '%u:%g:%a' /srv/sylux)" = 10001:10001:700 || exit 1
+  test "$(cat /opt/sylux/phase)" = initializing || exit 1
+  contents=$(find /srv/sylux -mindepth 1 -maxdepth 1 -print -quit) || exit 1
+  test -z "$contents" || exit 1
+  containers=$(docker --host unix:///var/run/docker.sock ps -aq --filter label=com.docker.compose.project=sylux) || exit 1
+  test -z "$containers" || exit 1
+  printf 'prepared\n' > /opt/sylux/phase.new
+  mv -T /opt/sylux/phase.new /opt/sylux/phase
+) 9</opt
+```
+
+If any check fails, leave the state intact. After a successful reset, rerun the original installer tag. Do not use this procedure to reset an initialized installation or recover credentials.
+
 ## 1. Get and verify a published release
 
 Install Docker Engine with its Compose plugin, `curl`, `sha256sum`, and `openssl` on the Linux host. Pick a **published** release tag from [Sylux releases](https://github.com/nicoleman0/sylux/releases). Set `RELEASE` to that exact tag, then download all of its Docker assets into a new private directory:
@@ -16,6 +58,9 @@ BASE="https://github.com/nicoleman0/sylux/releases/download/${RELEASE}"
 for asset in sylux-image.tar.gz SHA256SUMS image-id.txt compose.yaml env.example docker-beta.md release.json; do
   curl --fail --location --show-error --output "$asset" "$BASE/$asset" || exit 1
 done
+if grep -q '  install-sylux\.sh$' SHA256SUMS; then
+  curl --fail --location --show-error --output install-sylux.sh "$BASE/install-sylux.sh" || exit 1
+fi
 sha256sum -c SHA256SUMS || exit 1
 ```
 

@@ -1,3 +1,4 @@
+import { chooseFolderSort } from './fixtures/folder-sort';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
@@ -30,7 +31,7 @@ async function backend(page: Page, fault?: { name: string; outcome: 'failed' | '
     const url = new URL(request.url());
     const path = url.pathname;
     const json = (body: unknown, status = 200) => route.fulfill({ json: body, status });
-    if (path === '/accounts') return json({ items: [] });
+    if (path === '/accounts') return json([]);
     if (path === '/trash') return json({ items: [], next_cursor: null, has_more: false });
     if (path === '/entries/search') return json({ items: [], next_cursor: null, has_more: false });
     if (path === '/auth/logout') return route.fulfill({ status: 204 });
@@ -544,7 +545,7 @@ for (const boundary of ['refresh', 'folder', 'back', 'forward', 'account', 'tras
     else if (boundary === 'account' || boundary === 'trash') await page.getByRole('button', { name: boundary === 'account' ? 'Account' : 'Trash', exact: true }).click();
     else if (boundary === 'search') await page.getByRole('searchbox').fill('missing');
     else if (boundary === 'clear-search') await page.getByRole('button', { name: 'Clear search', exact: true }).click();
-    else if (boundary === 'sort') await page.getByRole('combobox', { name: 'Sort files by' }).selectOption('name_desc');
+    else if (boundary === 'sort') await chooseFolderSort(page, 'Name', 'descending');
     else if (boundary === 'reload') await page.reload();
     await expect(report).toHaveCount(0);
     if (boundary === 'page') {

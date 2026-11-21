@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route, type TestInfo } from '@playwright/test';
+import { folderSortHeader } from './fixtures/folder-sort';
 
 const root = { id: 'root', name: 'Files', kind: 'folder', parent_id: null, etag: '"root:1"' };
 const projects = { id: 'projects', name: 'Projects', kind: 'folder', parent_id: 'root', etag: '"projects:1"' };
@@ -244,13 +245,26 @@ test('toolbar Refresh recovers a failed folder route and restores listing contro
   await expect(page.getByText('owner-notes.txt', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Open Projects', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Could not load this folder. Check your connection and try again.');
-  await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
+  const refresh = page.getByRole('button', { name: 'Refresh folder', exact: true });
+  const sort = folderSortHeader(page, 'Name');
+  const retry = await hold(page, '**/folders/projects/children**');
+  await expect(sort).toHaveCount(0);
+  await expect(page.locator('.files-content .list-summary')).toHaveCount(0);
+  await refresh.click();
+  const request = await retry();
+  await expect(page.getByText('Opening files…', { exact: true })).toBeVisible();
+  await expect(refresh).toBeDisabled();
+  await expect(sort).toHaveCount(0);
+  await expect(page.locator('.files-content .list-summary')).toHaveCount(0);
+  await request.fulfill({ json: list([entry('project', 'project.txt', 'projects')]) });
   await expect(page.getByText('project.txt', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(page.getByLabel('Search files and folders')).toBeEnabled();
   await expect(page.getByRole('button', { name: 'New folder', exact: true })).toBeEnabled();
   await expect(page.locator('#choose-file')).toBeEnabled();
-  await expect(page.locator('#folder-sort')).toBeEnabled();
+  await expect(sort.getByRole('button')).toBeEnabled();
+  await expect(sort).toHaveAttribute('aria-sort', 'ascending');
+  await expect(page.locator('.files-content .list-summary')).toHaveText('1 item');
   await page.goBack();
   await expect(page.getByText('owner-notes.txt', { exact: true })).toBeVisible();
 });
@@ -272,7 +286,7 @@ test('failed toolbar Refresh keeps route feedback actionable for Try again', asy
   await expect(page.getByLabel('Search files and folders')).toBeDisabled();
   await expect(page.getByRole('button', { name: 'New folder', exact: true })).toBeDisabled();
   await expect(page.locator('#choose-file')).toBeDisabled();
-  await expect(page.locator('#folder-sort')).toBeDisabled();
+  await expect(folderSortHeader(page, 'Name')).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Try again', exact: true }).click();
   await expect(page.getByText('project.txt', { exact: true })).toBeVisible();
@@ -280,7 +294,7 @@ test('failed toolbar Refresh keeps route feedback actionable for Try again', asy
   await expect(page.getByLabel('Search files and folders')).toBeEnabled();
   await expect(page.getByRole('button', { name: 'New folder', exact: true })).toBeEnabled();
   await expect(page.locator('#choose-file')).toBeEnabled();
-  await expect(page.locator('#folder-sort')).toBeEnabled();
+  await expect(folderSortHeader(page, 'Name').getByRole('button')).toBeEnabled();
   await page.goBack();
   await expect(page.getByText('owner-notes.txt', { exact: true })).toBeVisible();
 });

@@ -1,3 +1,4 @@
+import { chooseFolderSort, folderSortHeader } from './fixtures/folder-sort';
 import { Buffer } from 'node:buffer';
 import { mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -277,7 +278,7 @@ test('clearing search after a rename restores the previous browsing page with fr
     return route.fulfill({ json: later() });
   });
   await page.route('**/entries/search**', (route) => route.fulfill({ json: { items: name.toLowerCase().includes('later') ? [{ entry: later(), location: [{ id: 'root-1', parent_id: null, name: '', kind: 'folder', etag: 'root-1:1' }] }] : [], next_cursor: null, has_more: false } }));
-  await page.getByLabel('Sort files by', { exact: true }).selectOption('size_desc');
+  await chooseFolderSort(page, 'Size', 'descending');
   await page.getByRole('button', { name: 'Next page' }).click();
   await expect(page.getByRole('button', { name: 'Preview Later.txt' })).toBeVisible();
   await page.getByLabel('Search files and folders').fill('Later');
@@ -296,7 +297,7 @@ test('clearing search after a rename restores the previous browsing page with fr
   await expect(page.getByRole('button', { name: 'Preview First.txt' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Previous page' })).toHaveCount(0);
   await expect(page.getByRole('status').filter({ hasText: 'This folder changed. The listing has been restarted.' })).toBeVisible();
-  await expect(page.getByLabel('Sort files by', { exact: true })).toHaveValue('size_desc');
+  await expect(folderSortHeader(page, 'Size')).toHaveAttribute('aria-sort', 'descending');
   expect(browseRequests.slice(-2).map(url => ({ sort: url.searchParams.get('sort'), cursor: url.searchParams.get('cursor') }))).toEqual([
     { sort: 'size_desc', cursor: 'page-2:1' },
     { sort: 'size_desc', cursor: null },

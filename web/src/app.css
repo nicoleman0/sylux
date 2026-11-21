@@ -123,12 +123,10 @@ h1:focus, h2:focus { outline: none; }
 .breadcrumb { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; color: var(--muted-foreground); font-size: var(--type-ui); margin-bottom: 12px; }
 .breadcrumb [data-slot="button"] { min-height: var(--control-height); }
 .upload-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-.folder-sort { display: flex; align-items: center; gap: 8px; max-width: 100%; font-size: var(--type-ui); }
-.folder-sort label { white-space: nowrap; }
-.folder-sort select, .narrow-sort select { min-width: 0; min-height: var(--control-height); max-width: 100%; border: 1px solid var(--input); border-radius: var(--radius-lg); background: var(--background); color: var(--foreground); padding: 0 10px; font: inherit; }
-.folder-sort select:focus-visible, .narrow-sort select:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.folder-sort select:disabled, .narrow-sort select:disabled { opacity: .5; }
-@media (pointer: coarse) { .folder-sort select, .narrow-sort select { min-height: var(--control-height-touch); } }
+.narrow-sort select { min-width: 0; min-height: var(--control-height); max-width: 100%; border: 1px solid var(--input); border-radius: var(--radius-lg); background: var(--background); color: var(--foreground); padding: 0 10px; font: inherit; }
+.narrow-sort select:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.narrow-sort select:disabled { opacity: .5; }
+@media (pointer: coarse) { .narrow-sort select { min-height: var(--control-height-touch); } }
 .search-toolbar { display: grid; gap: 7px; max-width: 520px; margin-bottom: 12px; }
 .search-controls { display: flex; gap: 9px; align-items: center; }
 .search-controls input { min-width: 0; flex: 1; }
@@ -156,6 +154,7 @@ h1:focus, h2:focus { outline: none; }
 .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-name:hover .filename { color: var(--primary); }
 .file-row:is(:hover, :focus-within) .filename { white-space: normal; overflow-wrap: anywhere; padding-block: 8px; }
+.folder-sort-head > :nth-child(4) { text-align: right; }
 .file-size { color: var(--muted-foreground); text-align: right; font-size: var(--type-ui); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .list-summary { margin: 17px 0 0 12px; font-size: var(--type-meta); color: var(--muted-foreground); }
 .file-row :is(.file-size, .file-modified, .mobile-file-size), .trash-row :is(.file-size, .file-modified, .trash-metadata), .account-row .account-role, .sidebar-account-role, .search-location { font-family: var(--font-data); }
@@ -250,6 +249,8 @@ h1:focus, h2:focus { outline: none; }
 @media (max-width: 620px) {
   .file-row.selectable-row, .list-head.selectable-head { grid-template-columns: 44px minmax(0, 1fr) 44px; gap: 8px; }
   .file-row.modified-row, .list-head.modified-head { grid-template-columns: 44px minmax(0, 1fr) 44px; }
+  .list-head.folder-sort-head { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .folder-sort-head > :first-child, .folder-sort-head > :last-child { @apply sr-only; }
   .modified-row > .file-modified { @apply sr-only; }
   .modified-head > .file-modified { @apply sr-only; }
   .modified-head > .file-modified .sort-heading { display: none; }

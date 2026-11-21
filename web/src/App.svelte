@@ -632,6 +632,10 @@
   let listingError = $state('');
   let listingRequest = $state(0);
   let folderSort = $state<FolderSort>('name_asc');
+  let folderSortAttempt = $state<{ request: number; sort: FolderSort; failed: boolean } | null>(null);
+  const currentSortAttempt = $derived(folderSortAttempt?.request === listingRequest ? folderSortAttempt : null);
+  const pendingFolderSort = $derived(currentSortAttempt?.failed ? undefined : currentSortAttempt?.sort);
+  const folderSortBlocked = $derived(loading || bulkBusy || bulkNeedsRefresh || restorationPending || restorationFailed);
   let searchSort = $state<ResultSort>('name_asc');
   let trashSort = $state<ResultSort>('name_asc');
   let accountSort = $state<AccountSort>('name_asc');
@@ -1048,6 +1052,7 @@
     if (restorationFailed) return false;
     if (searchQuery) { browseDirty = true; return runSearch(); }
     const generation = sessionGeneration;
+    const sort = pendingFolderSort ?? folderSort;
     let folderId = currentFolder.id;
     const requestId = ++listingRequest;
     clearSelection();
@@ -1058,8 +1063,9 @@
         if (!await refreshRoot(() => requestId === listingRequest) || requestId !== listingRequest) return false;
         currentFolder = folders[0]; folderPath = [currentFolder]; folderId = currentFolder.id;
       }
-      const page = await listing.children(folderId, null, folderSort);
+      const page = await listing.children(folderId, null, sort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return false;
+      folderSort = sort;
       entriesFolderId = currentFolder.id; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       moveNeedsRefresh = false;
@@ -1070,19 +1076,45 @@
     finally { if (generation === sessionGeneration && requestId === listingRequest) loading = false; }
   }
 
-  async function changeFolderSort(event: Event): Promise<void> {
-    await setFolderSort((event.currentTarget as HTMLSelectElement).value as FolderSort);
-  }
+  async function sortFolderBy(column: 'name' | 'modified' | 'size'): Promise<void> {
+    if (folderSortBlocked || searchQuery || accountView || settingsView || showTrash) return;
 
-  async function setFolderSort(sort: FolderSort): Promise<void> {
-    if (restorationPending) return;
-
+    const sort = nextSort(pendingFolderSort ?? folderSort, column);
+    if (pendingFolderSort && sort === folderSort) {
+      listingRequest++;
+      folderSortAttempt = null;
+      return;
+    }
+    const generation = sessionGeneration;
+    const navigation = navigationRequest;
+    const folderId = currentFolder.id;
+    const request = ++listingRequest;
+    const isCurrent = () => request === listingRequest && generation === sessionGeneration &&
+      navigation === navigationRequest && folderId === currentFolder.id;
+    folderSortAttempt = { request, sort, failed: false };
     clearCompletedFeedback();
-    navigationRequest++; historyReady = true;
-    folderSort = sort;
-    clearSelection();
-    pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false;
-    await refresh();
+    pendingMove = null;
+
+    try {
+      const page = await listing.children(folderId, null, sort);
+      if (!isCurrent()) return;
+      if (!Array.isArray(page?.items)) throw new Error('Invalid sorted folder listing');
+      const focusedRow = document.activeElement?.closest('.file-row');
+      clearSelection();
+      folderSort = sort;
+      entriesFolderId = folderId; entries = page.items;
+      for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
+      pageCursors = [null]; pageIndex = 0; nextCursor = page.next_cursor; hasMore = page.has_more;
+      folderSortAttempt = null;
+      if (focusedRow) {
+        await tick();
+        if (isCurrent() && !focusedRow.isConnected && document.activeElement === document.body) {
+          document.querySelector<HTMLElement>(`.folder-sort-head [aria-label="${column[0].toUpperCase() + column.slice(1)}"] button`)?.focus({ preventScroll: true });
+        }
+      }
+    } catch {
+      if (isCurrent()) folderSortAttempt = { request, sort, failed: true };
+    }
   }
 
   function clearSearch(restoreBrowse = false, preserveComposition = false): void {
@@ -1268,7 +1300,7 @@
   }
 
   async function loadMore(): Promise<void> {
-    if (!hasMore || !nextCursor || loading || bulkBusy) return;
+    if (!hasMore || !nextCursor || loading || pendingFolderSort || bulkBusy) return;
     clearCompletedFeedback();
 
     clearSelection();
@@ -1307,7 +1339,7 @@
   }
 
   async function loadPrevious(): Promise<void> {
-    if (pageIndex === 0 || loading || bulkBusy) return;
+    if (pageIndex === 0 || loading || pendingFolderSort || bulkBusy) return;
     clearCompletedFeedback();
 
     clearSelection();
@@ -3158,23 +3190,22 @@
                 {/if}
               </div>
               <RefreshButton size="default" label="Refresh" busyLabel="Refreshing…" busy={loading || searchLoading} disabled={restorationPending || bulkBusy || bulkNeedsRefresh} onclick={() => { if (restorationPending || loading || searchLoading || bulkBusy || bulkNeedsRefresh) return; void refreshWorkspace(); }} aria-label="Refresh folder" />
-              <div class="folder-sort">
-                <label for="folder-sort">Sort files by</label>
-                <select id="folder-sort" value={folderSort} disabled={bulkBusy || bulkNeedsRefresh || restorationPending || restorationFailed} onchange={changeFolderSort}>
-                  <option value="name_asc">Name: A to Z</option>
-                  <option value="name_desc">Name: Z to A</option>
-                  <option value="size_asc">Size: smallest first</option>
-                  <option value="size_desc">Size: largest first</option>
-                  <option value="modified_desc">Modified: newest first</option>
-                  <option value="modified_asc">Modified: oldest first</option>
-                </select>
-              </div>
-
             </section>
             {#if !folderChooserSupported}<p id="folder-upload-help" class="text-xs text-muted-foreground mb-3">Folder selection is unavailable in this browser. Choose files or drop a folder instead.</p>{/if}
             {@render selectionToolbar()}
+            {#if currentSortAttempt?.failed}<p class="mb-2 text-sm text-destructive" role="alert">Could not sort files. Choose a column to try again.</p>{/if}
             <section class="file-drop-region" role="table" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
-            {#if entries.length && !listingError}<div role="rowgroup" class="file-list"><div role="row" class="list-head selectable-head modified-head"><span role="columnheader"><span class="sr-only">Selection</span></span><SortHeader label="Name" column="name" sort={folderSort} busy={loading && folderSort.startsWith('name_')} disabled={bulkBusy || bulkNeedsRefresh || restorationPending || restorationFailed} onclick={() => setFolderSort(nextSort(folderSort, 'name'))} /><SortHeader label="Modified" column="modified" sort={folderSort} busy={loading && folderSort.startsWith('modified_')} class="file-modified" disabled={bulkBusy || bulkNeedsRefresh || restorationPending || restorationFailed} onclick={() => setFolderSort(nextSort(folderSort, 'modified'))} /><SortHeader label="Size" column="size" sort={folderSort} busy={loading && folderSort.startsWith('size_')} class="file-size" disabled={bulkBusy || bulkNeedsRefresh || restorationPending || restorationFailed} onclick={() => setFolderSort(nextSort(folderSort, 'size'))} /><span role="columnheader"><span class="sr-only">Options</span></span></div></div>{/if}
+            {#if !listingError && entriesFolderId && entriesFolderId === currentFolder.id && (entries.length || !loading)}
+              <div role="rowgroup" class="file-list">
+                <div role="row" class="list-head selectable-head modified-head folder-sort-head">
+                  <span role="columnheader"><span class="sr-only">Selection</span></span>
+                  <SortHeader label="Name" column="name" sort={folderSort} pendingSort={pendingFolderSort} disabled={folderSortBlocked} onclick={() => sortFolderBy('name')} />
+                  <SortHeader label="Modified" column="modified" sort={folderSort} pendingSort={pendingFolderSort} disabled={folderSortBlocked} onclick={() => sortFolderBy('modified')} />
+                  <SortHeader label="Size" column="size" sort={folderSort} pendingSort={pendingFolderSort} disabled={folderSortBlocked} onclick={() => sortFolderBy('size')} />
+                  <span role="columnheader"><span class="sr-only">Options</span></span>
+                </div>
+              </div>
+            {/if}
             {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}{#if restorationUnavailable}<Button variant="outline" class="mt-2" onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files'); }}>Open Files</Button>{:else}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy || (restorationPending && !restorationFailed)} class="mt-2" onclick={retryFolder} />{/if}{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
             {:else if restorationPending && (!presentedRoute || searchDuringRoute)}{@render routePlaceholder()}
             {:else if loading && !restorationPending && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
@@ -3189,7 +3220,7 @@
             </section>
             {#if dropPending}<p role="status">Moving {dropPending.entry.name} to {dropPending.destination.name}…</p>{/if}
             {#if dropError}<p role="alert">{dropError}</p>{/if}
-            {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading || bulkBusy}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading || bulkBusy}>Next page</Button>{/if}</div>{/if}
+            {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading || bulkBusy} class="aria-disabled:opacity-50" aria-disabled={!!pendingFolderSort || undefined}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading || bulkBusy} class="aria-disabled:opacity-50" aria-disabled={!!pendingFolderSort || undefined}>Next page</Button>{/if}</div>{/if}
             {#if (presentedRoute || !restorationPending) && !searchDuringRoute && !listingError}
               <p class="list-summary" role={loading && workspaceRefreshing && entries.length ? 'status' : undefined}>{loading && !restorationPending ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
             {/if}
