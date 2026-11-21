@@ -3,8 +3,7 @@
 This reference preserves candidate behavior, open decisions and unverified
 scenarios from the [reviewed SYL-117 draft](https://github.com/nicoleman0/sylux/blob/4c3f9e1dc719c09f05bcb6f0a79f98fa529616dd/docs/specs/libraries-and-sharing.md).
 The candidates here await their own design and approval. When an issue is
-picked up, resolve its policy decisions with Nick in Linear before recording
-an OpenSpec delta. These cases are outside the active
+picked up, resolve its policy decisions with Nick in Linear. These cases are outside the active
 [SYL-110 private libraries scope](https://linear.app/corvus-dev/issue/SYL-110/create-named-libraries-and-browse-existing-files-from-my-libraries).
 
 ## Direct account grants
