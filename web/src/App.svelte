@@ -940,6 +940,10 @@
   let workspaceRefreshRequest = 0;
   async function refreshWorkspace(): Promise<void> {
     if (restorationPending) return;
+    if (restorationFailed && !showTrash) {
+      await retryFolder();
+      return;
+    }
     if (showTrash) {
       if (trashLoading || trashBusy) return;
       clearCompletedFeedback();
@@ -1041,6 +1045,7 @@
 
   async function refresh(): Promise<boolean> {
     if (!user) return false;
+    if (restorationFailed) return false;
     if (searchQuery) { browseDirty = true; return runSearch(); }
     const generation = sessionGeneration;
     let folderId = currentFolder.id;

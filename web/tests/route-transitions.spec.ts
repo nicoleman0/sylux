@@ -210,3 +210,55 @@ test('Back closes idle sharing and defers navigation while an uncertain link can
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Account', exact: true })).toBeFocused();
 });
+
+test('toolbar Refresh recovers a failed folder route and restores listing controls', async ({ page }) => {
+  await fixture(page);
+  let failures = 1;
+  await page.route('**/folders/projects/children**', route => {
+    if (failures-- > 0) return route.fulfill({ status: 503, json: { code: 'unavailable' } });
+    return route.fulfill({ json: list([entry('project', 'project.txt', 'projects')]) });
+  });
+  await page.goto('/'); await login(page);
+  await expect(page.getByText('owner-notes.txt', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Open Projects', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Could not load this folder. Check your connection and try again.');
+  await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
+  await expect(page.getByText('project.txt', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByLabel('Search files and folders')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'New folder', exact: true })).toBeEnabled();
+  await expect(page.locator('#choose-file')).toBeEnabled();
+  await expect(page.locator('#folder-sort')).toBeEnabled();
+  await page.goBack();
+  await expect(page.getByText('owner-notes.txt', { exact: true })).toBeVisible();
+});
+
+test('failed toolbar Refresh keeps route feedback actionable for Try again', async ({ page }) => {
+  await fixture(page);
+  let failures = 2;
+  await page.route('**/folders/projects/children**', route => {
+    if (failures-- > 0) return route.fulfill({ status: 503, json: { code: 'unavailable' } });
+    return route.fulfill({ json: list([entry('project', 'project.txt', 'projects')]) });
+  });
+  await page.goto('/'); await login(page);
+  await expect(page.getByText('owner-notes.txt', { exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Open Projects', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Could not load this folder. Check your connection and try again.');
+  await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Could not load this folder. Check your connection and try again.');
+  await expect(page.getByLabel('Search files and folders')).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'New folder', exact: true })).toBeDisabled();
+  await expect(page.locator('#choose-file')).toBeDisabled();
+  await expect(page.locator('#folder-sort')).toBeDisabled();
+
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect(page.getByText('project.txt', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByLabel('Search files and folders')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'New folder', exact: true })).toBeEnabled();
+  await expect(page.locator('#choose-file')).toBeEnabled();
+  await expect(page.locator('#folder-sort')).toBeEnabled();
+  await page.goBack();
+  await expect(page.getByText('owner-notes.txt', { exact: true })).toBeVisible();
+});
