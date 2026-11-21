@@ -87,7 +87,10 @@ async function fixture(page: Page, faults: Faults = {}) {
   return {
     original, login, offsets, faults, bytes: () => bytes, admissions: () => admissions, posts: () => posts, effects: () => effects,
     journal: () => page.evaluate(() => JSON.parse(sessionStorage.getItem('sylux-upload-v1:owner') ?? 'null')),
-    choose: () => page.getByLabel('Choose files to upload').setInputFiles({ name: 'video.bin', mimeType: 'application/octet-stream', buffer: original }),
+    choose: async () => {
+      await expect(button(page, 'Choose files')).toBeEnabled();
+      await page.getByLabel('Choose files to upload').setInputFiles({ name: 'video.bin', mimeType: 'application/octet-stream', buffer: original });
+    },
     release: async () => { for (const route of held.splice(0)) await route.abort('connectionreset').catch(() => undefined); },
   };
 }
@@ -276,15 +279,17 @@ test('a lost reply after a real save resolves on reload without another save', a
 });
 
 test('an expired upload cannot resume and is not read again', async ({ page }) => {
-  test.setTimeout(30_000);
-  const server = await fixture(page, { pauseFrom: 4, expiresAt: Math.floor(Date.now() / 1000) + 6 });
+  const now = Date.now();
+  const expiresAt = Math.floor(now / 1000) + 6;
+  await page.clock.setFixedTime(now);
+  const server = await fixture(page, { pauseFrom: 4, expiresAt });
   await server.choose();
   await expect.poll(() => server.bytes().length).toBe(4);
   await page.reload(); await server.login();
   await button(page, 'Check upload status').click();
   await expect(button(page, 'Select original file')).toBeVisible();
-  const expires = (await server.journal()).expires as number;
-  await expect.poll(() => page.evaluate(() => Date.now() / 1000), { timeout: 10_000 }).toBeGreaterThan(expires);
+  expect((await server.journal()).expires).toBe(expiresAt);
+  await page.clock.setFixedTime((expiresAt + 1) * 1000);
   const sent = server.offsets.length;
   server.faults.pauseFrom = undefined;
   await page.getByLabel('Original upload file', { exact: true }).setInputFiles({ name: 'video.bin', mimeType: 'application/octet-stream', buffer: server.original });
