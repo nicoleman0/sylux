@@ -26,6 +26,7 @@ docker save "$image" | gzip -n > "$output/sylux-image.tar.gz"
 printf '%s\n' "$image_id" > "$output/image-id.txt"
 cp "$context/deploy/docker/compose.yaml" "$context/docs/docker-beta.md" "$output/"
 cp "$context/deploy/docker/.env.example" "$output/env.example"
+cp "$context/scripts/install-sylux.sh" "$output/install-sylux.sh"
 python3 - "$output" "$version" "$revision" "$image_id" <<'PY'
 import hashlib, json, pathlib, sys
 out, version, revision, image_id = sys.argv[1:]
