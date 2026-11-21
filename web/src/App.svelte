@@ -39,7 +39,7 @@
   import { TransferApi, identifyFile, saveRefused, type Replacement } from './lib/transfers';
   import { directoryFilesToUpload, filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
 
-  import { parseLocation, locationHash, savedContext, type BrowsingContext, type Destination, type AccountSort } from './lib/browsing-context';
+  import { parseLocation, locationHash, savedContext, type BrowsingContext, type Destination, type Location, type AccountSort } from './lib/browsing-context';
 
   import { MockTransport } from './lib/mock-transport';
 
@@ -88,7 +88,7 @@
     window.addEventListener('scroll', scheduleScrollSave, { passive: true });
     window.addEventListener('pagehide', saveNavigation);
     window.addEventListener('popstate', restoreNavigation);
-    return () => { preference.removeEventListener('change', onChange); window.removeEventListener('popstate', restoreNavigation); window.removeEventListener('scroll', scheduleScrollSave); if (scrollSaveTimer) clearTimeout(scrollSaveTimer); window.removeEventListener('pagehide', saveNavigation); window.history.scrollRestoration = previousScrollRestoration; };
+    return () => { clearRouteFeedback(); preference.removeEventListener('change', onChange); window.removeEventListener('popstate', restoreNavigation); window.removeEventListener('scroll', scheduleScrollSave); if (scrollSaveTimer) clearTimeout(scrollSaveTimer); window.removeEventListener('pagehide', saveNavigation); window.history.scrollRestoration = previousScrollRestoration; };
   });
   let user = $state<User | null>(null);
   let accountView = $state(false);
@@ -141,11 +141,12 @@
   let deferredNavigation = $state(false);
   let deferredAccountOperation = $state(false);
   let deferredInstanceOperation = $state(false);
+  let deferredShareOperation = $state(false);
 
   $effect(() => {
-    if (deferredNavigation && !bulkBusy && !accountBusy && !instanceBusy &&
+    if (deferredNavigation && !bulkBusy && !accountBusy && !instanceBusy && (!deferredShareOperation || !share) &&
       (!deferredAccountOperation || (!changePasswordOpen && !createAccountOpen && !disableTarget && !authorityTarget && !resetId)) && (!deferredInstanceOperation || (!instanceError && !appearanceError))) {
-      deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false;
+      deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false; deferredShareOperation = false;
       void untrack(restoreNavigation);
     }
   });
@@ -197,142 +198,255 @@
     finally { if (generation === sessionGeneration) instanceNameBusy = false; }
   }
 
-  function recordNavigation(): void {
-    restorationPending = false; restorationFailed = false; restorationUnavailable = false;
-    deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false;
-    navigationRequest++; trashRequest++; trashLoading = false; trashPaging = null;
-    historyReady = true;
-    const context = browsingSnapshot();
-    const previous = parseLocation(window.location.hash);
-    context.scroll = 0;
-    if (previous.destination !== context.destination || (context.destination === 'files' && (previous.folder !== context.folder || previous.query !== context.query))) {
-      window.history.pushState({ sylux: context }, '', locationHash(context));
-      window.scrollTo(0, 0);
-    } else saveNavigation();
+  const routeFeedbackDelay = 180;
+  let pendingRoute = $state<string | null>(null);
+  let routeFeedback = $state(false);
+  let routeFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+  let presentedRoute = $state(false);
+  let routeFocus: ReturnType<typeof watchFocus> | null = null;
+  let routeController: AbortController | null = null;
+  let retainingRoute = $state(false);
+  let searchDuringRoute = $state(false);
+  const routeName = $derived(pendingRoute ? parseLocation(pendingRoute).destination : null);
+
+  function clearRouteFeedback(): void {
+    if (routeFeedbackTimer !== null) clearTimeout(routeFeedbackTimer);
+    routeFeedbackTimer = null;
+    routeController?.abort(); routeController = null;
+    routeFocus?.stop(); routeFocus = null;
+    pendingRoute = null;
+    retainingRoute = false;
+    searchDuringRoute = false;
+    routeFeedback = false;
   }
 
-  async function navigate(destination: Destination, record = true, clearFeedback = true): Promise<void> {
-    if (!user) { view = 'login'; return; }
-    if (bulkBusy || accountBusy || instanceBusy) return;
-    if (record) saveNavigation();
-    const generation = sessionGeneration;
-    const request = ++navigationRequest;
-    pendingMove = null; listingRequest++; loading = false; trashRequest++; trashLoading = false; trashPaging = null;
-    if (clearFeedback) clearCompletedFeedback();
-    clearSelection(); closeBulk();
-    if (destination === 'settings' && user.role !== 'administrator') destination = 'files';
-    if (destination !== 'files') clearSearch();
-    accountView = destination === 'account'; settingsView = destination === 'settings'; showTrash = destination === 'trash';
-    accountNotice = '';
-    if (record) recordNavigation();
-    const current = navigationRequest;
-    const trashFocus = showTrash ? watchFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null) : null;
-    if (destination === 'files' && (!currentFolder.id || entriesFolderId !== currentFolder.id)) await refresh();
-    if (showTrash) await loadTrash();
-    if (accountView) await loadOwnUsage();
-    if (settingsView) { await loadAccounts(); if (generation === sessionGeneration && current === navigationRequest) await loadInstance(); }
-    await tick();
-    const mayFocus = trashFocus?.mayFocus() ?? true;
-    trashFocus?.stop();
-    if (!mayFocus || generation !== sessionGeneration || (record ? current : request) !== navigationRequest) return;
-    document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title')?.focus({ preventScroll: true });
+  function showDestination(destination: Destination): void {
+    accountView = destination === 'account';
+    settingsView = destination === 'settings';
+    showTrash = destination === 'trash';
+  }
+
+  function navigate(destination: Destination, path?: Folder[]): Promise<boolean> {
+    if (!user || bulkBusy || accountBusy || instanceBusy || shareBusy) return Promise.resolve(false);
+    const next: Location = { ...browsingSnapshot(), destination, folder: path?.at(-1)?.id ?? '', query: '' };
+    const hash = locationHash(next);
+    if (pendingRoute === hash) return Promise.resolve(false);
+    const previous = parseLocation(window.location.hash);
+    saveNavigation();
+    if (previous.destination !== destination || (destination === 'files' && (previous.folder !== next.folder || previous.query))) {
+      window.history.pushState({ sylux: {
+        ...next, version: 1, owner: user.id, cursors: [null], page: 0, searchCursors: [null], searchPage: 0, scroll: 0,
+      } }, '', hash);
+    }
+    return presentRoute(next, null, path);
   }
 
   async function restoreNavigation(): Promise<void> {
     if (!user) return;
-    if (bulkBusy || accountBusy || instanceBusy) {
+    if (bulkBusy || accountBusy || instanceBusy || shareBusy || (deferredShareOperation && share)) {
       historyReady = false; deferredNavigation = true;
-      deferredAccountOperation = accountBusy; deferredInstanceOperation = instanceBusy;
+      deferredAccountOperation = accountBusy; deferredInstanceOperation = instanceBusy; deferredShareOperation = deferredShareOperation || shareBusy;
       return;
     }
-    historyReady = false;
-    restorationPending = true; restorationFailed = false; restorationUnavailable = false;
-    const request = ++navigationRequest;
-    const generation = sessionGeneration;
-    const isCurrent = () => generation === sessionGeneration && request === navigationRequest && !!user;
     const state = window.history.state?.sylux;
     const location = state?.owner && state.owner !== user.id ? parseLocation('#files') : parseLocation(window.location.hash);
-    const context = savedContext(window.history.state?.sylux, user.id, location);
-    listingRequest++; trashRequest++; trashLoading = false; trashPaging = null; clearSearch(); clearSelection(); clearCompletedFeedback(); closeBulk();
-    previewEntry = null; previewTrigger = null;
+    const context = savedContext(state, user.id, location);
+    await presentRoute(location, context);
+  }
+
+  function staleCursor(error: unknown): boolean {
+    return error instanceof HttpError && (error.status === 409 || (error.status === 400 && error.code === 'invalid_cursor'));
+  }
+
+  async function presentRoute(location: Location, context: BrowsingContext | null, path?: Folder[]): Promise<boolean> {
+    if (!user) return false;
+    const generation = sessionGeneration;
+    const request = ++navigationRequest;
+    const isCurrent = () => generation === sessionGeneration && request === navigationRequest;
+    const destination = location.destination === 'settings' && user.role !== 'administrator' ? 'files' : location.destination;
+    const isFiles = destination === 'files';
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const useShell = !presentedRoute || destination === 'account' || destination === 'settings';
+    let scroll = context?.scroll ?? 0;
+    let loaded = false;
+    let readablePath: Folder[] | undefined;
+
+    function showSlowFilesShell(): void {
+      if (!readablePath) return;
+      clearSearch();
+      showDestination('files');
+      retainingRoute = false;
+      folderPath = readablePath; currentFolder = readablePath.at(-1)!;
+      folderSort = location.sort; searchSort = location.searchSort ?? 'name_asc';
+      entries = []; entriesFolderId = ''; listingError = '';
+      pageCursors = [null]; pageIndex = 0; hasMore = false; nextCursor = null;
+      searchDuringRoute = true;
+    }
+
+    historyReady = false;
+    deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false; deferredShareOperation = false;
+    restorationPending = true; restorationFailed = false; restorationUnavailable = false;
+    clearRouteFeedback();
+    const watched = routeFocus = watchFocus(trigger);
+    const controller = routeController = new AbortController();
+    pendingRoute = locationHash(location);
+    retainingRoute = !useShell;
+    routeFeedbackTimer = setTimeout(() => {
+      if (!isCurrent()) return;
+      routeFeedback = true;
+      showSlowFilesShell();
+      void tick().then(() => {
+        if (isCurrent() && watched.mayFocus() && document.activeElement === document.body) {
+          document.getElementById('route-status')?.focus({ preventScroll: true });
+        }
+      });
+    }, routeFeedbackDelay);
+
+    listingRequest++; trashRequest++; ownUsageRequest++; accountsRequest++; allUsageRequest++;
+    ownUsageRetrying = false;
+    workspaceRefreshRequest++; workspaceRefreshing = false;
+    searchRequest++; searchController?.abort(); searchController = null;
+    if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+    pendingMove = null;
+    endDrag();
+    if (!moveNeedsRefresh) dropError = '';
+    clearSelection(); clearCompletedFeedback(); closeBulk();
+    previewEntry = null; previewTrigger = null; share = null;
     if (!folderBusy) createOpen = false;
     if (!renameBusy) renameId = '';
     if (!trashBusy) trashTarget = null;
     if (!moveBusy && !moveNeedsRefresh) closeMove();
     changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null;
     resetId = ''; resetPassword = ''; accountHandle = ''; clearCreateAccountSecrets(); currentPassword = ''; newPassword = ''; accountNotice = '';
-    accountView = location.destination === 'account'; settingsView = location.destination === 'settings' && user.role === 'administrator'; showTrash = location.destination === 'trash';
-    entries = []; entriesFolderId = ''; listingError = ''; pendingMove = null; loading = true;
-    folderSort = location.sort;
-    searchSort = location.searchSort ?? 'name_asc'; trashSort = location.trashSort ?? 'name_asc'; accountSort = location.accountSort ?? 'name_asc';
+    if (useShell) showDestination(destination);
     try {
-      if (!accountView && !settingsView && !showTrash) {
-        if (!folders[0] && !await refreshRoot()) {
-          if (!isCurrent()) return;
-          throw new Error('Root listing unavailable');
+      if (isFiles) {
+        if (!folders[0] && !await refreshRoot(isCurrent, controller.signal)) return false;
+        if (!isCurrent()) return false;
+        const root = folders[0];
+        if (!path && location.folder && location.folder !== root.id) {
+          const result = await listing.path(location.folder, controller.signal);
+          if (!isCurrent()) return false;
+          if (result.items[0]?.id !== root.id || result.items.at(-1)?.id !== location.folder) throw new Error('Invalid folder path');
+          path = [root, ...result.items.slice(1)];
         }
-        if (!isCurrent()) return;
-        folderPath = [folders[0]]; currentFolder = folders[0];
-        if (location.folder && location.folder !== folders[0].id) {
-          const path = await listing.path(location.folder);
-          if (!isCurrent()) return;
-          if (!path.items.length || path.items[0].id !== folders[0].id || path.items.at(-1)?.id !== location.folder) throw new Error('Invalid folder path');
-          folderPath = path.items.map((folder, index) => index === 0 ? { ...folder, name: 'Files' } : folder);
-          currentFolder = folderPath.at(-1)!;
+        path ??= [root];
+        readablePath = path;
+        if (routeFeedback) showSlowFilesShell();
+        const folder = path.at(-1)!;
+        const query = location.query;
+        const resultSort = location.searchSort ?? 'name_asc';
+        const read = (cursor: string | null) => query
+          ? listing.search(query, folder.id === root.id ? null : folder.id, cursor, controller.signal, resultSort)
+          : listing.children(folder.id, cursor, location.sort, controller.signal);
+        let cursors = context?.cursors ?? [null];
+        let page = context?.page ?? 0;
+        let searchCursors = context?.searchCursors ?? [null];
+        let searchPage = context?.searchPage ?? 0;
+        const cursor = query ? searchCursors[searchPage] : cursors[page];
+        let result;
+        let restarted = false;
+        try { result = await read(cursor); }
+        catch (error) {
+          if (!isCurrent()) return false;
+          if (!cursor || !staleCursor(error)) throw error;
+          if (query) { searchCursors = [null]; searchPage = 0; }
+          else { cursors = [null]; page = 0; }
+          scroll = 0;
+          restarted = true;
+          result = await read(null);
         }
-        document.getElementById('folder-title')?.focus({ preventScroll: true });
-        restorationPending = false;
-        if (context) { pageCursors = [...context.cursors]; pageIndex = context.page; }
-        else { pageCursors = [null]; pageIndex = 0; }
-        searchInput = location.query; searchQuery = location.query;
-        if (searchQuery) {
-          browseDirty = true;
-          searchPageCursors = context ? [...context.searchCursors] : [null];
-          await runSearch(context?.searchCursors[context.searchPage] ?? null, context?.searchPage ?? 0);
-        } else await restoreBrowsingPage();
-      } else if (showTrash) await loadTrash();
-      else if (accountView) await loadOwnUsage();
-      else if (settingsView) { await loadAccounts(); if (isCurrent()) await loadInstance(); }
-    } catch (error) {
-      if (isCurrent()) {
-        restorationFailed = true;
-        restorationUnavailable = error instanceof HttpError && error.status === 404;
-        listingError = restorationUnavailable ? 'This folder is unavailable. Open Files to continue.' : 'Could not load this folder. Check your connection and try again.';
+        if (!isCurrent()) return false;
+        clearSearch();
+        currentFolder = folder; folderPath = path;
+        pageCursors = [...cursors]; pageIndex = page;
+        if (query) {
+          searchInput = query; searchQuery = query; browseDirty = true;
+          searchPageCursors = [...searchCursors]; searchPageIndex = searchPage;
+          searchItems = result.items as SearchHit[]; searchNextCursor = result.next_cursor; searchHasMore = result.has_more;
+          for (const hit of searchItems) {
+            knownParents.set(hit.entry.id, hit.entry.parent_id);
+            for (const ancestor of hit.location) knownParents.set(ancestor.id, ancestor.parent_id);
+          }
+        } else {
+          entries = result.items as Entry[]; entriesFolderId = folder.id;
+          nextCursor = result.next_cursor; hasMore = result.has_more;
+          for (const entry of entries) knownParents.set(entry.id, entry.parent_id);
+        }
+        listingError = '';
+        if (restarted) notice = query ? 'Files changed. Search results have been restarted.' : 'This folder changed. The listing has been restarted.';
+      } else if (destination === 'trash') {
+        try {
+          const result = await listing.deleted(null, location.trashSort, controller.signal);
+          if (!isCurrent()) return false;
+          deletedItems = result.items; trashNextCursor = result.next_cursor; trashHasMore = result.has_more;
+          trashError = ''; trashRetry = null;
+        } catch {
+          if (!isCurrent()) return false;
+          deletedItems = []; trashNextCursor = null; trashHasMore = false;
+          trashRetry = { cursor: null, page: 0 };
+          trashError = 'Could not load trash. Try again.';
+        }
+        trashPageCursors = [null]; trashPageIndex = 0; trashNotice = '';
+        clearSearch();
+      } else {
+        clearSearch();
+        if (destination === 'account') await loadOwnUsage(controller.signal);
+        if (destination === 'settings') { await loadAccounts(); if (isCurrent()) await loadInstance(); }
       }
+      if (!isCurrent()) return false;
+      loaded = true;
+    } catch (error) {
+      if (!isCurrent()) return false;
+      clearSearch();
+      entries = []; entriesFolderId = ''; hasMore = false; nextCursor = null; pageIndex = 0;
+      if (path?.length) { folderPath = path; currentFolder = path.at(-1)!; }
+      else { folderPath = [folders[0] ?? emptyRoot]; currentFolder = folderPath[0]; }
+      restorationFailed = true;
+      restorationUnavailable = error instanceof HttpError && error.status === 404;
+      listingError = restorationUnavailable ? 'This folder is unavailable. Open Files to continue.' : 'Could not load this folder. Check your connection and try again.';
     } finally {
       if (isCurrent()) {
-        loading = false;
+        folderSort = location.sort; searchSort = location.searchSort ?? 'name_asc';
+        trashSort = location.trashSort ?? 'name_asc'; accountSort = location.accountSort ?? 'name_asc';
+        showDestination(destination);
+        listingRequest++; trashRequest++; searchRequest++;
+        loading = false; trashLoading = false; trashPaging = null; searchLoading = false;
+        trashRetry = destination === 'trash' ? trashRetry : null;
+        restorationPending = false; presentedRoute = true;
+        routeFocus = null;
+        clearRouteFeedback();
         await tick();
         if (isCurrent()) {
-          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-          if (isCurrent()) {
+          const active = document.activeElement;
+          const leavingSheet = trigger?.closest('[data-mobile=true]') && active?.matches('[data-sidebar=trigger]');
+          const restoreScroll = !pendingMove && (!active?.closest('.account-content, .files-content, .trash-content, .settings-content') || watched.mayFocus());
+          if (restoreScroll) window.scrollTo(0, scroll);
+          if (watched.mayFocus() || active === document.body || leavingSheet) {
             const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title');
-            const active = document.activeElement;
-            const interacting = active instanceof HTMLElement && ((!!active.closest('.files-content') && active.matches('input, textarea, select, [contenteditable]')) || !!active.closest('[role=dialog][data-open], .file-row'));
-            // A row removed mid-load drops focus to body; put it back on the same entry if it survived.
-            const rowItem = !active || active === document.body ? listItemFor(listFocusId) : null;
-            if (!rowItem) listFocusId = null;
-            const items = listItems();
-            const moved = pendingMove && active === heading ? items[moveIndex(-1, items.length, pendingMove)] : null;
-            pendingMove = null;
-            if (!interacting) {
-              (rowItem ?? moved ?? heading)?.focus({ preventScroll: true });
-              const samePage = context && (searchQuery ? context.searchPage === searchPageIndex : context.page === pageIndex);
-              window.scrollTo(0, samePage ? context.scroll : 0);
-              if (moved) moved.scrollIntoView({ block: 'nearest' });
-            }
-            if (!restorationFailed) { restorationPending = false; historyReady = true; saveNavigation(); }
+            const retry = document.getElementById(restorationFailed && !restorationUnavailable ? 'folder-page-retry' : destination === 'trash' && trashError ? 'trash-page-retry' : '');
+            const items = pendingMove && active === heading ? listItems() : [];
+            const moved = pendingMove ? items[moveIndex(-1, items.length, pendingMove)] : null;
+            const visibleItem = isFiles && restoreScroll && scroll > 0 ? listItems().find(item => {
+              const bounds = item.getBoundingClientRect();
+              return bounds.top >= 0 && bounds.bottom <= window.innerHeight;
+            }) : null;
+            (retry ?? moved ?? visibleItem ?? heading)?.focus({ preventScroll: true });
+            moved?.scrollIntoView({ block: 'nearest' });
           }
+          pendingMove = null;
+          if (!restorationFailed) { historyReady = true; saveNavigation(); }
         }
       }
+      watched.stop();
     }
+    return loaded && isCurrent();
   }
 
   async function home(event: MouseEvent): Promise<void> {
     event.preventDefault();
     if (!user) { view = 'login'; return; }
-    if (folders[0]) await openFolder(folders[0]);
-    else await navigate('files', true, false);
+    await navigate('files', folders[0] ? [folders[0]] : undefined);
   }
 
   function formatSize(bytes: number): string {
@@ -442,6 +556,7 @@
   function listKeydown(event: KeyboardEvent): void {
     if (!user || accountView || settingsView || showTrash || shortcutsBlocked(event.target, document)) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
+    if (restorationPending && target?.id !== 'folder-title') return;
     const row = target?.matches(itemSelector) ? target.closest<HTMLElement>('.file-row') : null;
     const onHeading = target?.id === 'folder-title';
     const inList = !!target?.closest('.files-content .file-row') || onHeading;
@@ -460,7 +575,7 @@
       const current = row ? items.findIndex((item) => item.closest('.file-row') === row) : -1;
       const next = moveIndex(current, items.length, intent.to);
       if (onHeading && (next < 0 || items[next].matches(':disabled'))) {
-        if (loading) { event.preventDefault(); pendingMove = intent.to; }
+        if (restorationPending) { event.preventDefault(); pendingMove = intent.to; }
         return;
       }
       if (next < 0) return;
@@ -824,6 +939,7 @@
   const currentFolderRetryBusy = $derived(folderRetryBusy && folderRetryRequest === listingRequest);
   let workspaceRefreshRequest = 0;
   async function refreshWorkspace(): Promise<void> {
+    if (restorationPending) return;
     if (showTrash) {
       if (trashLoading || trashBusy) return;
       clearCompletedFeedback();
@@ -865,9 +981,10 @@
   async function inspectUploadDestination(result: UploadResult): Promise<void> {
     if (!result.parent) return;
     const generation = sessionGeneration;
+    const navigation = navigationRequest;
     result.inspectionError = '';
     const parent = await freshUploadFolder(result.parent).catch(() => null);
-    if (generation !== sessionGeneration) return;
+    if (generation !== sessionGeneration || navigation !== navigationRequest) return;
     if (!parent) { result.inspectionError = 'Could not open this destination. Check your connection and try again.'; return; }
     const loaded = await openFolder(parent);
     if (generation !== sessionGeneration) return;
@@ -893,7 +1010,7 @@
   }
   let unresolvedUploadResult: number | null = null;
   let replacementDecision: ((prompt: ReplacementPrompt | null) => void) | null = null;
-  const fileMutationBusy = $derived(restorationPending || (workspaceRefreshing && loading) || bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || !!namespaceUnknown || folderBusy || transferBusy || uploadBatchBusy);
+  const fileMutationBusy = $derived(restorationPending || restorationFailed || (workspaceRefreshing && loading) || bulkBusy || bulkNeedsRefresh || moveNeedsRefresh || !!dropPending || moveBusy || renameBusy || trashBusy || !!namespaceUnknown || folderBusy || transferBusy || uploadBatchBusy);
 
   function restoreFocus(trigger: HTMLElement | null, fallback = 'folder-title'): void {
     if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus({ preventScroll: true });
@@ -909,10 +1026,10 @@
     void tick().then(() => document.getElementById('handle')?.focus());
   }
 
-  async function refreshRoot(): Promise<boolean> {
+  async function refreshRoot(isCurrent: () => boolean = () => true, signal?: AbortSignal): Promise<boolean> {
     const generation = sessionGeneration;
-    const listingData = await listing.roots();
-    if (generation !== sessionGeneration) return false;
+    const listingData = await listing.roots(null, undefined, signal);
+    if (generation !== sessionGeneration || !isCurrent()) return false;
     const root = { ...listingData.root, name: 'Files' };
     const descriptors = [root, ...listingData.items.filter((entry): entry is Folder => entry.kind === 'folder')];
     folders = descriptors;
@@ -933,7 +1050,7 @@
     listingError = '';
     try {
       if (!folderId) {
-        if (!await refreshRoot() || requestId !== listingRequest) return false;
+        if (!await refreshRoot(() => requestId === listingRequest) || requestId !== listingRequest) return false;
         currentFolder = folders[0]; folderPath = [currentFolder]; folderId = currentFolder.id;
       }
       const page = await listing.children(folderId, null, folderSort);
@@ -1011,7 +1128,10 @@
   }
 
   function searchChanged(): void {
-    if (bulkBusy || restorationPending) return;
+    if (bulkBusy || (restorationPending && !searchDuringRoute)) return;
+    if (searchDuringRoute) {
+      clearRouteFeedback(); restorationPending = false; presentedRoute = true;
+    }
     if (loading || entriesFolderId !== currentFolder.id) browseDirty = true;
     navigationRequest++; historyReady = true; pendingMove = null; loading = false; listingRequest++;
 
@@ -1137,22 +1257,9 @@
   }
 
   async function openSearchFolder(hit: SearchHit, containing = false): Promise<void> {
-    saveNavigation();
-    clearCompletedFeedback();
     const path = containing ? hit.location : [...hit.location, hit.entry as Folder];
-    const folder = path.at(-1);
-    if (!folder) return;
-
-    clearSearch();
-    pageCursors = [null]; pageIndex = 0;
-    folderPath = path.map((item, index) => index === 0 ? { ...item, name: 'Files' } : item);
-    currentFolder = folderPath.at(-1)!;
-    accountView = false; settingsView = false; showTrash = false;
-    recordNavigation();
-    const request = navigationRequest;
-    const generation = sessionGeneration;
-    await refresh();
-    await tick(); if (request === navigationRequest && generation === sessionGeneration) document.getElementById('folder-title')?.focus({ preventScroll: true });
+    if (!path.length) return;
+    await navigate('files', path.map((item, index) => index === 0 ? { ...item, name: 'Files' } : item));
   }
 
   async function loadMore(): Promise<void> {
@@ -1234,7 +1341,7 @@
 
   async function signIn(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    if (authBusy) return;
+    if (authBusy || user || loggingOut) return;
     authBusy = true;
     const authView = view;
     notice = '';
@@ -1275,16 +1382,18 @@
   }
 
   async function retryOwnUsage(): Promise<void> {
-    if (ownUsageRetrying) return;
+    if (restorationPending || ownUsageRetrying) return;
     const generation = sessionGeneration;
     const button = () => document.querySelector('#usage-heading ~ .refresh-button') as HTMLElement | null;
     const trigger = button();
     const watch = watchFocus(trigger);
     const hadFocus = !!trigger && document.activeElement === trigger;
     ownUsageRetrying = true;
-    const applied = await loadOwnUsage();
+    const retry = loadOwnUsage();
+    const request = ownUsageRequest;
+    const applied = await retry;
     watch.stop();
-    if (generation !== sessionGeneration) return;
+    if (generation !== sessionGeneration || request !== ownUsageRequest) return;
     ownUsageRetrying = false;
     await tick();
     if (!applied || !hadFocus || !watch.mayFocus()) return;
@@ -1292,13 +1401,13 @@
     else button()?.focus();
   }
 
-  async function loadOwnUsage(): Promise<boolean> {
+  async function loadOwnUsage(signal?: AbortSignal): Promise<boolean> {
     const generation = sessionGeneration;
     const request = ++ownUsageRequest;
-    ownUsageState = 'loading';
+    if (!restorationPending || !ownUsage) ownUsageState = 'loading';
     const current = () => generation === sessionGeneration && request === ownUsageRequest;
     try {
-      const result = await session.usage();
+      const result = await session.usage(signal);
       if (current()) { ownUsage = result; ownUsageState = 'ready'; }
     } catch {
       if (current()) { ownUsage = null; ownUsageState = 'error'; }
@@ -1391,13 +1500,14 @@
     finally { if (generation === sessionGeneration) accountBusy = false; }
   }
   function clearWorkspace(): void {
-    share = null;
+    share = null; shareBusy = false;
     clearSearch();
     archiveBusy = false; archiveTargets = [];
     actionNotice = ''; compactUnresolvedUpload = false;
     workspaceRefreshing = false; workspaceRefreshRequest++; folderRetryBusy = false; moveCloseRefreshBusy = false; entriesFolderId = '';
     bulkAction = null; bulkTargets = []; bulkReport = null; bulkBusy = false; bulkNeedsRefresh = false; bulkError = '';
-    historyReady = false; navigationRequest++; restorationPending = false; restorationFailed = false; restorationUnavailable = false; deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false;
+    clearRouteFeedback(); presentedRoute = false;
+    historyReady = false; navigationRequest++; restorationPending = false; restorationFailed = false; restorationUnavailable = false; deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false; deferredShareOperation = false;
     window.history.replaceState(null, '', '#files');
     controller?.abort(); controller = null;
     dismissReplacement(); uploadReplacement = false;
@@ -1456,17 +1566,19 @@
     if (logoutFailed) notice = 'Sign-out could not be confirmed. Check your connection.';
     client.setCsrfToken(null);
     loggingOut = false;
+    await tick();
+    document.getElementById('handle')?.focus();
   }
 
   function beginCreate(trigger: HTMLElement): void {
-    if (restorationPending || namespaceUnknown) return;
+    if (restorationPending || restorationFailed || namespaceUnknown) return;
     createTrigger = trigger; folderName = ''; folderError = ''; createOpen = true;
   }
 
   async function createFolder(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (namespaceUnknown) { folderError = 'Close this dialog and check Files and Trash before continuing.'; return; }
-    if (restorationPending || folderBusy || !currentFolder.id) return;
+    if (restorationPending || restorationFailed || folderBusy || !currentFolder.id) return;
     const name = folderName.trim();
     if (!name || name === '.' || name === '..' || /[\/\\\x00-\x1f\x7f]/.test(name)) {
       folderError = 'Enter a folder name without slashes or control characters.';
@@ -1985,7 +2097,7 @@
   }
 
   async function runUploadBatch(read: (canceled: () => boolean) => Promise<UploadItem[]>, destination: Folder): Promise<void> {
-    if (restorationPending || namespaceUnknown || uploadBatchBusy || transferBusy || unresolvedUploadId) return;
+    if (restorationPending || restorationFailed || namespaceUnknown || uploadBatchBusy || transferBusy || unresolvedUploadId) return;
     const generation = sessionGeneration;
     clearCompletedFeedback();
     retainUploadReport();
@@ -2085,6 +2197,7 @@
     void tick().then(() => { if (generation === sessionGeneration && request === navigationRequest) restoreFocus(trigger); });
   }
   let share = $state<{ entry: Entry | null; trigger: HTMLElement } | null>(null);
+  let shareBusy = $state(false);
 
   function closeShare(): void {
     const trigger = share?.trigger ?? null;
@@ -2681,25 +2794,15 @@
   }
 
   async function openFolder(folder: Folder): Promise<boolean> {
-    if (bulkBusy || accountBusy || instanceBusy) return false;
-    saveNavigation();
-    clearCompletedFeedback();
-    closeBulk();
-
-    clearSearch();
-    pageCursors = [null]; pageIndex = 0;
     const index = folderPath.findIndex((item) => item.id === folder.id);
-    folderPath = index >= 0 ? folderPath.slice(0, index + 1) : [...folderPath, folder];
-    const generation = sessionGeneration;
-    currentFolder = folder; accountView = false; settingsView = false; showTrash = false; recordNavigation();
-    const loaded = await refresh();
-    if (generation !== sessionGeneration) return false;
-    await tick();
-    if (!loaded || currentFolder.id !== folder.id || accountView || settingsView || showTrash) return false;
-    document.getElementById('folder-title')?.focus();
-    return true;
+    const path = index >= 0 ? folderPath.slice(0, index + 1) : [...folderPath, folder];
+    return navigate('files', path);
   }
 </script>
+
+{#snippet routePlaceholder()}
+  <div class="route-placeholder" aria-hidden="true"><span></span><span></span><span></span></div>
+{/snippet}
 
 {#snippet resultSortOptions()}
   <option value="name_asc">Name: A to Z</option><option value="name_desc">Name: Z to A</option>
@@ -2776,19 +2879,19 @@
       <AppSidebar {instanceName} logoUrl={appearance.logoUrl} onhome={home}>
         {#snippet navigation(close)}
           <nav aria-label="Files"><Sidebar.Menu>
-          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" isActive={!showTrash && !accountView && !settingsView} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files', true, false); close(); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
-          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Trash" aria-label="Trash" isActive={showTrash} aria-current={showTrash ? 'page' : undefined} onclick={async () => { await openTrash(); close(); }}><TrashIcon /><span>Trash</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" aria-busy={routeName === 'files'} isActive={!showTrash && !accountView && !settingsView} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={() => { close(); void navigate('files', folders[0] ? [folders[0]] : undefined); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Trash" aria-label="Trash" aria-busy={routeName === 'trash'} isActive={showTrash} aria-current={showTrash ? 'page' : undefined} onclick={() => { close(); void openTrash(); }}><TrashIcon /><span>Trash</span></Sidebar.MenuButton></Sidebar.MenuItem>
 
           </Sidebar.Menu></nav>
           {#if user?.role === 'administrator'}
             <nav aria-label="Administration" class="mt-1"><Sidebar.Menu><Sidebar.MenuItem>
-              <Sidebar.MenuButton tooltipContent="Settings" aria-label="Settings" isActive={settingsView} aria-current={settingsView ? 'page' : undefined} onclick={async () => { await navigate('settings'); close(); }}><SettingsIcon /><span>Settings</span></Sidebar.MenuButton>
+              <Sidebar.MenuButton tooltipContent="Settings" aria-label="Settings" aria-busy={routeName === 'settings'} isActive={settingsView} aria-current={settingsView ? 'page' : undefined} onclick={() => { close(); void navigate('settings'); }}><SettingsIcon /><span>Settings</span></Sidebar.MenuButton>
             </Sidebar.MenuItem></Sidebar.Menu></nav>
           {/if}
         {/snippet}
         {#snippet account(close)}
           <nav aria-label="Account"><Sidebar.Menu><Sidebar.MenuItem>
-            <Sidebar.MenuButton size="lg" tooltipContent="Account" aria-label="Account" isActive={accountView} aria-current={accountView ? 'page' : undefined} onclick={async () => { await navigate('account'); close(); }}>
+            <Sidebar.MenuButton size="lg" tooltipContent="Account" aria-label="Account" aria-busy={routeName === 'account'} isActive={accountView} aria-current={accountView ? 'page' : undefined} onclick={() => { close(); void navigate('account'); }}>
               <UserRoundIcon /><span class="sidebar-account"><span>{user?.handle}</span><span class="sidebar-account-role">{user?.role === 'administrator' ? 'Administrator' : 'User'}</span></span>
             </Sidebar.MenuButton>
           </Sidebar.MenuItem></Sidebar.Menu></nav>
@@ -2922,18 +3025,23 @@
             {#if uploadReportDismissible(report.results)}<Button variant="ghost" size="icon" aria-label="Dismiss checked results" title="Dismiss checked results" onclick={() => dismissUploadReport(report.id)}><XIcon /></Button>{/if}
           </section>
         {/each}
+        {#if routeFeedback}
+          <p id="route-status" class="workspace-feedback" role="status" tabindex="-1">
+            {routeName === 'trash' ? 'Opening Trash…' : routeName === 'account' ? 'Loading storage use…' : routeName === 'settings' ? 'Opening Settings…' : 'Opening files…'}
+          </p>
+        {/if}
         {#if accountView}
-          <section class="account-content">
+          <section class="account-content" inert={retainingRoute}>
             <h1 id="account-title" tabindex="-1">Account</h1>
             <section class="settings-section"><h2>Your account</h2><dl class="account-details"><dt>Account name</dt><dd>{user.handle}</dd><dt>Role</dt><dd>{user.role === 'administrator' ? 'Administrator' : 'User'}</dd></dl></section>
-            <section class="settings-section" aria-labelledby="usage-heading" aria-busy={ownUsageState === 'loading'}><h2 id="usage-heading" tabindex="-1">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p>{/if}{#if ownUsageState === 'error' || ownUsageRetrying}<RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" keepFocus busy={ownUsageRetrying} onclick={() => void retryOwnUsage()} />{/if}</section>
+            <section class="settings-section" aria-labelledby="usage-heading" aria-busy={routeName === 'account' || ownUsageState === 'loading'}><h2 id="usage-heading" tabindex="-1">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{ownUsageState === 'loading' && pendingRoute && !routeFeedback ? '—' : usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{ownUsageState === 'loading' && pendingRoute && !routeFeedback ? '—' : usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p>{/if}{#if ownUsageState === 'error' || ownUsageRetrying}<RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" keepFocus busy={ownUsageRetrying} onclick={() => void retryOwnUsage()} />{/if}</section>
             <section class="settings-section account-setting-row"><div><h2>Public links</h2><p class="section-description">Review and revoke active download links.</p></div><Button variant="outline" onclick={(event) => { share = { entry: null, trigger: event.currentTarget }; }}>Shared links</Button></section>
             <section class="settings-section account-setting-row"><div><h2>Password</h2><p class="section-description">Change the password you use to sign in.</p></div><Button variant="outline" onclick={(event) => { passwordDialogTrigger = event.currentTarget; accountNotice = ''; currentPassword = ''; newPassword = ''; changePasswordOpen = true; }}>Change password</Button></section>
             <section class="settings-section account-setting-row"><div><h2>Session</h2><p class="section-description">Sign out of this browser.</p></div><Button variant="outline" disabled={loggingOut} onclick={signOut}>Sign out</Button></section>
             {#if accountNotice && !changePasswordOpen}<p role="status" class="form-notice">{accountNotice}</p>{/if}
           </section>
         {:else if settingsView && user.role === 'administrator'}
-          <section class="settings-content">
+          <section class="settings-content" inert={retainingRoute}>
             <h1 id="settings-title" tabindex="-1">Settings</h1>
             <nav class="settings-tabs" aria-label="Settings"><Button disabled={instanceBusy} variant="ghost" class={settingsTab === 'accounts' ? 'active' : ''} aria-current={settingsTab === 'accounts' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'accounts'; }}>Accounts</Button><Button disabled={instanceBusy} variant="ghost" class={settingsTab === 'instance' ? 'active' : ''} aria-current={settingsTab === 'instance' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'instance'; }}>Instance</Button><Button disabled={instanceBusy} variant="ghost" class={settingsTab === 'appearance' ? 'active' : ''} aria-current={settingsTab === 'appearance' ? 'page' : undefined} onclick={() => { clearCompletedFeedback(); settingsTab = 'appearance'; }}>Appearance</Button></nav>
             {#if settingsTab === 'accounts'}
@@ -2963,13 +3071,13 @@
             {/if}
           </section>
         {:else if showTrash}
-            <section class="trash-content grid gap-4" aria-labelledby="trash-heading" aria-busy={trashLoading}>
-              <div class="trash-heading-row"><h1 id="trash-heading" tabindex="-1">Trash</h1><div class="flex flex-wrap justify-end gap-2"><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={trashBusy || removalSubmitting} onclick={refreshWorkspace} /><Button variant="outline" size="sm" disabled={removalBlocked || !deletedItems.length} aria-busy={removalPreparing === 'all'} onclick={(event) => prepareRemoval(true, event.currentTarget)}>{removalPreparing === 'all' ? 'Preparing…' : 'Empty Trash'}</Button></div></div>
+            <section class="trash-content grid gap-4" aria-labelledby="trash-heading" inert={retainingRoute} aria-busy={trashLoading || restorationPending}>
+              <div class="trash-heading-row"><h1 id="trash-heading" tabindex="-1">Trash</h1><div class="flex flex-wrap justify-end gap-2"><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={restorationPending || trashBusy || removalSubmitting} onclick={refreshWorkspace} /><Button variant="outline" size="sm" disabled={removalBlocked || !deletedItems.length} aria-busy={removalPreparing === 'all'} onclick={(event) => prepareRemoval(true, event.currentTarget)}>{removalPreparing === 'all' ? 'Preparing…' : 'Empty Trash'}</Button></div></div>
               {#if removalError}<p role="alert">{removalError}</p>{/if}
               {#if deletedItems.length}<div class="flex flex-wrap items-center gap-3"><label class="flex items-center gap-2"><input type="checkbox" aria-label="Select all items on this page" disabled={removalBlocked} checked={!!deletedItems.length && removalSelection.length === deletedItems.length} onchange={(event) => removalSelection = event.currentTarget.checked ? deletedItems.map(item => item.id) : []} />Select page</label>{#if removalSelection.length}<span>{removalSelection.length} selected</span><Button variant="destructive" size="sm" disabled={removalBlocked} aria-busy={removalPreparing === 'selected'} onclick={(event) => prepareRemoval(false, event.currentTarget)}>{removalPreparing === 'selected' ? 'Preparing…' : 'Remove permanently'}</Button>{/if}</div>{/if}
               {#if trashNotice}<p role="status">{trashNotice}</p>{/if}
               {#if trashError}<p role="alert">{trashError}</p>{#if trashRetry}<Button id="trash-page-retry" variant="outline" class="justify-self-start" disabled={trashLoading || trashBusy} aria-busy={trashPaging === 'retry' && trashLoading} onclick={() => pageTrash('retry')}>{trashPaging === 'retry' && trashLoading ? 'Retrying…' : 'Try again'}</Button>{/if}{/if}
-              {#if trashLoading}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}
+              {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{:else if trashLoading && !restorationPending}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}
                 <div class="narrow-sort"><Label for="trash-sort">Sort Trash by</Label><select id="trash-sort" aria-busy={trashLoading} value={trashSort} disabled={resultSortBlocked} onchange={(event) => setResultSort('trash', event.currentTarget.value as ResultSort)}>{@render resultSortOptions()}</select></div><div role="table" aria-label="Trash items"><div class="trash-sort" role="row"><span role="columnheader"><span class="sr-only">Kind</span></span><SortHeader label="Name" column="name" sort={trashSort} busy={trashLoading && trashSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'name'))} /><SortHeader label="Location" column="location" sort={trashSort} busy={trashLoading && trashSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'location'))} /><SortHeader label="Modified" column="modified" sort={trashSort} busy={trashLoading && trashSort.startsWith('modified_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'modified'))} /><SortHeader label="Size" column="size" sort={trashSort} busy={trashLoading && trashSort.startsWith('size_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'size'))} /><span role="columnheader"><span class="sr-only">Actions</span></span></div>
               {#if deletedItems.length > 0}
                 <ul role="rowgroup">
@@ -2992,7 +3100,7 @@
             </section>
 
         {:else}
-          <section class="files-content" aria-labelledby="folder-title">
+          <section class="files-content" aria-labelledby="folder-title" inert={retainingRoute} aria-busy={restorationPending}>
 
 
             <div class="page-heading">
@@ -3003,15 +3111,15 @@
               {/if}
             </div>
             <div class="search-toolbar">
-              <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || restorationPending} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : 'Search by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
+              <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || (restorationPending && !searchDuringRoute) || restorationFailed} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : 'Search by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
                   oncompositionstart={searchCompositionStarted} oncompositionend={(event) => { searchComposing = false; searchInput = event.currentTarget.value; searchChanged(); }} />
-                {#if searchQuery}<Button variant="outline" type="button" disabled={bulkBusy || restorationPending} onclick={clearSearchFromButton}>Clear search</Button>{/if}
+                {#if searchQuery}<Button variant="outline" type="button" disabled={bulkBusy || restorationPending || restorationFailed} onclick={clearSearchFromButton}>Clear search</Button>{/if}
               </div>
             </div>
             {#if searchQuery}
               <section aria-label="Search results" aria-busy={searchLoading} class="search-results">
                 <div class="narrow-sort"><Label for="search-sort">Sort search by</Label><select id="search-sort" aria-busy={searchLoading} value={searchSort} disabled={resultSortBlocked} onchange={(event) => setResultSort('search', event.currentTarget.value as ResultSort)}>{@render resultSortOptions()}</select></div>
-                {#if searchLoading}<p role="status">Searching…</p>
+                {#if searchLoading && !restorationPending}<p role="status">Searching…</p>
                 {:else if searchInputError}<p role="alert">{searchInputError}</p>
                 {:else if searchError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Search failed</Alert.Title><Alert.Description><p>{searchError}</p><Button id="search-page-retry" variant="outline" size="sm" class="mt-2" onclick={() => runSearch(searchRetryCursor, searchRetryPage)}>Try again</Button></Alert.Description></Alert.Root>
                 {:else if searchItems.length === 0}<p>No matching files or folders.</p>
@@ -3044,10 +3152,10 @@
                   <Button id="choose-folder" variant="outline" type="button" disabled={fileMutationBusy || !!unresolvedUploadId || !!replacementPrompt} onclick={() => document.getElementById('upload-folder')?.click()}>Choose folder</Button>
                 {/if}
               </div>
-              <RefreshButton size="default" label="Refresh" busyLabel="Refreshing…" busy={loading || searchLoading} disabled={bulkBusy || bulkNeedsRefresh} onclick={() => { if (loading || searchLoading || bulkBusy || bulkNeedsRefresh) return; void refreshWorkspace(); }} aria-label="Refresh folder" />
+              <RefreshButton size="default" label="Refresh" busyLabel="Refreshing…" busy={loading || searchLoading} disabled={restorationPending || bulkBusy || bulkNeedsRefresh} onclick={() => { if (restorationPending || loading || searchLoading || bulkBusy || bulkNeedsRefresh) return; void refreshWorkspace(); }} aria-label="Refresh folder" />
               <div class="folder-sort">
                 <label for="folder-sort">Sort files by</label>
-                <select id="folder-sort" value={folderSort} disabled={bulkBusy || bulkNeedsRefresh || restorationPending} onchange={changeFolderSort}>
+                <select id="folder-sort" value={folderSort} disabled={bulkBusy || bulkNeedsRefresh || restorationPending || restorationFailed} onchange={changeFolderSort}>
                   <option value="name_asc">Name: A to Z</option>
                   <option value="name_desc">Name: Z to A</option>
                   <option value="size_asc">Size: smallest first</option>
@@ -3061,9 +3169,10 @@
             {#if !folderChooserSupported}<p id="folder-upload-help" class="text-xs text-muted-foreground mb-3">Folder selection is unavailable in this browser. Choose files or drop a folder instead.</p>{/if}
             {@render selectionToolbar()}
             <section class="file-drop-region" role="table" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
-            {#if entries.length && !listingError}<div role="rowgroup" class="file-list"><div role="row" class="list-head selectable-head modified-head"><span role="columnheader"><span class="sr-only">Selection</span></span><SortHeader label="Name" column="name" sort={folderSort} busy={loading && folderSort.startsWith('name_')} disabled={bulkBusy || bulkNeedsRefresh || restorationPending} onclick={() => setFolderSort(nextSort(folderSort, 'name'))} /><SortHeader label="Modified" column="modified" sort={folderSort} busy={loading && folderSort.startsWith('modified_')} class="file-modified" disabled={bulkBusy || bulkNeedsRefresh || restorationPending} onclick={() => setFolderSort(nextSort(folderSort, 'modified'))} /><SortHeader label="Size" column="size" sort={folderSort} busy={loading && folderSort.startsWith('size_')} class="file-size" disabled={bulkBusy || bulkNeedsRefresh || restorationPending} onclick={() => setFolderSort(nextSort(folderSort, 'size'))} /><span role="columnheader"><span class="sr-only">Options</span></span></div></div>{/if}
+            {#if entries.length && !listingError}<div role="rowgroup" class="file-list"><div role="row" class="list-head selectable-head modified-head"><span role="columnheader"><span class="sr-only">Selection</span></span><SortHeader label="Name" column="name" sort={folderSort} busy={loading && folderSort.startsWith('name_')} disabled={bulkBusy || bulkNeedsRefresh || restorationPending || restorationFailed} onclick={() => setFolderSort(nextSort(folderSort, 'name'))} /><SortHeader label="Modified" column="modified" sort={folderSort} busy={loading && folderSort.startsWith('modified_')} class="file-modified" disabled={bulkBusy || bulkNeedsRefresh || restorationPending || restorationFailed} onclick={() => setFolderSort(nextSort(folderSort, 'modified'))} /><SortHeader label="Size" column="size" sort={folderSort} busy={loading && folderSort.startsWith('size_')} class="file-size" disabled={bulkBusy || bulkNeedsRefresh || restorationPending || restorationFailed} onclick={() => setFolderSort(nextSort(folderSort, 'size'))} /><span role="columnheader"><span class="sr-only">Options</span></span></div></div>{/if}
             {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}{#if restorationUnavailable}<Button variant="outline" class="mt-2" onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files'); }}>Open Files</Button>{:else}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy || (restorationPending && !restorationFailed)} class="mt-2" onclick={retryFolder} />{/if}{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
-            {:else if loading && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
+            {:else if restorationPending && (!presentedRoute || searchDuringRoute)}{@render routePlaceholder()}
+            {:else if loading && !restorationPending && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
             {:else}<div role="rowgroup" class="file-list">{#each entries as entry (entry.id)}
               <div role="row" tabindex="-1" aria-label={entry.name} data-entry-id={entry.id} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row modified-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
@@ -3076,7 +3185,9 @@
             {#if dropPending}<p role="status">Moving {dropPending.entry.name} to {dropPending.destination.name}…</p>{/if}
             {#if dropError}<p role="alert">{dropError}</p>{/if}
             {#if pageIndex > 0 || hasMore}<div class="flex flex-wrap gap-2">{#if pageIndex > 0}<Button variant="outline" size="sm" onclick={loadPrevious} disabled={loading || bulkBusy}>Previous page</Button>{/if}{#if hasMore}<Button variant="outline" size="sm" onclick={loadMore} disabled={loading || bulkBusy}>Next page</Button>{/if}</div>{/if}
-            <p class="list-summary" role={loading && workspaceRefreshing && entries.length ? 'status' : undefined}>{loading ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
+            {#if (presentedRoute || !restorationPending) && !searchDuringRoute && !listingError}
+              <p class="list-summary" role={loading && workspaceRefreshing && entries.length ? 'status' : undefined}>{loading && !restorationPending ? 'Loading…' : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}${hasMore || pageIndex > 0 ? ' on this page' : ''}`}</p>
+            {/if}
             {/if}
             {#if notice}<Alert.Root role="status" class="workspace-notice"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
           </section>
@@ -3092,7 +3203,7 @@
         <form class="grid gap-6" aria-busy={folderBusy} onsubmit={createFolder}><div class="grid gap-2"><Label for="new-folder">Folder name</Label><Input id="new-folder" bind:ref={folderInput} bind:value={folderName} disabled={folderBusy} maxlength={255} aria-invalid={!!folderError} aria-describedby={folderError ? 'folder-error' : undefined} required /></div>{#if folderError}<p id="folder-error" role="alert">{folderError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={folderBusy} onclick={() => createOpen = false}>Cancel</Button><Button type="submit" disabled={folderBusy}>{folderBusy ? 'Creating…' : 'Create folder'}</Button></Dialog.Footer></form>
       </Dialog.Content>
     </Dialog.Root>
-    {#if share}<ShareLinks {client} entry={share.entry} onclose={closeShare} />{/if}
+    {#if share}<ShareLinks {client} entry={share.entry} bind:busy={shareBusy} onclose={closeShare} />{/if}
 
     <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !moveBusy && !bulkBusy) closeMove(); }}>
       <Dialog.Content showCloseButton={!bulkBusy && (destinationAction === 'move' || !moveBusy)} class="max-h-[85dvh] overflow-y-auto" onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger ?? moveTrigger); moveTrigger = null; bulkTrigger = null; }}>
@@ -3178,6 +3289,10 @@
 </div>
 
 <style>
+  #route-status { position: sticky; top: 8px; z-index: 1; width: fit-content; padding: 4px 8px; background: var(--background); }
+  .route-placeholder { display: grid; gap: 14px; padding: 16px 0; }
+  :is(#folder-title, #trash-heading, #account-title, #route-status):focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+  .route-placeholder span { height: var(--control-height); background: var(--muted); border-radius: var(--radius); }
   .upload-batch-report { display: grid; gap: 12px; padding-block: 12px; }
   .upload-pending { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--muted-foreground); }
   .upload-pending [role="status"] { display: grid; min-width: 0; gap: 4px; }

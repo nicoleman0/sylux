@@ -45,7 +45,7 @@ export class SessionApi {
   enableAccount(id: string): Promise<void> { return this.client.request(`/accounts/${id}/enable`, { method: 'POST' }); }
   changeRole(id: string, role: Account['role']): Promise<void> { return this.client.request(`/accounts/${id}/role`, { method: 'POST', body: { role } }); }
   resetAccount(id: string, password: string): Promise<void> { return this.client.request(`/accounts/${id}/reset`, { method: 'POST', body: { password } }); }
-  async usage(): Promise<Usage> { return validUsage(await this.client.request('/me/usage')); }
+  async usage(signal?: AbortSignal): Promise<Usage> { return validUsage(await this.client.request('/me/usage', { signal })); }
   async accountsUsage(): Promise<AllUsage> {
     const result = await this.client.request<AllUsage>('/accounts/usage');
     const volume = result?.volume;

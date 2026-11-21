@@ -120,6 +120,7 @@ async function backend(page: Page, fault?: { name: string; outcome: 'failed' | '
 }
 
 async function desktopDrop(page: Page, target: Locator, sources: Source[], fallback = false, capture = false) {
+  await expect(page.locator('.files-content')).toHaveAttribute('aria-busy', 'false');
   const dataTransfer = await page.evaluateHandle(({ sources, fallback }) => {
     const data = new DataTransfer();
     let protectedData = false;
@@ -214,6 +215,7 @@ test('chooser uploads multiple files immediately and refreshes a nested current 
   await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
   await page.getByRole('button', { name: 'Open Inner', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Inner', exact: true })).toBeFocused();
   await page.getByLabel('Choose files to upload').setInputFiles([
     { name: 'one.txt', mimeType: 'text/plain', buffer: Buffer.from('one') },
     { name: 'two.txt', mimeType: 'text/plain', buffer: Buffer.from('two') },
