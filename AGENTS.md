@@ -27,10 +27,7 @@
 
 - For installation or release changes, read `docs/docker-beta.md`.
   Read `docs/lxc.md` before native deployment work.
-- For private storage and SYL-110, start with the [OpenSpec pilot](openspec/README.md#first-use).
-  OpenSpec records current capability rules and proposed deltas. Use BMAD to
-  explore unresolved design questions and record owner decisions in Linear.
-  For later sharing work, read the [deferred research](docs/research/library-sharing.md).
+- For library sharing, read the [deferred research](docs/research/library-sharing.md).
 - For storage mutations, read `src/domain/coordinator.rs`,
   `src/persistence/mod.rs` and the affected contract tests.
 - Use `.agents/skills/verify-sylux-storage/SKILL.md` to select real storage
