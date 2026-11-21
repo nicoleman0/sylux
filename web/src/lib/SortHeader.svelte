@@ -4,17 +4,19 @@
   import LoaderCircle from '@lucide/svelte/icons/loader-circle';
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
   import { Button } from '$lib/components/ui/button/index.js';
-  let { label, column, sort, disabled = false, busy = false, onclick, class: className = '' }: {
-    label: string; column: string; sort: string; disabled?: boolean; busy?: boolean; onclick: () => void; class?: string;
+  let { label, column, sort, disabled = false, busy = false, pendingSort, onclick, class: className = '' }: {
+    label: string; column: string; sort: string; disabled?: boolean; busy?: boolean; pendingSort?: string; onclick: () => void; class?: string;
   } = $props();
   const active = $derived(sort.startsWith(`${column}_`));
   const descending = $derived(sort.endsWith('_desc'));
+  const pending = $derived(pendingSort?.startsWith(`${column}_`) ?? false);
+  const nextDirection = $derived((pendingSort ?? sort) === `${column}_asc` ? 'descending' : 'ascending');
 </script>
 
 <span class={`sort-header ${className}`} role="columnheader" aria-label={label} aria-sort={active ? descending ? 'descending' : 'ascending' : undefined}>
-  <Button variant="ghost" size="sm" class="sort-heading" disabled={disabled} aria-disabled={disabled || busy} aria-busy={busy} onclick={() => { if (!disabled && !busy) onclick(); }} aria-label={`Sort by ${label.toLowerCase()}, ${active && !descending ? 'descending' : 'ascending'}`}>
+  <Button variant="ghost" size="sm" class="sort-heading" disabled={disabled} aria-disabled={disabled || busy} aria-busy={busy || pending} onclick={() => { if (!disabled && !busy) onclick(); }} aria-label={`Sort by ${label.toLowerCase()}, ${nextDirection}`}>
     {label}
-    {#if busy}<LoaderCircle class="sort-spinner" aria-hidden="true" />{:else if active}{#if descending}<ArrowDown aria-hidden="true" />{:else}<ArrowUp aria-hidden="true" />{/if}{:else}<ChevronsUpDown aria-hidden="true" />{/if}
+    {#if busy || pending}<LoaderCircle class="sort-spinner" aria-hidden="true" />{:else if active}{#if descending}<ArrowDown aria-hidden="true" />{:else}<ArrowUp aria-hidden="true" />{/if}{:else}<ChevronsUpDown aria-hidden="true" />{/if}
   </Button>
 </span>
 

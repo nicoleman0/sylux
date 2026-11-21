@@ -1,6 +1,6 @@
 # Folder listings
 
-In Files, use **Sort files by** to choose name, file-size or modified-date order. The default is **Name: A to Z**. The choice stays selected during folder navigation and refreshes for the signed-in session. Changing it starts at the first page and clears the current selection.
+In Files, activate **Name**, **Modified** or **Size** in the list header. Activate the same header again to reverse the direction. The default is name ascending. The current rows and direction stay in place until the new page arrives. A successful sort starts at the first page and clears the selection. If a request fails, the current order stays visible and the headers remain available. The committed sort carries through folder navigation and refreshes for the signed-in session.
 
 `GET /folders/children` lists the private root. `GET /folders/{id}/children` lists a folder. Both accept `sort=name_asc` (the default), `name_desc`, `size_asc`, `size_desc`, `modified_asc` or `modified_desc`, plus `limit` (1–500, default 100) and `cursor`.
 
