@@ -108,8 +108,20 @@ if sudo bash "$fixture/reset.sh"; then fail 'Reset accepted nonempty data.'; fi
 [[ "$(sudo cat /opt/sylux/phase)" == initializing ]]
 sudo test -f /srv/sylux/marker
 sudo rm /srv/sylux/marker
+sudo docker pull alpine:3.20 >/dev/null
+reset_container=$(sudo docker create --label com.docker.compose.project=sylux alpine:3.20 true)
+if sudo bash "$fixture/reset.sh"; then fail 'Reset accepted an existing project container.'; fi
+[[ "$(sudo cat /opt/sylux/phase)" == initializing ]]
+sudo docker rm "$reset_container" >/dev/null
 sudo bash "$fixture/reset.sh"
 [[ "$(sudo cat /opt/sylux/phase)" == prepared ]]
+printf '%s\n' "$version" | sudo tee /opt/sylux/version >/dev/null
+printf 'fixture\n' | sudo tee /srv/sylux/marker >/dev/null
+if prepared=$(sudo "${install_command[@]}" 2>&1); then fail 'Prepared state accepted nonempty data.'; fi
+[[ "$prepared" == *'Data directory is not empty.'* ]]
+[[ "$(sudo cat /opt/sylux/phase)" == prepared ]]
+sudo test -f /srv/sylux/marker
+sudo rm /srv/sylux/marker /opt/sylux/version
 sudo rm /opt/sylux/phase
 sudo rmdir /opt/sylux /srv/sylux
 assert_no_install
@@ -122,14 +134,22 @@ for package in docker-ce docker-ce-cli docker-ce-rootless-extras docker-buildx-p
     packages+=("$package")
   fi
 done
+sudo systemctl stop docker.service docker.socket containerd.service
 if (( ${#packages[@]} )); then
   sudo apt-get purge --yes "${packages[@]}"
 fi
 # The Ubuntu runner also installs Compose outside APT.
-sudo rm -f -- /usr/libexec/docker/cli-plugins/docker-compose
+sudo rm -f -- /usr/libexec/docker/cli-plugins/docker-compose /run/docker.sock
+for socket in /run/docker.sock /var/run/docker.sock; do
+  if sudo test -e "$socket" || sudo test -L "$socket"; then
+    fail "Stale Docker socket remains at $socket."
+  fi
+done
 sudo bash -c '! command -v docker >/dev/null'
 elif [[ "$mode" == existing ]]; then
-  dpkg-query -W docker-ce docker-ce-cli docker-compose-plugin >/dev/null
+  for package in containerd.io docker-ce docker-ce-cli; do
+    [[ "$(dpkg-query -W -f='${db:Status-Status}' "$package")" == installed ]] || fail "Required package $package is not installed."
+  done
   docker compose version >/dev/null
 else
   fail 'Unknown Docker qualification mode.'

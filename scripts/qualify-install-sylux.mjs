@@ -20,7 +20,7 @@ const authorizationPath = '/srv/sylux/secrets/setup.authorization';
 const installer = process.env.SYLUX_QUALIFY_WRAPPER
   ? ['bash', process.env.SYLUX_QUALIFY_WRAPPER, process.env.SYLUX_QUALIFY_INSTALLER, process.env.SYLUX_QUALIFY_BUNDLE, version, '--yes']
   : ['bash', 'scripts/install-sylux.sh', version, '--yes'];
-const dockerPackageNames = mode === 'existing' ? ['docker-ce', 'docker-ce-cli', 'docker-compose-plugin'] : ['docker.io', 'docker-compose-v2'];
+const dockerPackageNames = mode === 'existing' ? ['containerd.io', 'docker-ce', 'docker-ce-cli'] : ['docker.io', 'docker-compose-v2'];
 const compose = ['docker', '--host', 'unix:///var/run/docker.sock', 'compose', '--project-directory', '/opt/sylux'];
 
 function run(file, args, input) {
@@ -29,6 +29,12 @@ function run(file, args, input) {
 
 function sudo(...args) {
   return run('sudo', args);
+}
+
+function composeSnapshot() {
+  const plugin = sudo('docker', 'info', '--format', '{{range .ClientInfo.Plugins}}{{if eq .Name "compose"}}{{.Path}}{{end}}{{end}}').trim();
+  assert(plugin.startsWith('/'), 'Compose plugin path is unavailable');
+  return [sudo('docker', 'compose', 'version'), plugin, sudo('sha256sum', plugin)];
 }
 
 function container() {
@@ -83,10 +89,12 @@ let stage = 'installing Docker, Compose and Sylux on a clean host';
 let browser;
 try {
   const initialPackages = mode === 'existing' ? run('dpkg-query', ['-W', ...dockerPackageNames]) : null;
+  const initialCompose = mode === 'existing' ? composeSnapshot() : null;
   const initialInvocation = mode === 'existing' ? sudo('systemctl', 'show', '--property=InvocationID', '--value', 'docker.service') : null;
   const first = sudo(...installer);
   if (initialPackages) {
     assert.equal(run('dpkg-query', ['-W', ...dockerPackageNames]), initialPackages);
+    assert.deepEqual(composeSnapshot(), initialCompose);
     assert.equal(sudo('systemctl', 'show', '--property=InvocationID', '--value', 'docker.service'), initialInvocation);
   }
   assert(first.includes(`Sylux is ready at ${origin}`));

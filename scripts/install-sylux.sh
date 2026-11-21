@@ -225,12 +225,16 @@ confirm_plan() {
   local answer
   cat <<'PLAN'
 Sylux uses one local Docker Compose project and serves HTTPS on 127.0.0.1:3000.
-It uses an existing compatible Engine and Compose as installed. It reserves the
-sylux service UID/GID 10001, stores the
+It reserves the sylux service UID/GID 10001, stores the
 verified release and generated TLS material in /opt/sylux, and initializes the
 private /srv/sylux data directory. It loads the versioned image and starts Sylux.
 Browser trust is a separate step you control.
 PLAN
+  if command -v docker >/dev/null; then
+    printf 'It uses the existing compatible Engine and Compose as installed.\n'
+  else
+    printf 'It will install Docker Engine and Compose and start the Docker daemon.\n'
+  fi
   if (( ${#packages[@]} )); then
     printf 'It will run apt-get update and install ca-certificates and: %s\n' "${packages[*]}"
   else
@@ -363,6 +367,14 @@ main() {
   check_existing_docker
   plan_packages
   confirm_plan "${2:-}"
+  if command -v docker >/dev/null; then
+    check_docker
+    container=$(project_containers)
+    if [[ -n "$container" ]]; then
+      [[ "$phase" != prepared && "$container" =~ ^[a-f0-9]{64}$ ]] ||
+        fail 'Unexpected containers in the sylux project. Inspect them before retrying.'
+    fi
+  fi
   install_packages "${tools[@]}"
   if ! present "$install_dir"; then
     revision=$(prepare_install "$version")
