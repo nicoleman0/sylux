@@ -1,0 +1,52 @@
+name: Docker installer qualification
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/docker-installer.yml
+      - .github/workflows/beta-release.yml
+      - scripts/*install-sylux*
+      - scripts/package-beta.sh
+      - deploy/docker/**
+      - docs/docker-beta.md
+      - README.md
+      - .nvmrc
+      - web/package-lock.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: Ubuntu 24.04 installer and first upload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install browser and check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libnss3-tools shellcheck
+          npm --prefix web ci
+          npm --prefix web exec -- playwright install --with-deps chromium
+      - name: Lint and verify the published beta.9 data assets
+        run: |
+          bash -n scripts/install-sylux.sh
+          bash -n scripts/test-install-sylux.sh
+          bash -n scripts/qualify-install-sylux.sh
+          shellcheck -x scripts/{install-sylux,test-install-sylux,qualify-install-sylux}.sh
+          assets=$(mktemp -d)
+          trap 'rm -rf -- "$assets"' EXIT
+          source scripts/install-sylux.sh
+          fetch_bundle v0.1.0-beta.9 "$assets"
+          scripts/test-install-sylux.sh "$assets"
+      - name: Qualify the checked-out installer with the published beta.9 release
+        run: scripts/qualify-install-sylux.sh

@@ -34,7 +34,15 @@ Not included: OIDC, shared folders, public sharing links and WebDAV.
 
 ## Install
 
-Docker is the primary option. Follow the [Docker beta guide](docs/docker-beta.md). It covers installing a versioned image, local accounts, private HTTPS access, backup and restore. [Native LXC installation](docs/lxc.md) is secondary and has separate qualification limits. Lost administrator credentials can be [recovered offline](docs/docker-beta.md#recover-administrator-access) with host access and the service stopped. The release image is 37 MB compressed, uses about 49 MiB of memory idle and 60 MiB under an upload workload, and is ready in under 0.1 seconds on a small x86_64 host; see [the measurements](docs/footprint.md) for the workload and limits.
+On Ubuntu 24.04 x86_64 with local ext4 storage, pick a [published beta release](https://github.com/nicoleman0/sylux/releases) that includes `install-sylux.sh`. Download and review the script from that release, then run it with the same tag.
+
+```sh
+sudo bash ./install-sylux.sh '<published beta tag>'
+```
+
+Review the host changes shown by the installer before confirming. When Sylux is ready, follow the [Docker quick start](docs/docker-beta.md#docker-quick-start) to trust the local certificate, create your administrator, and upload a file. For releases without the installer, use the [manual Docker procedure](docs/docker-beta.md#1-get-and-verify-a-published-release).
+
+The Docker guide covers [backup and restore](docs/docker-beta.md#4-stop-back-up-and-restore) and [offline administrator recovery](docs/docker-beta.md#recover-administrator-access). [Native LXC](docs/lxc.md) has a separate procedure and qualification limits. See [the measurements](docs/footprint.md) for release image size, memory and startup time.
 
 Export one account to a plain directory with the server stopped: [offline export](docs/export.md).
 
