@@ -7,8 +7,8 @@
 
 - Read `PRODUCT.md` for product direction. Favor a pleasant,
   fast, efficient and focused file server for self-hosters and small groups.
-- Linear is authoritative for priorities, scope and work state. Keep planning
-  detail there and link [direction and delivery](https://linear.app/corvus-dev/document/sylux-direction-and-delivery-5a323553eb7b).
+- Linear is authoritative for priorities, scope, issue relationships and work
+  state. Keep planning detail there and link [direction and delivery](https://linear.app/corvus-dev/document/sylux-direction-and-delivery-5a323553eb7b).
 - Follow the global `delivery` skill for Linear structure, issue content,
   statuses, model routing, the build, review and ship flow, PR permissions
   and Linear project updates.
@@ -27,9 +27,10 @@
 
 - For installation or release changes, read `docs/docker-beta.md`.
   Read `docs/lxc.md` before native deployment work.
-- For library or sharing behavior, read the [behavior contract](docs/specs/libraries-and-sharing.md).
-  Update the rule, scenario and behavior test together when behavior changes.
-  Refactors that preserve behavior can cite existing passing coverage.
+- For private storage and SYL-110, start with the [OpenSpec pilot](openspec/README.md#first-use).
+  OpenSpec records current capability rules and proposed deltas. Use BMAD to
+  explore unresolved design questions and record owner decisions in Linear.
+  For later sharing work, read the [deferred research](docs/research/library-sharing.md).
 - For storage mutations, read `src/domain/coordinator.rs`,
   `src/persistence/mod.rs` and the affected contract tests.
 - Use `.agents/skills/verify-sylux-storage/SKILL.md` to select real storage

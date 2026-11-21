@@ -1,62 +1,18 @@
-# Libraries and sharing
+# Deferred library sharing research
 
-## Why
+This reference preserves candidate behavior, open decisions and unverified
+scenarios from the [reviewed SYL-117 draft](https://github.com/nicoleman0/sylux/blob/4c3f9e1dc719c09f05bcb6f0a79f98fa529616dd/docs/specs/libraries-and-sharing.md).
+The candidates here await their own design and approval. When an issue is
+picked up, resolve its policy decisions with Nick in Linear before recording
+an OpenSpec delta. These cases are outside the active
+[SYL-110 private libraries scope](https://linear.app/corvus-dev/issue/SYL-110/create-named-libraries-and-browse-existing-files-from-my-libraries).
 
-People need to organize their files into named libraries and share selected
-content with other accounts, the signed-in instance or external recipients.
-Private storage remains the default. See the [product direction](../../PRODUCT.md).
-
-## Constraints
-
-- Linear owns delivery scope, priorities and work state. This document records
-  behavior. Each item marked **Nick approval required** is a recommendation
-  awaiting a decision. Record Nick's decisions in Linear and update the
-  affected rules and scenarios before the implementation issues start.
-- Scenarios start as **planned**. Behavior tests cite their stable scenario IDs;
-  the PR adding a test records the scenario as verified.
-
-### Shipped single-file links
-
-The [single-file link contract](../sharing.md#server-contract) remains in force.
-An active bearer URL authorizes one attachment for one file revision without a
-session. It gives no access to folders, other files or account information.
-Keep existing URLs, ownership, file and revision identity, expiry and
-revocations through migration. A live rename or move preserves the link.
-Replacement, Trash of the file or an ancestor, and owner disablement revoke it.
-Restoring the file or re-enabling the owner cannot revive it. The
-[operator procedure for restoring a backup](../sharing.md#server-contract) still
-applies.
-
-## Capabilities
-
-### Libraries and migration
-
-[SYL-110](https://linear.app/corvus-dev/issue/SYL-110/create-named-libraries-and-browse-existing-files-from-my-libraries)
-owns library identity, ownership, migration and My libraries.
-
-- **Rule.** An owner can create and browse named libraries with distinct
-  identities. Existing files remain accessible to their owner after upgrade.
-  New and migrated content is private by default. Migration creates no grants
-  or folder links and preserves the shipped single-file link contract.
-- **Nick approval required.** Show existing files in one private library per
-  account. Retain the existing hierarchy without asking owners to rearrange it.
-- **LIB-01.** Create two libraries with identically named child folders. Use
-  the keyboard to open each, reload it and reopen its saved URL. Each shows
-  its own contents. A second account sees neither library in navigation, search
-  or direct requests.
-- **LIB-02.** Upgrade accounts with existing folders, files, and active, expired
-  and revoked file links. Owners can browse their original hierarchy in one
-  private library per account, and ownership is unchanged. Active URLs still
-  serve the same revisions until expiry or
-  revocation. Old expired and revoked URLs still fail. The upgrade creates no
-  new access for another account or for an anonymous visitor.
-
-### Direct account grants
+## Direct account grants
 
 [SYL-111](https://linear.app/corvus-dev/issue/SYL-111/share-a-library-or-folder-with-another-account)
 owns direct grants, Shared with me and direct-grant revocation.
 
-- **Rule.** An owner can grant a named account access to a library or subfolder
+- **Candidate behavior.** An owner can grant a named account access to a library or subfolder
   and revoke that grant. A recipient can discover the root in Shared with me.
   The server checks current access for every request, including listings,
   metadata, deep URLs, downloads and search. Results and navigation expose only
@@ -83,12 +39,12 @@ owns direct grants, Shared with me and direct-grant revocation.
   Repeat with owner disablement and with recipient disablement. Re-enabling either account
   leaves the grant revoked.
 
-### Instance publication
+## Instance publication
 
 [SYL-112](https://linear.app/corvus-dev/issue/SYL-112/publish-a-library-to-everyone-signed-into-the-instance)
 owns library publication, withdrawal and Shared with all.
 
-- **Rule.** An authorized publisher can publish or withdraw a whole library.
+- **Candidate behavior.** An authorized publisher can publish or withdraw a whole library.
   Publication gives signed-in accounts access through Shared with all, subject
   to the same server-side checks as a direct grant. Publication alone gives
   anonymous visitors no access. Private sibling libraries remain private.
@@ -106,14 +62,14 @@ owns library publication, withdrawal and Shared with all.
   new saved URL, download and PDF preview requests are denied and discovery is
   gone. Re-enabling the owner leaves the publication withdrawn.
 
-### Overlapping grants
+## Overlapping grants
 
-This rule is shared by [Direct account grants](#direct-account-grants) and
-[Instance publication](#instance-publication). Integration assumes both grant
-modes exist. SYL-112 is accountable for approval evidence for OVR-01 and
-OVR-02; schedule SYL-111 before SYL-112 verification and closeout.
+The [direct account grant](#direct-account-grants) and
+[instance publication](#instance-publication) proposals share this candidate
+behavior. OVR-01 and OVR-02 need both grant modes to verify. The prior review
+assigned overlap evidence to SYL-112. See Linear for current dependencies.
 
-- **Rule.** Each grant is independent. Revoking a direct grant or withdrawing
+- **Candidate behavior.** Each grant is independent. Revoking a direct grant or withdrawing
   a publication removes only the access it supplied. Current access can still
   come from another direct or instance grant. Recheck discovery, search and
   requests against the remaining scope.
@@ -130,10 +86,11 @@ OVR-02; schedule SYL-111 before SYL-112 verification and closeout.
   Revoke the library grant. The nested grant still works and the rest of the
   library is private again.
 
-### Moves and Trash
+## Moves and Trash
 
-Apply these cases to each sharing mechanism within its issue scope. The
-[shipped single-file rules](#shipped-single-file-links) apply independently.
+The prior review mapped these cases to all three sharing mechanisms within
+the scope of each issue. The [existing single-file link behavior](../sharing.md)
+applies independently.
 
 - **Nick approval required.** Evaluate inherited access against the current
   live subtree. A rename or an allowed move within the same owner's storage
@@ -159,12 +116,12 @@ Apply these cases to each sharing mechanism within its issue scope. The
   the shared root. For a nested shared root, repeat by trashing and restoring
   an ancestor. Old shares stay revoked and must be explicitly recreated.
 
-### Anonymous folder links
+## Anonymous folder links
 
 [SYL-113](https://linear.app/corvus-dev/issue/SYL-113/share-a-folder-externally-through-an-expiring-public-link)
 owns the proposed folder-link extension and reuses owner link management.
 
-- **Rule.** An expiring bearer URL lets a signed-out recipient browse a folder
+- **Candidate behavior.** An expiring bearer URL lets a signed-out recipient browse a folder
   and its allowed descendants and download individual files. Every listing and
   download request checks the current token and subtree boundary, even if a
   session is present. The link exposes no private ancestors, siblings or
@@ -200,16 +157,7 @@ owns the proposed folder-link extension and reuses owner link management.
   credentials. Compare out-of-subtree, revoked, expired and disabled-owner
   requests for the same uniform denial behavior.
 
-## Non-goals
+## Prior exclusions
 
-This contract excludes cross-owner transfers, collaborative editing, group
-roles and site-wide anonymous discovery.
-
-## Success signal
-
-Each implementation proves its applicable scenarios with owner, recipient,
-unrelated and signed-out requests as relevant. A PR that changes specified
-behavior updates the rule, scenario and behavior test together. Reviewers
-verify both directions: each changed rule has a matching scenario and test,
-and each changed behavior test agrees with the rule it checks. A refactor that
-preserves behavior can cite existing passing coverage.
+The draft excluded cross-owner transfers, collaborative editing, group roles
+and site-wide anonymous discovery.
