@@ -244,6 +244,37 @@ for (const boundary of ['search', 'folder', 'session'] as const) {
   });
 }
 
+test('a pending folder sort cannot change the listing or focus restored by Back', async ({ page }) => {
+  await installSortingBackend(page);
+  await page.getByRole('button', { name: 'Open Projects', exact: true }).click();
+  await expect(page.getByText('This folder is empty', { exact: true })).toBeVisible();
+
+  const sort = folderSortHeader(page, 'Name');
+  const held = hold();
+  const descending = (url: URL) => url.pathname === '/folders/child/children' && url.searchParams.get('sort') === 'name_desc';
+  await page.route(descending, async route => {
+    await held.gate;
+    return route.fulfill({ status: 503, json: { code: 'unavailable' } });
+  });
+  const requested = page.waitForRequest(request => descending(new URL(request.url())));
+  await sort.getByRole('button').click();
+  await requested;
+  await expect(sort.getByRole('button')).toHaveAttribute('aria-busy', 'true');
+  await page.goBack();
+  const heading = page.getByRole('heading', { name: 'Files', exact: true });
+  await expect(heading).toBeFocused();
+  await expect.poll(() => names(page)).toEqual(['Projects', 'Alpha.txt']);
+
+  const stale = page.waitForResponse(response => descending(new URL(response.url())));
+  held.release();
+  await (await stale).finished();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(sort).toHaveAttribute('aria-sort', 'ascending');
+  await expect(sort.getByRole('button')).toHaveAttribute('aria-busy', 'false');
+  await expect(heading).toBeFocused();
+  await expect(page.locator('.list-summary')).toHaveText('2 items on this page');
+});
+
 for (const theme of ['light', 'dark'] as const) {
   test(`every Files sort is reachable by keyboard at 320px in ${theme} theme`, async ({ page }) => {
     await page.setViewportSize({ width: 320, height: 812 });

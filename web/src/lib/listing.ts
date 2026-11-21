@@ -42,16 +42,16 @@ export type ArchiveTicket = { url: string; name: string; entry_count: number };
 export class ListingApi {
   constructor(private readonly client: ApiClient) {}
 
-  async roots(cursor?: string | null, sort: FolderSort = 'name_asc'): Promise<RootListing> {
-    const roots = await this.client.request<RootListing>(`/folders/children?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+  async roots(cursor?: string | null, sort: FolderSort = 'name_asc', signal?: AbortSignal): Promise<RootListing> {
+    const roots = await this.client.request<RootListing>(`/folders/children?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
     if (!roots.root) throw new Error('Backend did not return the private root descriptor');
     return roots;
   }
-  children(folderId: string, cursor?: string | null, sort: FolderSort = 'name_asc'): Promise<Listing> {
-    return this.client.request(`/folders/${encodeURIComponent(folderId)}/children?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+  children(folderId: string, cursor?: string | null, sort: FolderSort = 'name_asc', signal?: AbortSignal): Promise<Listing> {
+    return this.client.request(`/folders/${encodeURIComponent(folderId)}/children?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
   }
-  path(folderId: string): Promise<{ items: Folder[] }> {
-    return this.client.request(`/folders/${encodeURIComponent(folderId)}/path`);
+  path(folderId: string, signal?: AbortSignal): Promise<{ items: Folder[] }> {
+    return this.client.request(`/folders/${encodeURIComponent(folderId)}/path`, { signal });
   }
   search(query: string, folderId: string | null, cursor?: string | null, signal?: AbortSignal, sort: ResultSort = 'name_asc'): Promise<SearchListing> {
     const params = new URLSearchParams({ q: query, limit: '100', sort });
@@ -91,8 +91,8 @@ export class ListingApi {
     if (result?.state !== 'committed' && result?.state !== 'unknown') throw new Error('Invalid copy result');
     return result.state;
   }
-  async deleted(cursor?: string | null, sort: ResultSort = 'name_asc'): Promise<TrashPage> {
-    const page = await this.client.request<TrashPage>(`/trash?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+  async deleted(cursor?: string | null, sort: ResultSort = 'name_asc', signal?: AbortSignal): Promise<TrashPage> {
+    const page = await this.client.request<TrashPage>(`/trash?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
     if (!Array.isArray(page.items) || page.items.length > 100 || typeof page.has_more !== 'boolean' ||
       (page.has_more ? !page.items.length || typeof page.next_cursor !== 'string' || !page.next_cursor || page.next_cursor === cursor : page.next_cursor !== null)) {
       throw new Error('Invalid Trash pagination response');

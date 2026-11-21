@@ -10,11 +10,10 @@
   type Link = { id: string; entry_id: string; name: string; created_at: number; expires_at: number };
   type CreatedLink = Link & { url: string };
 
-  let { client, entry, onclose }: { client: ApiClient; entry: Entry | null; onclose: () => void } = $props();
+  let { client, entry, onclose, busy = $bindable(false) }: { client: ApiClient; entry: Entry | null; onclose: () => void; busy?: boolean } = $props();
   let days = $state(7);
   let links = $state<Link[] | null>(null);
   let created = $state<CreatedLink | null>(null);
-  let busy = $state(false);
   let loading = $state(true);
   let revoking = $state<string | null>(null);
   let listError = $state(false);
