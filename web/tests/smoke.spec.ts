@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Request } from '@playwright/test';
 import { MockTransport } from '../src/lib/mock-transport';
 
 async function installBackend(page: import('@playwright/test').Page): Promise<void> {
@@ -878,15 +878,22 @@ test('late password change cannot end the next session', async ({ page }) => {
 test('late sign-in root cannot replace the next session workspace', async ({ page }) => {
   await installBackend(page);
   let release!: () => void;
-  let started!: () => void;
-  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  let started!: (request: Request) => void;
+  const waiting = new Promise<Request>((resolve) => { started = resolve; });
   const gate = new Promise<void>((resolve) => { release = resolve; });
+  let settled!: () => void;
+  const oldRouteSettled = new Promise<void>((resolve) => { settled = resolve; });
   let requests = 0;
   await page.route((url) => url.pathname === '/folders/children', async (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
     const old = ++requests === 1;
-    if (old) { started(); await gate; }
-    return route.fulfill({ json: { root: { id: old ? 'old-root' : 'new-root', parent_id: null, name: '', kind: 'folder', etag: 'root:1' }, items: [{ id: old ? 'old-folder' : 'new-folder', parent_id: old ? 'old-root' : 'new-root', name: old ? 'Old private folder' : 'New folder', kind: 'folder', etag: 'folder:1' }], next_cursor: null, has_more: false } });
+    if (old) {
+      started(route.request());
+      await gate;
+    }
+    const rootId = old ? 'old-root' : 'new-root';
+    await route.fulfill({ json: { root: { id: rootId, parent_id: null, name: '', kind: 'folder', etag: 'root:1' }, items: [{ id: old ? 'old-folder' : 'new-folder', parent_id: rootId, name: old ? 'Old private folder' : 'New folder', kind: 'folder', etag: 'folder:1' }], next_cursor: null, has_more: false } });
+    if (old) settled();
   });
   await page.route((url) => url.pathname === '/folders/new-root/children', (route) => route.fulfill({ json: { items: [{ id: 'new-file', parent_id: 'new-root', name: 'New session file', kind: 'file', size: 1, etag: 'file:1' }], next_cursor: null, has_more: false } }));
   await page.route((url) => url.pathname === '/folders/old-root/children', (route) => route.fulfill({ json: { items: [{ id: 'old-file', parent_id: 'old-root', name: 'Old private file', kind: 'file', size: 1, etag: 'file:1' }], next_cursor: null, has_more: false } }));
@@ -894,16 +901,19 @@ test('late sign-in root cannot replace the next session workspace', async ({ pag
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
-  await waiting;
+  const oldRequest = await waiting;
+  const oldFailed = page.waitForEvent('requestfailed', (request) => request === oldRequest);
   await signOut(page);
+  await oldFailed;
   await expect(page.getByRole('heading', { name: 'Sign in to Sylux' })).toBeVisible();
   await page.getByLabel('Account name').fill('owner');
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: /sign in/i }).last().click();
   await expect(page.getByText('New session file')).toBeVisible();
-  const oldResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/folders/children');
-  release(); await oldResponse; await page.evaluate(() => new Promise(requestAnimationFrame));
-  await expect(page.getByText('Old private file')).toHaveCount(0);
+  release();
+  await oldRouteSettled;
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await expect(page.getByText(/^Old private (file|folder)$/)).toHaveCount(0);
   await expect(page.getByText('New session file')).toBeVisible();
 });
 
@@ -1160,7 +1170,7 @@ for (const resource of ['accounts', 'trash'] as const) {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     await page.route(`**/${resource}${resource === 'trash' ? '?*' : ''}`, async (route) => { await gate; await route.fulfill({ status: 503 }); });
     await page.getByRole('button', { name: resource === 'accounts' ? 'Settings' : 'Trash', exact: true }).click();
-    await expect(page.getByRole('status').filter({ hasText: resource === 'accounts' ? 'Loading accounts' : 'Loading trash' })).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: resource === 'accounts' ? 'Loading accounts' : 'Opening Trash' })).toBeVisible();
     await expect(page.getByText(resource === 'accounts' ? 'No accounts to show.' : 'Trash is empty.', { exact: true })).toHaveCount(0);
     release();
     await expect(page.getByRole('alert')).toContainText(resource === 'accounts' ? 'Could not load accounts' : 'Could not load trash');
