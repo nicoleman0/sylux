@@ -89,7 +89,7 @@ test('rapid reversals preserve displayed rows and focus and ignore late successe
   const row = page.getByRole('row', { name: 'Zulu.txt', exact: true });
   await expect(row).toBeVisible();
   const rowNode = await row.elementHandle();
-  const older = [hold(), hold()];
+  const older = [hold()];
   let attempts = 0;
   await page.route('**/folders/root/children*', async route => {
     const url = new URL(route.request().url());
@@ -116,8 +116,9 @@ test('rapid reversals preserve displayed rows and focus and ignore late successe
   await page.screenshot({ path: test.info().outputPath('sylux-sort-pending.png') });
 
   await page.keyboard.press('Space');
-  await expect.poll(() => requests.at(-1)?.searchParams.get('sort')).toBe('name_asc');
   await expect(button).toHaveAccessibleName('Sort by name, descending');
+  await expect(button).toHaveAttribute('aria-busy', 'false');
+  await expect(row).toBeVisible();
   await page.keyboard.press('Enter');
   await expect(header).toHaveAttribute('aria-sort', 'descending');
   await expect(button).toHaveAttribute('aria-busy', 'false');
@@ -125,7 +126,7 @@ test('rapid reversals preserve displayed rows and focus and ignore late successe
   await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
   await expect(page).toHaveURL(/sort=name_desc$/);
 
-  for (const [index, order] of [[1, 'name_asc'], [0, 'name_desc']] as const) {
+  for (const [index, order] of [[0, 'name_desc']] as const) {
     const stale = page.waitForResponse(response => new URL(response.url()).searchParams.get('sort') === order);
     older[index].release();
     await (await stale).finished();
@@ -270,3 +271,131 @@ for (const theme of ['light', 'dark'] as const) {
     await page.screenshot({ path: test.info().outputPath(`sylux-sorting-${theme}-320.png`), fullPage: true });
   });
 }
+
+for (const staleStatus of [200, 503]) {
+  test(`refresh carries pending sort and ignores late ${staleStatus}`, async ({ page }) => {
+    const requests = await installSortingBackend(page);
+    const held = hold();
+    let first = true;
+    await page.route('**/folders/root/children*', async route => {
+      if (new URL(route.request().url()).searchParams.get('sort') !== 'name_desc' || !first) return route.fallback();
+      first = false;
+      await held.gate;
+      return route.fulfill({ status: staleStatus, json: staleStatus === 200 ? { items: [], next_cursor: null, has_more: false } : { code: 'unavailable' } });
+    });
+    await folderSortHeader(page, 'Name').getByRole('button').click();
+    await page.getByRole('button', { name: 'Refresh folder' }).click();
+    await expect(folderSortHeader(page, 'Name')).toHaveAttribute('aria-sort', 'descending');
+    await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
+    const stale = page.waitForResponse(response => new URL(response.url()).searchParams.get('sort') === 'name_desc');
+    held.release();
+    await (await stale).finished();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Next page' }).click();
+    await expect.poll(() => names(page)).toEqual(['Alpha.txt']);
+    expect(requests.at(-1)?.searchParams.get('cursor')).toBe('name_desc:next');
+  });
+
+  test(`reversing pending sort preserves page and selection against late ${staleStatus}`, async ({ page }) => {
+    await installSortingBackend(page);
+    await page.getByRole('button', { name: 'Next page' }).click();
+    await page.getByLabel('Select Zulu.txt').check();
+    const held = hold();
+    await page.route('**/folders/root/children*', async route => {
+      if (new URL(route.request().url()).searchParams.get('sort') !== 'name_desc') return route.fallback();
+      await held.gate;
+      return route.fulfill({ status: staleStatus, json: staleStatus === 200 ? { items: [], next_cursor: null, has_more: false } : { code: 'unavailable' } });
+    });
+    const button = folderSortHeader(page, 'Name').getByRole('button');
+    await button.click();
+    await button.click();
+    await expect(page.getByLabel('Select Zulu.txt')).toBeChecked();
+    await expect(page.getByRole('button', { name: 'Previous page' })).toBeEnabled();
+    const stale = page.waitForResponse(response => new URL(response.url()).searchParams.get('sort') === 'name_desc');
+    held.release();
+    await (await stale).finished();
+    await expect.poll(() => names(page)).toEqual(['Zulu.txt']);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  });
+}
+
+test('failed refresh after pending sort recovers with committed sort', async ({ page }) => {
+  await installSortingBackend(page);
+  const held = hold();
+  let count = 0;
+  await page.route('**/folders/root/children*', async route => {
+    if (new URL(route.request().url()).searchParams.get('sort') !== 'name_desc') return route.fallback();
+    if (++count === 1) { await held.gate; return route.fulfill({ json: { items: [], next_cursor: null, has_more: false } }); }
+    return route.fulfill({ status: 503, json: { code: 'unavailable' } });
+  });
+  await folderSortHeader(page, 'Name').getByRole('button').click();
+  await page.getByRole('button', { name: 'Refresh folder' }).click();
+  await expect(page.getByText('Could not load this folder. Try again.')).toBeVisible();
+  held.release();
+  await page.getByRole('button', { name: /try again/i }).click();
+  await expect(folderSortHeader(page, 'Name')).toHaveAttribute('aria-sort', 'ascending');
+  await expect.poll(() => names(page)).toEqual(['Projects', 'Alpha.txt']);
+});
+
+test('sort restores focus only when the focused row leaves', async ({ page }) => {
+  await installSortingBackend(page);
+  const held = hold();
+  await page.route('**/folders/root/children*', async route => {
+    if (new URL(route.request().url()).searchParams.get('sort') !== 'name_desc') return route.fallback();
+    await held.gate;
+    return route.fallback();
+  });
+  const header = folderSortHeader(page, 'Name').getByRole('button');
+  await header.click();
+  await page.getByRole('button', { name: 'Preview Alpha.txt' }).focus();
+  held.release();
+  await expect(header).toBeFocused();
+});
+
+for (const target of ['surviving row', 'other control'] as const) {
+  test(`sort preserves focus moved to ${target}`, async ({ page }) => {
+    await installSortingBackend(page);
+    const held = hold();
+    await page.route('**/folders/root/children*', async route => {
+      if (new URL(route.request().url()).searchParams.get('sort') !== 'name_desc') return route.fallback();
+      await held.gate;
+      return route.fallback();
+    });
+    await folderSortHeader(page, 'Name').getByRole('button').click();
+    const focus = target === 'surviving row' ? page.getByRole('button', { name: 'Open Projects' }) : page.getByRole('button', { name: 'Refresh folder' });
+    await focus.focus();
+    held.release();
+    await expect(folderSortHeader(page, 'Name')).toHaveAttribute('aria-sort', 'descending');
+    await expect(focus).toBeFocused();
+  });
+}
+
+test('folder creation refresh carries a pending sort', async ({ page }) => {
+  await installSortingBackend(page);
+  const held = hold();
+  let first = true;
+  await page.route('**/folders/root/children*', async route => {
+    if (new URL(route.request().url()).searchParams.get('sort') !== 'name_desc' || !first) return route.fallback();
+    first = false;
+    await held.gate;
+    return route.fulfill({ json: { items: [], next_cursor: null, has_more: false } });
+  });
+  await page.route('**/folders/children', route => route.request().method() === 'POST'
+    ? route.fulfill({ json: { id: 'new', parent_id: 'root', name: 'New', kind: 'folder', etag: '"new"' } }) : route.fallback());
+  await folderSortHeader(page, 'Name').getByRole('button').click();
+  await page.getByRole('button', { name: 'New folder' }).click();
+  await page.getByLabel('Folder name').fill('New');
+  await page.getByRole('button', { name: 'Create folder' }).click();
+  await expect(folderSortHeader(page, 'Name')).toHaveAttribute('aria-sort', 'descending');
+  await expect.poll(() => names(page)).toEqual(['Projects', 'Zulu.txt']);
+  held.release();
+});
+
+test('desktop size heading aligns right while narrow sorting remains visible', async ({ page }) => {
+  await installSortingBackend(page);
+  const size = folderSortHeader(page, 'Size');
+  expect(await size.evaluate(el => getComputedStyle(el).textAlign)).toBe('right');
+  await page.setViewportSize({ width: 320, height: 812 });
+  await expect(size.getByRole('button')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});

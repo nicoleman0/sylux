@@ -154,6 +154,7 @@ h1:focus, h2:focus { outline: none; }
 .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-name:hover .filename { color: var(--primary); }
 .file-row:is(:hover, :focus-within) .filename { white-space: normal; overflow-wrap: anywhere; padding-block: 8px; }
+.folder-sort-head > :nth-child(4) { text-align: right; }
 .file-size { color: var(--muted-foreground); text-align: right; font-size: var(--type-ui); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .list-summary { margin: 17px 0 0 12px; font-size: var(--type-meta); color: var(--muted-foreground); }
 .file-row :is(.file-size, .file-modified, .mobile-file-size), .trash-row :is(.file-size, .file-modified, .trash-metadata), .account-row .account-role, .sidebar-account-role, .search-location { font-family: var(--font-data); }

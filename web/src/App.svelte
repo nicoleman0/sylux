@@ -930,6 +930,7 @@
     if (!user) return false;
     if (searchQuery) { browseDirty = true; return runSearch(); }
     const generation = sessionGeneration;
+    const sort = pendingFolderSort ?? folderSort;
     let folderId = currentFolder.id;
     const requestId = ++listingRequest;
     clearSelection();
@@ -940,8 +941,9 @@
         if (!await refreshRoot() || requestId !== listingRequest) return false;
         currentFolder = folders[0]; folderPath = [currentFolder]; folderId = currentFolder.id;
       }
-      const page = await listing.children(folderId, null, folderSort);
+      const page = await listing.children(folderId, null, sort);
       if (generation !== sessionGeneration || currentFolder.id !== folderId || requestId !== listingRequest) return false;
+      folderSort = sort;
       entriesFolderId = currentFolder.id; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       moveNeedsRefresh = false;
@@ -956,6 +958,11 @@
     if (folderSortBlocked || searchQuery || accountView || settingsView || showTrash) return;
 
     const sort = nextSort(pendingFolderSort ?? folderSort, column);
+    if (pendingFolderSort && sort === folderSort) {
+      listingRequest++;
+      folderSortAttempt = null;
+      return;
+    }
     const generation = sessionGeneration;
     const navigation = navigationRequest;
     const folderId = currentFolder.id;
@@ -970,12 +977,19 @@
       const page = await listing.children(folderId, null, sort);
       if (!isCurrent()) return;
       if (!Array.isArray(page?.items)) throw new Error('Invalid sorted folder listing');
+      const focusedRow = document.activeElement?.closest('.file-row');
       clearSelection();
       folderSort = sort;
       entriesFolderId = folderId; entries = page.items;
       for (const entry of page.items) knownParents.set(entry.id, entry.parent_id);
       pageCursors = [null]; pageIndex = 0; nextCursor = page.next_cursor; hasMore = page.has_more;
       folderSortAttempt = null;
+      if (focusedRow) {
+        await tick();
+        if (isCurrent() && !focusedRow.isConnected && document.activeElement === document.body) {
+          document.querySelector<HTMLElement>(`.folder-sort-head [aria-label="${column[0].toUpperCase() + column.slice(1)}"] button`)?.focus({ preventScroll: true });
+        }
+      }
     } catch {
       if (isCurrent()) folderSortAttempt = { request, sort, failed: true };
     }

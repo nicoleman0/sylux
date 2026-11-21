@@ -65,7 +65,7 @@ async function installBackend(page: Page) {
   return { folderRequests, searchRequests, trashRequests, accounts };
 }
 
-test('folder column sort toggles, resets paging and selection, and ignores a stale response', async ({ page }) => {
+test('folder column reversal preserves paging and selection and ignores a stale response', async ({ page }) => {
   const { folderRequests } = await installBackend(page);
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
   await expect.poll(() => fileNames(page)).toEqual(['Zulu.txt']);
@@ -95,14 +95,13 @@ test('folder column sort toggles, resets paging and selection, and ignores a sta
 
   await page.keyboard.press('Enter');
   await expect(header).toHaveAttribute('aria-busy', 'false');
-  await expect(page.getByRole('group', { name: 'Selected items', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toHaveCount(0);
-  await expect.poll(() => folderRequests.at(-1)?.searchParams.get('sort')).toBe('name_asc');
-  await expect.poll(() => fileNames(page)).toEqual(['Alpha.txt', 'Bravo.txt']);
+  await expect(page.getByLabel('Select Zulu.txt', { exact: true })).toBeChecked();
+  await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeEnabled();
+  await expect.poll(() => fileNames(page)).toEqual(['Zulu.txt']);
   await expect(page.getByRole('table', { name: 'Files in current folder' }).locator('[role="columnheader"][aria-sort="ascending"]')).toHaveCount(1);
   release();
   await stale;
-  await expect.poll(() => fileNames(page)).toEqual(['Alpha.txt', 'Bravo.txt']);
+  await expect.poll(() => fileNames(page)).toEqual(['Zulu.txt']);
   await expect(page.getByRole('row', { name: 'Stale.txt', exact: true })).toHaveCount(0);
 });
 
