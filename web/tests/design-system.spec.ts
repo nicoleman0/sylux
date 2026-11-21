@@ -5,10 +5,15 @@ test('catalogue uses shared tokens and switches theme', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Design system', exact: true })).toBeVisible();
   const primary = page.locator('[data-color-token="--primary"] code');
   await expect(primary).toHaveText('#146c60');
-  await page.screenshot({ path: test.info().outputPath('sylux-modified-catalogue-light.png'), fullPage: true });
+  const sorting = page.getByRole('table', { name: 'Sorting examples' });
+  await expect(sorting.getByRole('columnheader', { name: 'Name', exact: true })).toHaveAttribute('aria-sort', 'ascending');
+  const pending = sorting.getByRole('button', { name: 'Sort by modified, descending', exact: true });
+  await expect(pending).toHaveAttribute('aria-busy', 'true');
+  await expect(pending).toBeEnabled();
+  await page.screenshot({ path: test.info().outputPath('sylux-modified-catalogue-light.png'), fullPage: true, animations: 'disabled' });
   await page.getByRole('button', { name: 'Use dark theme' }).click();
   await expect(primary).toHaveText('#8bd0bb');
-  await page.screenshot({ path: test.info().outputPath('sylux-modified-catalogue-dark.png'), fullPage: true });
+  await page.screenshot({ path: test.info().outputPath('sylux-modified-catalogue-dark.png'), fullPage: true, animations: 'disabled' });
   await expect(page.getByRole('button', { name: 'Unavailable' })).toBeDisabled();
   await expect(page.getByLabel('Disabled field')).toBeDisabled();
   await page.evaluate(() => document.documentElement.style.setProperty('--type-ui', '15px'));

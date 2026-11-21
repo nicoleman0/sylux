@@ -1,3 +1,4 @@
+import { chooseFolderSort, folderSortHeader } from './fixtures/folder-sort';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { expect, test, type Page } from '@playwright/test';
@@ -74,8 +75,9 @@ test('modified sorting resets page and selection and persists across navigation 
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
   await expect.poll(() => names(page)).toEqual(['Invalid.txt', 'Legacy.txt', 'Null.txt']);
   await page.getByLabel('Select Legacy.txt', { exact: true }).check();
-  const sort = page.getByLabel('Sort files by', { exact: true });
-  await sort.selectOption('modified_desc');
+  const modified = folderSortHeader(page, 'Modified');
+  const sort = modified.getByRole('button');
+  await chooseFolderSort(page, 'Modified', 'descending');
   await expect.poll(() => names(page)).toEqual(['Projects', 'Midnight.txt', 'Epoch.txt']);
   await expect(page.getByRole('group', { name: 'Selected items', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toHaveCount(0);
@@ -86,13 +88,14 @@ test('modified sorting resets page and selection and persists across navigation 
   await page.goBack();
   await expect.poll(() => names(page)).toEqual(['Projects', 'Midnight.txt', 'Epoch.txt']);
   await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
-  await expect(sort).toHaveValue('modified_desc');
-  await sort.selectOption('modified_asc');
+  await expect(modified).toHaveAttribute('aria-sort', 'descending');
+  await sort.click();
   await expect.poll(() => names(page)).toEqual(['Projects', 'Epoch.txt', 'Midnight.txt']);
 });
 
 test('failed modified sort retries the selected order and stale pages restart it', async ({ page }) => {
   const requests = await installBackend(page, true);
+  await chooseFolderSort(page, 'Modified', 'ascending');
   let fail = true;
   let stale = false;
   await page.route('**/folders/root/children*', route => {
@@ -102,12 +105,13 @@ test('failed modified sort retries the selected order and stale pages restart it
     if (stale && url.searchParams.has('cursor')) { stale = false; return route.fulfill({ status: 409, json: { code: 'listing_changed' } }); }
     return route.fallback();
   });
-  const sort = page.getByLabel('Sort files by', { exact: true });
-  await sort.selectOption('modified_desc');
-  await expect(page.getByRole('alert')).toContainText('Could not open this folder');
-  await expect(sort).toHaveValue('modified_desc');
+  const modified = folderSortHeader(page, 'Modified');
+  const sort = modified.getByRole('button');
+  await sort.click();
+  await expect(page.getByRole('alert')).toContainText('Could not sort files');
+  await expect(modified).toHaveAttribute('aria-sort', 'ascending');
   fail = false;
-  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await sort.click();
   await expect.poll(() => names(page)).toEqual(['Projects', 'Midnight.txt', 'Epoch.txt']);
   stale = true;
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
@@ -123,11 +127,13 @@ for (const theme of ['light', 'dark'] as const) {
       await page.setViewportSize({ width, height: 900 });
       await page.emulateMedia({ colorScheme: theme });
       await installBackend(page);
-      const sort = page.getByLabel('Sort files by', { exact: true });
+      const modified = folderSortHeader(page, 'Modified');
+      const sort = modified.getByRole('button');
       await sort.focus();
-      await page.keyboard.press('m');
       await page.keyboard.press('Enter');
-      await expect(sort).toHaveValue('modified_desc');
+      await expect(modified).toHaveAttribute('aria-sort', 'ascending');
+      await page.keyboard.press('Space');
+      await expect(modified).toHaveAttribute('aria-sort', 'descending');
       await expect(sort).toBeFocused();
       const row = page.getByRole('row', { name: 'Midnight.txt', exact: true });
       await expect(row.locator(width === 375 ? '.mobile-file-size time' : '.file-modified time')).toBeVisible();

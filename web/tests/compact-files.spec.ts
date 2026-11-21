@@ -1,3 +1,4 @@
+import { folderSortHeader } from './fixtures/folder-sort';
 import { expect, test, type Page } from '@playwright/test';
 
 const longNames = ['A', 'B'].map(suffix => `Annual-financial-report-${'shared-section-'.repeat(7)}${suffix}.pdf`);
@@ -27,7 +28,8 @@ for (const theme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: theme });
     await workspace(page);
     await expect(page.getByRole('group', { name: 'Selected items', exact: true })).toHaveCount(0);
-    for (const name of ['Search files and folders', 'Sort files by']) await expect(page.getByLabel(name, { exact: true })).toBeInViewport();
+    await expect(page.getByLabel('Search files and folders', { exact: true })).toBeInViewport();
+    for (const column of ['Name', 'Modified', 'Size'] as const) await expect(folderSortHeader(page, column).getByRole('button')).toBeInViewport();
     for (const name of ['New folder', 'Choose files', 'Refresh folder']) await expect(page.getByRole('button', { name, exact: true })).toBeInViewport();
     const visible = await page.locator('.selectable-row').evaluateAll(rows => rows.filter(row => { const r = row.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }).length);
     expect(visible).toBeGreaterThanOrEqual(12);
@@ -93,8 +95,8 @@ for (const theme of ['light', 'dark'] as const) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.evaluate(() => document.documentElement.style.zoom = '2');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.getByLabel('Sort files by', { exact: true }).focus();
-    await expect(page.getByLabel('Sort files by', { exact: true })).toBeFocused();
+    await folderSortHeader(page, 'Name').getByRole('button').focus();
+    await expect(folderSortHeader(page, 'Name').getByRole('button')).toBeFocused();
     await page.screenshot({ path: test.info().outputPath(`syl41-zoom-${theme}.png`) });
   });
 }

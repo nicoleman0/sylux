@@ -86,7 +86,13 @@
     </section>
     <section class="catalogue-section" aria-labelledby="sorting-title">
       <h2 id="sorting-title">Sortable headings</h2>
-      <div role="table" aria-label="Sorting examples"><div role="row" class="flex flex-wrap gap-3"><SortHeader label="Name" column="name" sort="name_asc" onclick={() => {}} /><SortHeader label="Modified" column="modified" sort="name_asc" onclick={() => {}} /><SortHeader label="Size" column="size" sort="name_asc" disabled onclick={() => {}} /></div></div>
+      <div role="table" aria-label="Sorting examples">
+        <div role="row" class="flex flex-wrap gap-3 text-muted-foreground">
+          <SortHeader label="Name" column="name" sort="name_asc" pendingSort="modified_asc" onclick={() => {}} />
+          <SortHeader label="Modified" column="modified" sort="name_asc" pendingSort="modified_asc" onclick={() => {}} />
+          <SortHeader label="Size" column="size" sort="name_asc" pendingSort="modified_asc" disabled onclick={() => {}} />
+        </div>
+      </div>
     </section>
     <section class="catalogue-section" aria-labelledby="type-title">
       <div class="section-heading"><h2 id="type-title">Typography</h2><p>Interface text and column headings stay sans. File data uses JetBrains Mono.</p></div>

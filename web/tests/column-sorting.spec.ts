@@ -1,3 +1,4 @@
+import { folderSortHeader } from './fixtures/folder-sort';
 import { expect, test, type Page } from '@playwright/test';
 
 const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: 'root:1' };
@@ -80,20 +81,22 @@ test('folder column sort toggles, resets paging and selection, and ignores a sta
     return route.fulfill({ json: { items: [{ ...files[2], name: 'Stale.txt' }], next_cursor: null, has_more: false } });
   });
 
-  const header = page.getByRole('button', { name: 'Sort by name, descending', exact: true });
-  await expect(header).toBeVisible();
-  const headerCell = page.getByRole('table', { name: 'Files in current folder' }).getByRole('columnheader', { name: 'Name', exact: true });
+  const headerCell = folderSortHeader(page, 'Name');
+  const header = headerCell.getByRole('button');
   await expect(headerCell).toHaveAttribute('aria-sort', 'ascending');
   await header.focus();
   await page.keyboard.press('Enter');
   await expect.poll(() => folderRequests.at(-1)?.searchParams.get('sort')).toBe('name_desc');
   expect(folderRequests.at(-1)?.searchParams.has('cursor')).toBe(false);
+  await expect(headerCell).toHaveAttribute('aria-sort', 'ascending');
+  await expect(header).toHaveAttribute('aria-busy', 'true');
+  await expect(header).toBeFocused();
+  const stale = page.waitForResponse(response => new URL(response.url()).searchParams.get('sort') === 'name_desc');
+
+  await page.keyboard.press('Enter');
+  await expect(header).toHaveAttribute('aria-busy', 'false');
   await expect(page.getByRole('group', { name: 'Selected items', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toHaveCount(0);
-  const stale = page.waitForResponse(response => new URL(response.url()).searchParams.get('sort') === 'name_desc');
-  await expect(page.getByLabel('Sort files by', { exact: true })).toHaveValue('name_desc');
-
-  await page.getByLabel('Sort files by', { exact: true }).selectOption('name_asc');
   await expect.poll(() => folderRequests.at(-1)?.searchParams.get('sort')).toBe('name_asc');
   await expect.poll(() => fileNames(page)).toEqual(['Alpha.txt', 'Bravo.txt']);
   await expect(page.getByRole('table', { name: 'Files in current folder' }).locator('[role="columnheader"][aria-sort="ascending"]')).toHaveCount(1);
@@ -179,35 +182,33 @@ test('trash sorting restarts at page one and carries the new order into later pa
   await expect(rows.first()).toContainText('Alpha.txt');
 });
 
-for (const surface of ['Files', 'Search', 'Trash'] as const) {
+for (const surface of ['Search', 'Trash'] as const) {
   test(`${surface} sort stays focused and blocks duplicate activation while busy`, async ({ page }) => {
-    const { folderRequests, searchRequests, trashRequests } = await installBackend(page);
+    const { searchRequests, trashRequests } = await installBackend(page);
     if (surface === 'Search') {
       await page.getByLabel('Search files and folders', { exact: true }).fill('txt');
       await expect(page.getByRole('region', { name: 'Search results', exact: true }).getByRole('row', { name: 'Alpha.txt', exact: true })).toBeVisible();
-    } else if (surface === 'Trash') {
+    } else {
       await page.getByRole('button', { name: 'Trash', exact: true }).click();
       await expect(page.locator('.trash-row')).toHaveCount(2);
     }
 
-    const requests = surface === 'Files' ? folderRequests : surface === 'Search' ? searchRequests : trashRequests;
+    const requests = surface === 'Search' ? searchRequests : trashRequests;
     let release!: () => void;
     const gate = new Promise<void>(resolve => release = resolve);
     let intercepted = 0;
-    await page.route(surface === 'Files' ? '**/folders/root/children*' : surface === 'Search' ? '**/entries/search*' : '**/trash*', async route => {
+    await page.route(surface === 'Search' ? '**/entries/search*' : '**/trash*', async route => {
       const url = new URL(route.request().url());
       if (url.searchParams.get('sort') !== 'name_desc') return route.fallback();
       intercepted++;
       requests.push(url);
       await gate;
       if (surface === 'Search') return route.fulfill({ json: { items: sortedFiles('name_desc').slice(0, 2).map(entry => ({ entry, location: [root] })), next_cursor: null, has_more: false } });
-      const items = surface === 'Trash'
-        ? sortedFiles('name_desc').slice(0, 2).map((entry, index) => ({ ...entry, id: `trash-${entry.id}`, original_path: ['Folder'], modified_at: 1_700_000_000 + index }))
-        : sortedFiles('name_desc').slice(0, 2);
+      const items = sortedFiles('name_desc').slice(0, 2).map((entry, index) => ({ ...entry, id: `trash-${entry.id}`, original_path: ['Folder'], modified_at: 1_700_000_000 + index }));
       return route.fulfill({ json: { items, next_cursor: null, has_more: false } });
     });
 
-    const tableName = surface === 'Files' ? 'Files in current folder' : surface === 'Search' ? 'Search matches' : 'Trash items';
+    const tableName = surface === 'Search' ? 'Search matches' : 'Trash items';
     const table = page.getByRole('table', { name: tableName });
     const trigger = table.getByRole('button', { name: 'Sort by name, descending', exact: true });
     await trigger.focus();
@@ -291,17 +292,10 @@ for (const theme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme: theme });
       await installBackend(page);
 
-      if (width === 375) {
-        const sort = page.getByLabel('Sort files by', { exact: true });
-        await sort.focus();
-        await expect(sort).toBeFocused();
-        await sort.selectOption('name_desc');
-      } else {
-        const folderHeader = page.getByRole('button', { name: 'Sort by name, descending', exact: true }).first();
-        await folderHeader.focus();
-        await expect(folderHeader).toBeFocused();
-        await page.keyboard.press('Enter');
-      }
+      const folderHeader = folderSortHeader(page, 'Name').getByRole('button');
+      await folderHeader.focus();
+      await page.keyboard.press('Enter');
+      await expect(folderHeader).toBeFocused();
       await expect.poll(() => fileNames(page)).toEqual(['Zulu.txt', 'Bravo.txt']);
       await expect(page.getByRole('table', { name: 'Files in current folder' }).locator('[role="columnheader"][aria-sort="descending"]')).toHaveCount(1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

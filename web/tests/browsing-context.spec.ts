@@ -1,3 +1,4 @@
+import { chooseFolderSort, folderSortHeader } from './fixtures/folder-sort';
 import { expect, test, type Page } from '@playwright/test';
 import type { Entry, Folder } from '../src/lib/listing';
 import { parseLocation, savedContext } from '../src/lib/browsing-context';
@@ -66,7 +67,7 @@ for (const theme of ['light', 'dark']) {
       await page.setViewportSize({ width, height: 844 });
       await page.emulateMedia({ colorScheme: theme as 'light' | 'dark' });
       await backend(page); await page.goto('/'); await signIn(page);
-      await page.getByLabel('Sort files by', { exact: true }).selectOption('size_desc');
+      await chooseFolderSort(page, 'Size', 'descending');
       await page.getByLabel('Search files and folders').fill('Match');
       await expect(page.getByRole('region', { name: 'Search results' })).toBeVisible();
       await page.getByRole('button', { name: 'Next page', exact: true }).click();
@@ -83,7 +84,7 @@ for (const theme of ['light', 'dark']) {
       await page.screenshot({ path: test.info().outputPath(`sylux-context-${width}-${theme}.png`), fullPage: false });
       await page.goForward();
       await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
-      await expect(page.getByLabel('Sort files by', { exact: true })).toHaveValue('size_desc');
+      await expect(folderSortHeader(page, 'Size')).toHaveAttribute('aria-sort', 'descending');
     });
   }
 }
@@ -97,7 +98,7 @@ test('reload restores signed-in owner page after authentication; copied URL star
   await scroll(page);
   await page.reload(); await signIn(page);
   await expect(page.getByRole('button', { name: 'Preview Match 100.txt', exact: true })).toBeVisible();
-  await expect(page.getByLabel('Sort files by', { exact: true })).toHaveValue('modified_desc');
+  await expect(folderSortHeader(page, 'Modified')).toHaveAttribute('aria-sort', 'descending');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(1400);
   const copiedPage = await page.context().newPage();
   const copiedFixture = await backend(copiedPage);
@@ -107,7 +108,7 @@ test('reload restores signed-in owner page after authentication; copied URL star
   await expect(copiedPage.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
   await expect(copiedPage.getByRole('button', { name: 'Preview Match 0.txt', exact: true })).toBeVisible();
   await expect(copiedPage.getByLabel('Search files and folders')).toHaveValue('');
-  await expect(copiedPage.getByLabel('Sort files by', { exact: true })).toHaveValue('modified_desc');
+  await expect(folderSortHeader(copiedPage, 'Modified')).toHaveAttribute('aria-sort', 'descending');
   expect(copiedFixture.requests.at(-1)?.searchParams.get('cursor')).toBeNull();
   expect(copiedFixture.requests.at(-1)?.searchParams.get('sort')).toBe('modified_desc');
   await copiedPage.close();
@@ -275,7 +276,7 @@ test('transient ancestry failure retains requested URL, blocks mutations and ret
   await expect(page.getByRole('button', { name: 'New folder', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeDisabled();
   await expect(page.getByLabel('Search files and folders')).toBeDisabled();
-  await expect(page.getByLabel('Sort files by', { exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: /^Sort by/ })).toHaveCount(0);
   release();
   await expect(page.getByRole('alert')).toContainText('Could not load this folder');
   expect(new URL(page.url()).hash).toBe('#files/projects?sort=size_desc');
