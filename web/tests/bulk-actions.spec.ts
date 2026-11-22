@@ -352,6 +352,8 @@ for (const surface of ['Files', 'Search'] as const) {
           await page.mouse.click(x, y);
           await expect(header).toBeChecked();
           await expect(page.getByText('4 selected', { exact: true })).toBeVisible();
+          const toolbarRow = table.getByRole('row').filter({ has: page.getByRole('group', { name: 'Selected items' }) });
+          await expect(toolbarRow.getByRole('cell')).toHaveAttribute('aria-colspan', surface === 'Files' ? '5' : '6');
           expect(await header.boundingBox()).toEqual(box);
           await page.screenshot({ path: test.info().outputPath(`${surface}-${width}-${theme}.png`), animations: 'disabled' });
           await page.mouse.click(x, y);
