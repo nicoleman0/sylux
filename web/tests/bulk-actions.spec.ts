@@ -342,6 +342,10 @@ for (const surface of ['Files', 'Search'] as const) {
         else await installBulkBackend(page);
         if (theme === 'dark') await page.getByRole('button', { name: 'Switch to dark mode' }).click();
         const table = page.getByRole('table', { name: surface === 'Files' ? 'Files in current folder' : 'Search matches' });
+        const toolbarRows = table.locator(':scope > [role="row"]');
+        const toolbarCells = toolbarRows.locator(':scope > [role="cell"]');
+        await expect(toolbarRows).toHaveCount(0);
+        await expect(toolbarCells).toHaveCount(0);
         const header = table.getByRole('checkbox', { name: 'Select all loaded items' });
         const rows = table.getByRole('cell').getByRole('checkbox');
         await expect(rows).toHaveCount(4);
@@ -359,6 +363,8 @@ for (const surface of ['Files', 'Search'] as const) {
           await page.mouse.click(x, y);
           await expect(header).not.toBeChecked();
           await expect(table.locator('[role=cell] input:checked')).toHaveCount(0);
+          await expect(toolbarRows).toHaveCount(0);
+          await expect(toolbarCells).toHaveCount(0);
           expect(await header.boundingBox()).toEqual(box);
         }
         await header.focus();
@@ -375,6 +381,22 @@ for (const surface of ['Files', 'Search'] as const) {
     }
   }
 }
+
+test('empty Files and Search tables have no selection toolbar row or cell', async ({ page }) => {
+  await installBulkBackend(page);
+  await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+  await expect(page.getByText('This folder is empty', { exact: true })).toBeVisible();
+  const filesTable = page.getByRole('table', { name: 'Files in current folder' });
+  await expect(filesTable.locator(':scope > [role="row"]')).toHaveCount(0);
+  await expect(filesTable.locator(':scope > [role="row"] > [role="cell"]')).toHaveCount(0);
+
+  await installSearchBulkBackend(page, 0);
+  const results = page.getByRole('region', { name: 'Search results', exact: true });
+  await expect(results).toHaveAttribute('aria-busy', 'false');
+  const searchTable = page.getByRole('table', { name: 'Search matches' });
+  await expect(searchTable.locator(':scope > [role="row"]')).toHaveCount(0);
+  await expect(searchTable.locator(':scope > [role="row"] > [role="cell"]')).toHaveCount(0);
+});
 
 test('search selection supports pointer and keyboard ranges and clears on query or page changes', async ({ page }) => {
   await installSearchBulkBackend(page, 6, 4);

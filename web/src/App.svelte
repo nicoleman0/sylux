@@ -2881,14 +2881,12 @@
 {/snippet}
 
 {#snippet selectionToolbar()}
-            {#if selectedEntries.length}
               <div class="selection-toolbar" role="group" aria-label="Selected items">
                 <span aria-live="polite">{selectedEntries.length} selected</span>
                 {#if searchQuery}<span class="text-xs text-muted-foreground">Current loaded page only</span>{/if}
                 <Button variant="ghost" size="sm" disabled={!selectedIds.length || bulkBusy} onclick={clearSelectionFromToolbar}>Clear selection</Button>
-                {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={archiveBusy || bulkBusy} aria-busy={archiveBusy} onclick={() => downloadArchive(selectedEntries)}>{archiveBusy ? 'Preparing…' : 'Download'}</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
+                <Button variant="outline" size="sm" disabled={archiveBusy || bulkBusy} aria-busy={archiveBusy} onclick={() => downloadArchive(selectedEntries)}>{archiveBusy ? 'Preparing…' : 'Download'}</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>
               </div>
-            {/if}
 {/snippet}
 
 {#snippet betaNotice(withShortcuts: boolean)}
@@ -3180,7 +3178,7 @@
                 {:else if searchItems.length === 0}<p>No matching files or folders.</p>
                 {/if}
                 <div role="table" aria-label="Search matches"><div role="rowgroup" class="file-list"><div role="row" class="list-head selectable-head modified-head search-head">{@render selectionHeader(searchLoading || !!searchInputError || !!searchError)}<SortHeader label="Name" column="name" sort={searchSort} busy={searchLoading && searchSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'name'))} /><SortHeader label="Location" column="location" class="file-location" sort={searchSort} busy={searchLoading && searchSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'location'))} /><SortHeader label="Modified" column="modified" sort={searchSort} busy={searchLoading && searchSort.startsWith('modified_')} class="file-modified" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'modified'))} /><SortHeader label="Size" column="size" sort={searchSort} busy={searchLoading && searchSort.startsWith('size_')} class="file-size" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'size'))} /><span role="columnheader"><span class="sr-only">Options</span></span></div></div>
-                <div role="row"><div role="cell" aria-colspan="6">{@render selectionToolbar()}</div></div>
+                {#if selectedEntries.length}<div role="row"><div role="cell" aria-colspan="6">{@render selectionToolbar()}</div></div>{/if}
                 <div role="rowgroup" class="file-list">
                 {#if !searchLoading && !searchInputError && !searchError}
                   {#each searchItems as hit (hit.entry.id)}
@@ -3223,7 +3221,7 @@
                 </div>
               </div>
             {/if}
-            <div role="row"><div role="cell" aria-colspan="5">{@render selectionToolbar()}</div></div>
+            {#if selectedEntries.length}<div role="row"><div role="cell" aria-colspan="5">{@render selectionToolbar()}</div></div>{/if}
             {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}{#if restorationUnavailable}<Button variant="outline" class="mt-2" onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files'); }}>Open Files</Button>{:else}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy || (restorationPending && !restorationFailed)} class="mt-2" onclick={retryFolder} />{/if}{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
             {:else if restorationPending && (!presentedRoute || searchDuringRoute)}{@render routePlaceholder()}
             {:else if loading && !restorationPending && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
