@@ -3132,7 +3132,7 @@
                     {#each deletedItems as item (item.id)}
                       <li class="trash-row" role="row" aria-label={item.name}>
                         <span role="cell" class="trash-item">
-                          <span class="trash-name">{item.name}<span class="trash-kind" class:folder-icon={item.kind === 'folder'} role="img" aria-label={item.kind}>{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span></span>
+                          <span class="trash-name"><span class="trash-kind" class:folder-icon={item.kind === 'folder'} role="img" aria-label={item.kind}>{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span>{item.name}</span></span>
                           <span class="trash-metadata" aria-hidden="true">{@render modifiedDateLabel(item)} · {typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
                         </span>
                         <span role="cell" class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span>

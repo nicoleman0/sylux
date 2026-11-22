@@ -282,9 +282,11 @@ h1:focus, h2:focus { outline: none; }
 
 .trash-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .trash-row { padding-block: 0.625rem; border-top: 1px solid var(--border); }
-.trash-kind { display: inline-flex; margin-inline-start: 0.5rem; vertical-align: middle; color: var(--muted-foreground); }
+.trash-kind { display: inline-flex; flex: none; color: var(--muted-foreground); }
 .trash-kind svg { width: var(--icon-file); height: var(--icon-file); }
-.trash-name, .trash-location { display: block; }
+.trash-name { display: flex; align-items: baseline; gap: 0.5rem; }
+.trash-name > span:last-child { min-width: 0; }
+.trash-location { display: block; }
 .trash-location { color: var(--muted-foreground); font-size: var(--type-meta); }
 
 .sort-header { min-width: 0; }

@@ -78,7 +78,8 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(page.getByRole('button', { name: 'Restore notes.txt from Files / Home', exact: true })).toBeVisible();
       const row = trash.locator('.trash-row').filter({ hasText: longName });
       expect(await labelLeft(name)).toBeCloseTo(await labelLeft(title), 0);
-      expect(await labelLeft(row.locator('.trash-name'))).toBeCloseTo(await labelLeft(name), 0);
+      expect((await row.locator('.trash-kind').boundingBox())!.x).toBeCloseTo(await labelLeft(name), 0);
+      expect((await row.locator('.trash-kind').boundingBox())!.x).toBeLessThan((await row.locator('.trash-name > span:last-child').boundingBox())!.x);
       if (width === 1280) {
         for (const [column, selector] of [['Location', '.trash-location'], ['Modified', '.file-modified']]) {
           const header = table.getByRole('columnheader', { name: column }).getByRole('button');
@@ -118,7 +119,7 @@ for (const theme of ['light', 'dark'] as const) {
       const dialog = page.getByRole('dialog');
       await expect(dialog.getByRole('heading')).toHaveText('Remove 104 items permanently?');
       await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
-      await page.screenshot({ path: test.info().outputPath(`trash-confirm-${width}-${theme}.png`) });
+      await page.screenshot({ path: test.info().outputPath(`trash-confirm-${width}-${theme}.png`), animations: 'disabled' });
       backend.empty();
       await dialog.getByRole('button', { name: 'Remove permanently', exact: true }).click();
       const removed = page.getByText('Removed 104 items permanently', { exact: true });
@@ -558,8 +559,9 @@ test('permanent removal confirms server snapshot count, defaults to Cancel, and 
   expect(backend.selected()).toEqual({ kind: 'all' });
 });
 
-test('selected permanent removal submits once and clears completed feedback on navigation', async ({ page }) => {
-  const controls = await openTrash(page);
+for (const width of [390, 1280]) test(`selected permanent removal at ${width}px submits once and clears completed feedback on navigation`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  const controls = await openTrash(page, width);
   const backend = await removalRoutes(page);
   await page.getByRole('checkbox', { name: 'Select Projects', exact: true }).check();
   await page.getByRole('button', { name: 'Remove permanently', exact: true }).click();
@@ -569,6 +571,7 @@ test('selected permanent removal submits once and clears completed feedback on n
   await expect(page.getByText('Removed 105 items permanently', { exact: true })).toBeVisible();
   await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   expect(backend.submissions()).toBe(1);
+  if (width === 390) await page.getByRole('button', { name: 'Toggle Sidebar', exact: true }).click();
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   await expect(page.getByText('Removed 105 items permanently', { exact: true })).toHaveCount(0);
 });
