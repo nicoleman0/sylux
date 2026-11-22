@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { ApiClient, HttpError, type ApiTransport } from '../src/lib/api';
 import { ListingApi, type Folder, type TrashPage } from '../src/lib/listing';
 import { MockTransport } from '../src/lib/mock-transport';
@@ -50,6 +50,16 @@ async function openTrash(page: Page, width = 1280) {
   return { succeed: () => { failRestore = false; }, empty: () => { items = []; } };
 }
 
+async function labelLeft(label: Locator) {
+  return label.evaluate(element => {
+    const text = Array.from(element.childNodes).find(node => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
+    if (!text) throw new Error('Expected a text label');
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    return range.getBoundingClientRect().left;
+  });
+}
+
 for (const theme of ['light', 'dark'] as const) {
   for (const width of [390, 1280]) {
     test(`compact Trash at ${width}px in ${theme} keeps recovery and duplicate context`, async ({ page }) => {
@@ -57,6 +67,9 @@ for (const theme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme: theme });
       const backend = await openTrash(page, width);
       const trash = page.getByRole('region', { name: 'Trash', exact: true });
+      const title = trash.getByRole('heading', { name: 'Trash', exact: true });
+      const table = trash.getByRole('table', { name: 'Trash items' });
+      const name = table.getByRole('columnheader', { name: 'Name' }).getByRole('button');
       await expect(trash.getByText('Original folder:', { exact: false })).toHaveCount(0);
       await expect(trash.getByText('Restore a parent folder', { exact: false })).toHaveCount(0);
       await expect(trash.locator('.trash-row')).toHaveCount(100);
@@ -64,6 +77,17 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(page.getByRole('button', { name: /Restore notes.txt.*item reference b/ })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Restore notes.txt from Files / Home', exact: true })).toBeVisible();
       const row = trash.locator('.trash-row').filter({ hasText: longName });
+      expect(await labelLeft(name)).toBeCloseTo(await labelLeft(title), 0);
+      expect(await labelLeft(row.locator('.trash-name'))).toBeCloseTo(await labelLeft(name), 0);
+      if (width === 1280) {
+        for (const [column, selector] of [['Location', '.trash-location'], ['Modified', '.file-modified']]) {
+          const header = table.getByRole('columnheader', { name: column }).getByRole('button');
+          expect(await labelLeft(header)).toBeCloseTo((await row.locator(selector).boundingBox())!.x, 0);
+        }
+        const sizeHeading = await table.getByRole('columnheader', { name: 'Size' }).locator('svg').boundingBox();
+        const sizeCell = await row.locator('.file-size').boundingBox();
+        expect(sizeHeading!.x + sizeHeading!.width).toBeCloseTo(sizeCell!.x + sizeCell!.width, 0);
+      }
       await expect(row.locator('svg')).toHaveCount(1);
       await expect(row).toContainText(longPath.join(' / '));
       expect(await row.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
@@ -87,10 +111,29 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(restore).toHaveCount(0);
       await expect(trash.getByRole('button', { name: `Restore ${longName}`, exact: true })).toBeFocused();
       await expect(page.getByRole('status')).toContainText('Restored');
+      const removal = await removalRoutes(page, 'success', 104);
+      const empty = trash.getByRole('button', { name: 'Empty Trash', exact: true });
+      await empty.focus();
+      await page.keyboard.press('Enter');
+      const dialog = page.getByRole('dialog');
+      await expect(dialog.getByRole('heading')).toHaveText('Remove 104 items permanently?');
+      await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+      await page.screenshot({ path: test.info().outputPath(`trash-confirm-${width}-${theme}.png`) });
       backend.empty();
-      await page.getByRole('button', { name: 'Refresh trash', exact: true }).click();
-      await expect(trash.getByText('Trash is empty.', { exact: true })).toBeVisible();
+      await dialog.getByRole('button', { name: 'Remove permanently', exact: true }).click();
+      const removed = page.getByText('Removed 104 items permanently', { exact: true });
+      await expect(removed).toBeVisible();
+      expect(removal.selected()).toEqual({ kind: 'all' });
+      expect(removal.submissions()).toBe(1);
+      await expect(table).toHaveAccessibleDescription('Trash is empty.');
+      await expect(trash.getByText('Trash is empty.', { exact: true })).toHaveCSS('clip-path', 'inset(50%)');
       await expect(trash.locator('.trash-row')).toHaveCount(0);
+      await expect(empty).toBeDisabled();
+      await trash.getByRole('button', { name: 'Refresh trash', exact: true }).click();
+      await expect(removed).toHaveCount(0);
+      await expect(table).toHaveAccessibleDescription('Trash is empty.');
+      expect(await labelLeft(name)).toBeCloseTo(await labelLeft(title), 0);
+      await page.screenshot({ path: test.info().outputPath(`trash-empty-${width}-${theme}.png`) });
     });
   }
 }
@@ -128,7 +171,7 @@ test('a child can be restored after recovering its deleted parent', async ({ pag
   await page.getByRole('button', { name: 'Restore Parent', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Restore Parent', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Restore Child.txt', exact: true }).click();
-  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
 });
 
 async function pagedTrash(page: Page) {
@@ -359,7 +402,7 @@ test('initial Trash loading preserves focus moved to another control', async ({ 
   const account = page.getByRole('button', { name: 'Account', exact: true });
   await account.focus();
   await held!.fulfill({ json: { items: [], next_cursor: null, has_more: false } });
-  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   await expect(account).toBeFocused();
 });
 
@@ -474,27 +517,27 @@ test('Trash byte ordering handles UTF-16 differences within and across pages', a
   expect(across.paths).toHaveLength(2);
 });
 
-async function removalRoutes(page: Page, outcome: 'success' | 'unknown' | 'changed' = 'success') {
+async function removalRoutes(page: Page, outcome: 'success' | 'unknown' | 'changed' = 'success', count = 105) {
   let submissions = 0;
   let checks = 0;
   let operation = '';
   let selected: unknown;
   await page.route('**/trash/removals/preview', route => {
     selected = route.request().postDataJSON().selection;
-    return route.fulfill({ json: { confirmation: 'bounded-confirmation', count: 105 } });
+    return route.fulfill({ json: { confirmation: 'bounded-confirmation', count } });
   });
   await page.route('**/trash/removals', route => {
     submissions++; operation = route.request().postDataJSON().operation_id;
     expect(operation).toMatch(/^[a-f0-9]{32}$/);
     if (outcome === 'unknown') return route.abort('failed');
     if (outcome === 'changed') return route.fulfill({ status: 409, json: { code: 'listing_changed' } });
-    return route.fulfill({ json: { operation_id: operation, state: 'committed', count: 105, cleanup: 'complete' } });
+    return route.fulfill({ json: { operation_id: operation, state: 'committed', count, cleanup: 'complete' } });
   });
   await page.route('**/trash/removals/*', route => {
     if (new URL(route.request().url()).pathname.endsWith('/preview')) return route.fallback();
     checks++;
     expect(new URL(route.request().url()).pathname.split('/').at(-1)).toBe(operation);
-    return route.fulfill({ json: { operation_id: operation, state: 'committed', count: 105, cleanup: 'complete' } });
+    return route.fulfill({ json: { operation_id: operation, state: 'committed', count, cleanup: 'complete' } });
   });
   return { submissions: () => submissions, checks: () => checks, selected: () => selected };
 }
@@ -524,7 +567,7 @@ test('selected permanent removal submits once and clears completed feedback on n
   controls.empty();
   await page.getByRole('dialog').getByRole('button', { name: 'Remove permanently', exact: true }).click();
   await expect(page.getByText('Removed 105 items permanently', { exact: true })).toBeVisible();
-  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   expect(backend.submissions()).toBe(1);
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   await expect(page.getByText('Removed 105 items permanently', { exact: true })).toHaveCount(0);
@@ -706,7 +749,7 @@ for (const selection of ['selected', 'all']) test(`real preview 404 for ${select
     await page.getByRole('button', { name: 'Remove permanently', exact: true }).click();
   } else await page.getByRole('button', { name: 'Empty Trash', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   await expect(page.getByRole('alert')).toContainText('Trash changed. Review the current items and confirm again.');
 });
 
