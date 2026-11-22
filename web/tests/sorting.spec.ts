@@ -282,6 +282,9 @@ for (const theme of ['light', 'dark'] as const) {
     await installSortingBackend(page);
     await expect(page.getByLabel('Sort files by', { exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: 'Refresh folder', exact: true }).focus();
+    const selectAll = page.getByRole('checkbox', { name: 'Select all loaded items', exact: true });
+    await page.keyboard.press('Tab');
+    await expect(selectAll).toBeFocused();
     for (const [column, first, second] of [
       ['Name', 'descending', 'ascending'],
       ['Modified', 'ascending', 'descending'],

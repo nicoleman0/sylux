@@ -243,6 +243,7 @@ h1:focus, h2:focus { outline: none; }
 .file-row.modified-row, .list-head.modified-head { grid-template-columns: 44px minmax(0, 1fr) 116px 100px 44px; }
 .file-modified { color: var(--muted-foreground); font-size: var(--type-meta); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .entry-selection { display: grid; place-items: center; min-width: 44px; min-height: var(--control-height-touch); cursor: pointer; }
+.list-head:is(.folder-sort-head, .search-head) { min-height: var(--control-height-touch); }
 .entry-selection input { width: 14px; height: 14px; accent-color: var(--primary); cursor: pointer; }
 .entry-selection input:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
 .file-row.selected-row { background: var(--accent); }
@@ -250,7 +251,7 @@ h1:focus, h2:focus { outline: none; }
   .file-row.selectable-row, .list-head.selectable-head { grid-template-columns: 44px minmax(0, 1fr) 44px; gap: 8px; }
   .file-row.modified-row, .list-head.modified-head { grid-template-columns: 44px minmax(0, 1fr) 44px; }
   .list-head.folder-sort-head { display: flex; flex-wrap: wrap; gap: 4px 12px; }
-  .folder-sort-head > :first-child, .folder-sort-head > :last-child { @apply sr-only; }
+  .folder-sort-head > :last-child { @apply sr-only; }
   .modified-row > .file-modified { @apply sr-only; }
   .modified-head > .file-modified { @apply sr-only; }
   .modified-head > .file-modified .sort-heading { display: none; }
