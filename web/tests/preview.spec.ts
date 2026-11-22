@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { draftBytes, editorText, preserveLineEndings } from '../src/lib/text-edit';
+import { TextSave, draftBytes, editorText, preserveLineEndings } from '../src/lib/text-edit';
 import { expect, test } from '@playwright/test';
-import { ApiClient, ResponseTooLargeError, type ApiTransport, type RequestOptions } from '../src/lib/api';
+import { ApiClient, HttpError, ResponseTooLargeError, type ApiTransport, type RequestOptions } from '../src/lib/api';
 import type { FileEntry } from '../src/lib/listing';
 import { previewUnavailable, loadPreview, PREVIEW_LIMIT, PDF_PREVIEW_LIMIT } from '../src/lib/preview';
 import { scannedPdf, mixedPdf, manyPagesPdf, blankPdf, annotatedPdf } from './fixtures/pdf-fixtures';
@@ -437,4 +437,50 @@ test('inserted lines follow the surrounding convention and empty files use LF', 
 
 test('removing text between a bare CR and an LF keeps both logical breaks', () => {
   assert.equal(editorText(preserveLineEndings('a\rb\nc', 'a\nb\nc', 'a\n\nc')), 'a\n\nc');
+});
+
+
+test('cancel resolves a lost committed reply without discarding the result', async () => {
+  const calls: string[] = [];
+  const transport: ApiTransport = { async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    calls.push(`${options.method ?? 'GET'} ${path}`);
+    if (path === '/mutation-tickets') return { mutation_id: 'edit', ticket: 'ticket' } as T;
+    if (path === '/uploads') return {} as T;
+    if (path.endsWith('/content')) return { upload_id: 'edit', status: 'staged', length: 1, sha256: '2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881' } as T;
+    if (path.endsWith('/commit')) throw new Error('reply lost');
+    if (options.method === 'DELETE') throw new HttpError(409, { code: 'upload_already_committed', message: '', request_id: '' });
+    throw new Error('status unavailable');
+  } };
+  const client = new ApiClient(transport);
+  client.setCsrfToken('csrf');
+  const save = new TextSave(client, entry('notes.txt'), 'revision', 'parent', new Blob(['x']), new AbortController().signal);
+  expect(await save.run()).toBe('unknown');
+  expect(await save.cancel()).toBe('saved');
+  expect(calls.filter(call => call.includes('/commit'))).toHaveLength(1);
+});
+
+test('cancel resolves a lost admission that was not created', async () => {
+  const transport: ApiTransport = { async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    if (path === '/mutation-tickets') return { mutation_id: 'edit', ticket: 'ticket' } as T;
+    if (options.method === 'DELETE') throw new HttpError(404, { code: 'upload_not_found', message: '', request_id: '' });
+    throw new Error('admission reply lost');
+  } };
+  const client = new ApiClient(transport);
+  client.setCsrfToken('csrf');
+  const save = new TextSave(client, entry('notes.txt'), 'revision', 'parent', new Blob(['x']), new AbortController().signal);
+  expect(await save.run()).toBe('unknown');
+  expect(await save.cancel()).toBe('canceled');
+});
+
+test('cancel releases an admitted save after a lost content reply', async () => {
+  const transport: ApiTransport = { async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    if (path === '/mutation-tickets') return { mutation_id: 'edit', ticket: 'ticket' } as T;
+    if (path === '/uploads' || options.method === 'DELETE') return {} as T;
+    throw new Error('response lost');
+  } };
+  const client = new ApiClient(transport);
+  client.setCsrfToken('csrf');
+  const save = new TextSave(client, entry('notes.txt'), 'revision', 'parent', new Blob(['x']), new AbortController().signal);
+  expect(await save.run()).toBe('unknown');
+  expect(await save.cancel()).toBe('canceled');
 });

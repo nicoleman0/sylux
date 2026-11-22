@@ -2259,14 +2259,14 @@
     if (searchQuery) browseDirty = true;
     if (!retainingRoute && !accountView && !settingsView && !showTrash) {
       const refreshed = await refresh();
-      if (visible && generation === sessionGeneration && feedback === feedbackRevision) {
+      if (generation === sessionGeneration && feedback === feedbackRevision) {
         actionNotice = refreshed ? 'Changes saved.' : 'Changes saved. Refresh files to see them.';
         await tick();
-        if (generation === sessionGeneration && feedback === feedbackRevision && document.activeElement === document.body) {
+        if (visible && generation === sessionGeneration && feedback === feedbackRevision && document.activeElement === document.body) {
           restoreFocus(null);
         }
       }
-    } else if (visible) actionNotice = 'Changes saved.';
+    } else if (generation === sessionGeneration && feedback === feedbackRevision) actionNotice = 'Changes saved.';
   }
   let share = $state<{ entry: Entry | null; trigger: HTMLElement } | null>(null);
   let shareBusy = $state(false);

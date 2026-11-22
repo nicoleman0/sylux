@@ -1783,6 +1783,9 @@ async fn text_edit_validates_type_size_encoding_and_owner() {
         )
         .await;
     assert_eq!(append.json()["code"], "text_edit_requires_full_content");
+    let wrong_length = fixture.replacement_content(&id, &ticket, b"x").await;
+    assert_eq!(wrong_length.status, 422, "{}", wrong_length.text());
+    assert_eq!(wrong_length.json()["code"], "length_mismatch");
     let response = fixture.replacement_content(&id, &ticket, invalid).await;
     assert_eq!(response.status, 422, "{}", response.text());
     assert_eq!(response.json()["code"], "text_edit_encoding");
@@ -1843,6 +1846,38 @@ async fn text_edit_commit_rejects_a_second_staged_save_and_keeps_old_bytes_recov
     ).unwrap();
     assert_eq!(state, "deleted");
     assert_eq!(digest, Sha256::digest(original).as_slice());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn text_edit_rejects_renamed_source_at_commit() {
+    let fixture = Fixture::new("text-edit-rename").await;
+    let old = fixture.upload("notes.txt", b"Original\n").await;
+    let proposed = b"Draft\n";
+    let mut admission = fixture.replacement_admission(&old, proposed);
+    admission["replacement"]["text_revision"] = old["revision_id"].clone();
+    let (id, ticket, admission) = fixture.admit_replacement(admission).await;
+    assert_eq!(
+        fixture
+            .replacement_content(&id, &ticket, proposed)
+            .await
+            .status,
+        200
+    );
+    {
+        let db = fixture.db();
+        db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE entry SET original_name='NOTES.txt' WHERE entry_id=?1",
+                [old["id"].as_str().unwrap()],
+            )
+            .unwrap();
+    }
+    let result = fixture.replacement_commit(&id, &ticket, &admission).await;
+    assert_eq!(result.status, 412, "{}", result.text());
+    assert_eq!(result.json()["code"], "replacement_changed");
+    fixture.assert_content(&old, b"Original\n").await;
     fixture.close().await;
 }
 
