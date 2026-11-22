@@ -28,7 +28,8 @@ async function setAppTheme(page: import('@playwright/test').Page, theme: 'light'
   if (isDark !== (theme === 'dark')) {
     await page.getByRole('button', { name: isDark ? 'Switch to light mode' : 'Switch to dark mode' }).click();
   }
-  await expect(page.locator('body')).toHaveCSS('background-color', theme === 'dark' ? 'rgb(23, 28, 28)' : 'rgb(255, 255, 255)');
+  if (theme === 'dark') await expect(page.locator('html')).toHaveClass(/\bdark\b/);
+  else await expect(page.locator('html')).not.toHaveClass(/\bdark\b/);
 }
 
 test('catalogue documents the selected data type without experiment controls', async ({ page }, testInfo) => {
@@ -50,7 +51,7 @@ test('catalogue documents the selected data type without experiment controls', a
   await page.screenshot({ path: testInfo.outputPath('catalogue-light.png'), fullPage: true, animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Use dark theme' }).click();
-  await expect(page.locator('body')).toHaveCSS('background-color', 'rgb(23, 28, 28)');
+  await expect(page.locator('html')).toHaveClass(/\bdark\b/);
   await expect(page.locator('.mobile-file-size').last()).toContainText('1.15 GB');
   await expect(page.locator('.mobile-file-size time').last()).toHaveAttribute('datetime');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

@@ -4,7 +4,7 @@
   import AppSidebar from '$lib/components/app-sidebar.svelte';
   import AppearanceSettings from '$lib/AppearanceSettings.svelte';
   import BrandLogo from '$lib/BrandLogo.svelte';
-  import { appearanceStyle, defaultAppearance, readAppearance, type Appearance } from '$lib/appearance';
+  import { appearanceStyle, defaultAppearanceSurfaces, defaultAppearance, readAppearance, type Appearance } from '$lib/appearance';
   import { onMount, tick, untrack } from 'svelte';
   import MoonIcon from '@lucide/svelte/icons/moon';
   import SunIcon from '@lucide/svelte/icons/sun';
@@ -106,7 +106,7 @@
   $effect(() => {
     for (const property of appearanceProperties) document.documentElement.style.removeProperty(property);
     appearanceProperties = [];
-    for (const declaration of appearanceStyle(appearance, darkMode).split(';').filter(Boolean)) {
+    for (const declaration of appearanceStyle(appearance, darkMode, defaultAppearanceSurfaces()).split(';').filter(Boolean)) {
       const [property, value] = declaration.split(':');
       document.documentElement.style.setProperty(property, value);
       appearanceProperties.push(property);

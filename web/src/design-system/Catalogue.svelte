@@ -18,13 +18,17 @@
     { label: 'Background', token: '--background' },
     { label: 'Foreground', token: '--foreground' },
     { label: 'Primary', token: '--primary' },
+    { label: 'Primary hover', token: '--primary-hover' },
     { label: 'Primary foreground', token: '--primary-foreground' },
     { label: 'Secondary', token: '--secondary' },
     { label: 'Secondary foreground', token: '--secondary-foreground' },
     { label: 'Muted', token: '--muted' },
     { label: 'Muted foreground', token: '--muted-foreground' },
-    { label: 'Accent', token: '--accent' },
+    { label: 'Selection', token: '--accent' },
+    { label: 'Selection foreground', token: '--accent-foreground' },
+    { label: 'Dialog surface', token: '--popover' },
     { label: 'Destructive', token: '--destructive' },
+    { label: 'Destructive foreground', token: '--destructive-foreground' },
     { label: 'Border', token: '--border' },
     { label: 'Input', token: '--input' },
     { label: 'Ring', token: '--ring' },
@@ -58,12 +62,14 @@
   async function toggleTheme(): Promise<void> {
     darkMode = !darkMode;
     document.documentElement.classList.toggle('dark', darkMode);
+    document.documentElement.style.colorScheme = darkMode ? 'dark' : 'light';
     await tick();
     readColors();
   }
 
   onMount(() => {
     darkMode = document.documentElement.classList.contains('dark');
+    document.documentElement.style.colorScheme = darkMode ? 'dark' : 'light';
     readColors();
   });
 </script>
@@ -167,7 +173,7 @@
       <div class="sample-rows">
         {#if sampleSelected}<div class="selection-toolbar" role="group" aria-label="Selected sample items"><span>1 selected</span><Button.Root variant="ghost" size="sm" onclick={() => sampleSelected = false}>Clear selection</Button.Root><Button.Root variant="outline" size="sm" onclick={() => sampleNotice = 'Move selected.'}>Move selected</Button.Root></div>{/if}
         <div class="list-head selectable-head modified-head"><span aria-hidden="true"></span><span>Name</span><span class="file-modified">Modified</span><span class="file-size">Size</span><span class="sr-only">Options</span></div>
-        <article class="file-row selectable-row modified-row">
+        <article class="file-row selectable-row modified-row" class:selected-row={sampleSelected}>
           <label class="entry-selection"><input type="checkbox" aria-label="Select Projects sample" bind:checked={sampleSelected} /></label>
           <div class="name-cell"><button type="button" class="item-name" onclick={() => sampleNotice = 'Folder action selected.'}><span class="folder-icon" aria-hidden="true"><FolderIcon /></span><span class="item-label"><span class="filename">Projects</span><span class="mobile-file-size" aria-hidden="true">0 B · —</span></span></button></div>
           <span class="file-modified" title="Modified date not applicable"><span class="sr-only">Modified date not applicable</span><span aria-hidden="true">—</span></span><span class="file-size">0 B</span>
