@@ -30,15 +30,30 @@ const mix = (a: string, b: string, ratio: number) => hex(rgb(a).map((value, inde
 const luminance = (color: string) => rgb(color).map(value => value / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4).reduce((sum, value, index) => sum + value * [.2126, .7152, .0722][index], 0);
 export const contrast = (a: string, b: string) => (Math.max(luminance(a), luminance(b)) + .05) / (Math.min(luminance(a), luminance(b)) + .05);
 
+export type AppearanceSurfaces = { background: string; muted: string; sidebar: string; popover: string };
+
+export function defaultAppearanceSurfaces(): AppearanceSurfaces {
+  const sample = document.createElement('div');
+  sample.className = 'appearance-defaults';
+  sample.hidden = true;
+  document.body.append(sample);
+  const styles = getComputedStyle(sample);
+  const read = (name: string) => styles.getPropertyValue(name).trim();
+  const surfaces = { background: read('--background'), muted: read('--muted'), sidebar: read('--sidebar'), popover: read('--popover') };
+  sample.remove();
+  if (Object.values(surfaces).some(color => !/^#[\da-f]{6}$/i.test(color))) throw new Error('Invalid default appearance surface');
+  return surfaces;
+}
+
 // Adjust the chosen hue so it can also serve as readable text and a focus ring.
-export function appearanceStyle(appearance: Appearance, dark: boolean): string {
+export function appearanceStyle(appearance: Appearance, dark: boolean, surfaces: AppearanceSurfaces): string {
   if (!appearance.accentColor) return '';
-  const surface = dark ? '#1d2323' : '#ffffff';
+  const surface = surfaces.background;
   const selection = mix(surface, appearance.accentColor, .1);
   let primary = appearance.accentColor;
   for (let step = 0; step <= 100; step++) {
     primary = mix(appearance.accentColor, dark ? '#ffffff' : '#000000', step / 100);
-    if ([surface, selection, dark ? '#171c1c' : '#f6f7f7'].every(bg => contrast(primary, bg) >= 4.5)) break;
+    if ([...Object.values(surfaces), selection].every(bg => contrast(primary, bg) >= 4.5)) break;
   }
   const foreground = contrast(primary, '#ffffff') >= contrast(primary, '#000000') ? '#ffffff' : '#000000';
   return Object.entries({

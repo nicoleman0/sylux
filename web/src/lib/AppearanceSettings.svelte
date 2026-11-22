@@ -5,7 +5,7 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import BrandLogo from './BrandLogo.svelte';
   import { ApiClient, HttpError } from './api';
-  import { appearanceStyle, defaultAppearance, imageUpload, readAppearance, type Appearance, type ImageChange } from './appearance';
+  import { appearanceStyle, defaultAppearanceSurfaces, defaultAppearance, imageUpload, readAppearance, type Appearance, type ImageChange } from './appearance';
 
   let { client, instanceName, dark, busy = $bindable(false), error = $bindable(''), onsaved }: {
     client: ApiClient; instanceName: string; dark: boolean; busy?: boolean; error?: string; onsaved: (appearance: Appearance) => void;
@@ -20,10 +20,12 @@
   let notice = $state('');
   let uncertain = $state(false);
   let fileVersion = $state(0);
+  let surfaces = $state<ReturnType<typeof defaultAppearanceSurfaces> | null>(null);
   let baseAccent = $state('');
   let baseBackground = $state('');
   $effect(() => {
     dark;
+    surfaces = defaultAppearanceSurfaces();
     const sample = document.createElement('div');
     sample.className = 'appearance-defaults';
     sample.hidden = true;
@@ -109,7 +111,7 @@
     </div>
     <section aria-label="Appearance preview" class="appearance-preview-column">
       <h3>Preview</h3><p class="section-description">Only you see these changes until you save.</p>
-      <div class="appearance-preview appearance-defaults" style={appearanceStyle(draft, dark)}>
+      <div class="appearance-preview appearance-defaults" style={surfaces ? appearanceStyle(draft, dark, surfaces) : ''}>
         <div class="preview-header"><BrandLogo url={draft.logoUrl} /><span>{instanceName}</span></div>
         <div class="preview-background" style:background-color={draft.loginBackgroundColor ?? 'var(--background)'} style:background-image={draft.loginImageUrl ? `url("${draft.loginImageUrl}")` : 'none'}>
           <div class="preview-form"><h4>Sign in to {instanceName}</h4><span>Account name</span><div class="preview-input"></div><span>Password</span><div class="preview-input"></div><span class="preview-submit">Sign in</span></div>

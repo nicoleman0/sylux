@@ -3,14 +3,15 @@ import { appearanceStyle, contrast, defaultAppearance } from '../src/lib/appeara
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGMQyUkAIgYIBQAXXgOB3tP5eAAAAABJRU5ErkJggg==', 'base64');
 const asset = '/instance/appearance/assets/' + 'a'.repeat(64);
-async function fixture(page: Page) {
-  let appearance = { ...defaultAppearance };
+async function fixture(page: Page, accentColor: string | null = null) {
+  let appearance = { ...defaultAppearance, accentColor };
   let calls = 0;
   let fail = 0;
   let delay = false;
   let release = () => {};
   let lastBody: Record<string, any> = {};
   const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: 'root:1' };
+  const items = [{ id: 'budget', name: 'Q4 budget.csv', kind: 'file', parent_id: 'root', etag: 'budget:1', size: 92615, modified_at: 1763208000 }];
   await page.route('**/*', async route => {
     const path = new URL(route.request().url()).pathname;
     const method = route.request().method();
@@ -35,7 +36,7 @@ async function fixture(page: Page) {
     if (path === '/accounts') return json([{ account_id: 'owner', handle: 'owner', role: 'administrator', enabled: true }]);
     if (path === '/setup') return json({ setup_required: false });
     if (path === '/folders/children') return json({ items: [], root, next_cursor: null, has_more: false });
-    if (path === '/folders/root/children') return json({ items: [], next_cursor: null, has_more: false });
+    if (path === '/folders/root/children') return json({ items, next_cursor: null, has_more: false });
     if (path === '/folders/root/path') return json({ items: [root] });
     return route.continue();
   });
@@ -130,14 +131,50 @@ test('appearance form fits both themes and narrow layout with keyboard focus', a
   }
 });
 
-test('custom accents have readable foreground pairs in both themes', () => {
-  for (const dark of [false, true]) for (const color of ['#ffffff', '#000000', '#ff0000', '#00ff00', '#0000ff', '#ffff00', '#808080', '#fd81a4']) {
-    const tokens = Object.fromEntries(appearanceStyle({ ...defaultAppearance, accentColor: color }, dark).split(';').map(item => item.split(':')));
-    expect(contrast(tokens['--primary'], tokens['--primary-foreground'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(tokens['--primary-hover'], tokens['--primary-foreground'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(tokens['--accent'], tokens['--accent-foreground'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(tokens['--primary'], dark ? '#1d2323' : '#ffffff')).toBeGreaterThanOrEqual(4.5);
+test('custom accents have readable foreground pairs against rendered surfaces', async ({ page }) => {
+  await fixture(page);
+  await page.goto('/');
+  for (const dark of [false, true]) {
+    await page.locator('html').evaluate((node, value) => node.classList.toggle('dark', value), dark);
+    const surfaces = await page.evaluate(() => {
+      const sample = document.createElement('div'); sample.className = 'appearance-defaults'; document.body.append(sample);
+      const styles = getComputedStyle(sample);
+      const result = { background: styles.getPropertyValue('--background').trim(), muted: styles.getPropertyValue('--muted').trim(), sidebar: styles.getPropertyValue('--sidebar').trim(), popover: styles.getPropertyValue('--popover').trim() };
+      sample.remove(); return result;
+    });
+    for (const color of ['#ffffff', '#000000', '#ff0000', '#00ff00', '#0000ff', '#ffff00', '#808080', '#fd81a4', '#96c33c']) {
+      const tokens = Object.fromEntries(appearanceStyle({ ...defaultAppearance, accentColor: color }, dark, surfaces).split(';').map(item => item.split(':')));
+      for (const bg of [...Object.values(surfaces), tokens['--accent']]) expect(contrast(tokens['--primary'], bg)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(tokens['--primary'], tokens['--primary-foreground'])).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(tokens['--primary-hover'], tokens['--primary-foreground'])).toBeGreaterThanOrEqual(4.5);
+    }
   }
+});
+
+test('saved accent stays readable on hovered files across theme changes and reload', async ({ page }) => {
+  await fixture(page, '#96c33c');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto('/');
+  await page.getByLabel('Account name', { exact: true }).fill('owner');
+  await page.getByLabel('Password', { exact: true }).fill('test-password-long');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  const row = page.locator('.file-row').filter({ hasText: 'Q4 budget.csv' });
+  await expect(row).toBeVisible();
+  for (const theme of ['light', 'dark', 'light']) {
+    if (theme === 'dark') await page.getByRole('button', { name: 'Switch to dark mode' }).click();
+    if (theme === 'light' && await page.locator('html').evaluate(node => node.classList.contains('dark'))) await page.getByRole('button', { name: 'Switch to light mode' }).click();
+    await row.locator('.item-name').hover();
+    await expect.poll(async () => row.evaluate(el => {
+      const color = (value: string) => '#' + value.match(/\d+/g)!.slice(0, 3).map(n => Number(n).toString(16).padStart(2, '0')).join('');
+      const fg = color(getComputedStyle(el.querySelector('.filename')!).color);
+      const bg = color(getComputedStyle(el).backgroundColor);
+      const lum = (hex: string) => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+      return (Math.max(lum(fg), lum(bg)) + .05) / (Math.min(lum(fg), lum(bg)) + .05);
+    })).toBeGreaterThanOrEqual(4.5);
+  }
+  await page.reload();
+  await expect(page.locator('html')).not.toHaveClass(/dark/);
+  await expect.poll(() => page.locator('html').evaluate(node => node.style.getPropertyValue('--primary'))).not.toBe('');
 });
 
 test('a delayed public appearance read cannot overwrite a later save', async ({ page }) => {

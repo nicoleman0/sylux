@@ -37,6 +37,26 @@ async function installMoveBackend(page: Page) {
   return { entries, moves, setFailure: (code: string | null) => { failure = code; } };
 }
 
+test('disabled Move has a visible boundary in both themes', async ({ page }) => {
+  await installMoveBackend(page);
+  for (const dark of [false, true]) {
+    if (dark) await page.getByRole('button', { name: 'Switch to dark mode' }).click();
+    await page.getByRole('button', { name: 'Options for notes.bin' }).click();
+    await page.getByRole('menuitem', { name: 'Move', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    const button = dialog.getByRole('button', { name: 'Move here' });
+    await expect(button).toBeDisabled();
+    const colors = await button.evaluate(el => {
+      const color = (value: string) => '#' + value.match(/\d+/g)!.slice(0, 3).map(n => Number(n).toString(16).padStart(2, '0')).join('');
+      return [color(getComputedStyle(el).borderTopColor), color(getComputedStyle(el.closest('[role=dialog]')!).backgroundColor)];
+    });
+    const { contrast } = await import('../src/lib/appearance');
+    expect(contrast(colors[0]!, colors[1]!)).toBeGreaterThanOrEqual(3);
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('button', { name: 'Options for notes.bin' })).toBeFocused();
+  }
+});
+
 test('file moves stay pending until the request settles and explain collisions on narrow screens', async ({ page }, testInfo) => {
   const backend = await installMoveBackend(page);
   await page.setViewportSize({ width: 390, height: 844 });

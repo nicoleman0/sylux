@@ -43,7 +43,7 @@ Tokens provide light defaults and `.dark` overrides. Choose a role by meaning, n
 | Structure | `--border`, `--input`, `--ring` | Dividers, field boundaries and keyboard focus |
 | Sidebar | `--sidebar-*` | Navigation-specific surface, text, selection and focus |
 
-Use paired foreground/background roles together. Keep normal text at least 4.5:1 contrast and large text at least 3:1. Keep focus and essential control boundaries at least 3:1 against adjacent colors. A filled primary action uses an opaque hover color. A disabled primary action uses the muted surface and text. Reserve red for destructive actions and errors.
+Use paired foreground/background roles together. Keep normal text at least 4.5:1 contrast and large text at least 3:1. Keep focus and essential control boundaries at least 3:1 against adjacent colors. A filled primary action uses an opaque hover color. A disabled primary action uses the muted surface and text with an input-colored boundary, so its shape remains visible on dialogs. Dark outline buttons use the input-colored boundary for visibility and a 10% input-colored fill to keep the surface quiet. Reserve red for destructive actions and errors.
 
 ## Controls and surfaces
 
