@@ -12,20 +12,20 @@ Self-hosters and small groups. Account administration is occasional, rather than
 
 ## Product Purpose
 
-Private file storage with a browser interface for browsing, uploading, moving and recovering files.
+Private file storage for small groups, with a browser interface for everyday file work: browsing, uploading, organizing, sharing and recovery.
 
 ## Product Direction
 
-A focused file server for self-hosters and small groups: pleasant to use, fast and efficient. Favor clear everyday workflows and low operating overhead. Add capabilities that solve a concrete problem for these users; broad feature parity is not the goal.
+Compete for the everyday file workflows small groups use in Nextcloud while keeping Sylux's operating overhead low. Favor clear workflows and measured resource use. Add capabilities that solve a concrete problem for these users; do not pursue broad feature parity for its own sake.
 
 ## Capabilities and Constraints
 
 - Local accounts with administrator and user roles.
-- Files are private to each account by default. An owner can share one file through a revocable, expiring download link.
+- Files are private to each account by default. An owner can share one file through a revocable, expiring download link that anyone holding it can use. Public links are a current capability, not an excluded feature.
 - Preserve existing upload reconciliation, replacement confirmation and recovery boundaries.
 - Instance naming belongs in administrator Settings, persists on the server and applies to all users.
 - PDF previews render locally, with page and zoom controls and a download fallback.
-- Prototype data and account actions are simulated. The prototype is not deployment or durability evidence.
+- OIDC, shared folders and WebDAV are not currently supported or stated as planned. Do not present them as available capabilities.
 
 ## Brand Commitments
 
@@ -37,7 +37,7 @@ Sylux is the default instance name. Use short, factual copy and a quiet, familia
 - Routine actions should be evident without explanatory paragraphs.
 - Explain consequences where users could lose access or change stored files.
 - Preserve keyboard access and clear interaction feedback.
-- Treat responsiveness and resource use as part of the affected workflow. Measure suspected bottlenecks before adding complexity.
+- Treat responsiveness and resource use as part of the affected workflow. Make performance claims only when a named measurement supports them; scope claims to the measured host, release and workload.
 
 ## Evidence on Hand
 

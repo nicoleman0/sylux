@@ -17,20 +17,27 @@ Self-hosted multi-user file storage with a Rust server, Svelte interface and SQL
 
 ## Who it is for
 
-Self-hosters and small groups who want private file storage in a browser. Files are private by default. Owners can create [expiring download links](docs/sharing.md) for individual files. Sylux favors everyday workflows and low operating overhead over broad feature parity.
+Self-hosters and small groups who want a focused place to store and manage files together. Sylux aims to cover everyday [Nextcloud file workflows](https://docs.nextcloud.com/server/stable/user_manual/en/files/access_webgui.html)—accounts, folders, uploads, previews, recovery and file sharing—while keeping the service small to operate. It keeps account administration occasional and file handling in a browser.
 
-## Features
+## Current source capabilities
+
+This inventory describes the current source tree. A merged capability is not necessarily in every published beta; check the selected release's assets and guide before installing. The latest published beta may lag `main`.
 
 - Local accounts with administrator and user roles.
-- Folders, file moves, rename and recoverable deletion with [Trash and restore](docs/trash.md).
+- Private files and folders, with [move, rename, Trash and restore](docs/trash.md).
 - Replacement uploads, and [uploads up to 64 GiB that resume](docs/uploads.md) after a connection loss or tab reload, within a 24-hour window.
+- [Revocable, expiring download links](docs/sharing.md) let an owner share one file with anyone who has the link.
 - [Folder and selection downloads](docs/archives.md) as one ZIP.
 - [Folder listings](docs/folder-listings.md) sorted by name, file size or modified date.
 - [Account search](docs/search.md) by name.
 - Text, image and [PDF previews](docs/pdf-preview.md) in the browser.
 - Administrator-set [instance name and appearance](docs/instance-appearance.md).
 
-Not included: OIDC, shared folders, public sharing links and WebDAV.
+Not currently supported: OIDC, shared folders and WebDAV. These are not stated as planned features.
+
+## Operating footprint
+
+One published beta image measured 35.2 MiB compressed and 49.2 MiB idle process RSS on a 1 GiB Linux host; startup to ready had an 86 ms median. Those are measurements of one release on one host and workload, not capacity or scaling guarantees. See the [measurement method and limits](docs/footprint.md).
 
 ## Install
 
