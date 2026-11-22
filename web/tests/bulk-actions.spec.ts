@@ -114,17 +114,20 @@ test('selection works with keyboard and pointer, selects loaded items only, and 
   expect(backend.mutations).toEqual([]);
 });
 
-test('bulk move confirms a destination, reports per-item failures, and retries only failed IDs', async ({ page }) => {
+test('bulk move confirms a destination, reports per-item failures, and retries only failed IDs', async ({ page }, testInfo) => {
   const backend = await installBulkBackend(page);
   backend.failures.set('beta', { status: 409, code: 'name_conflict' });
   backend.failures.set('gamma', { status: 403, code: 'forbidden' });
   await select(page, 'alpha.bin', 'beta.bin', 'gamma.bin');
   await moveSelected(page);
+  await expect(page.getByRole('dialog')).toBeHidden();
+  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeFocused();
   await expect(page.getByRole('row', { name: 'alpha.bin', exact: true })).toHaveCount(0);
   await expect(page.getByRole('row', { name: 'beta.bin', exact: true })).toBeVisible();
   await expect(page.getByRole('row', { name: 'gamma.bin', exact: true })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Move results' }).getByText(/another.*name|name.*exists|name.*conflict|another folder/i)).toBeVisible();
   await expect(page.getByRole('region', { name: 'Move results' }).getByText(/permission|forbidden|not allowed/i)).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('bulk-move-partial-failure.png'), animations: 'disabled' });
   expect(backend.mutations).toEqual(['alpha', 'beta', 'gamma'].map(id => ({ id, action: 'move', parent: 'destination', etag: `"${id}:1"` })));
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -222,14 +225,22 @@ test('refresh reconciles committed trash beyond page one after its response fail
   expect(trashReads).toEqual([0, 100]);
 });
 
-test('bulk destination picker excludes a selected folder', async ({ page }) => {
+test('mixed selection with no valid destination hides the selected branch and returns focus', async ({ page }, testInfo) => {
   const backend = await installBulkBackend(page);
+  backend.entries.push({ id: 'nested', parent_id: 'destination', name: 'Nested', kind: 'folder', etag: '"nested:1"' });
   await select(page, 'alpha.bin', 'Destination');
-  await page.getByRole('button', { name: 'Move selected', exact: true }).click();
+  const trigger = page.getByRole('button', { name: 'Move selected', exact: true });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('button', { name: /Destination.*cannot move into itself/ })).toBeDisabled();
+  await expect(dialog.getByRole('group', { name: 'Destination folders' }).getByRole('button')).toHaveCount(0);
+  await expect(dialog.getByText('No other folders here.', { exact: true })).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Move here', exact: true })).toBeDisabled();
-  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await dialog.screenshot({ path: testInfo.outputPath('bulk-move-no-destination.png'), animations: 'disabled' });
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
   expect(backend.mutations).toEqual([]);
 });
 
