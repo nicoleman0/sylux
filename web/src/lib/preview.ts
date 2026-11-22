@@ -1,5 +1,6 @@
 import { ResponseTooLargeError, type ApiClient } from './api';
 import type { FileEntry } from './listing';
+import { TEXT_EDIT_LIMIT, editableTextName, type TextSource } from './text-edit';
 
 export const PREVIEW_LIMIT = 2 * 1024 * 1024;
 export const PDF_PREVIEW_LIMIT = 20 * 1024 * 1024;
@@ -9,7 +10,7 @@ const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif']);
 const VIDEO_EXTENSIONS = new Set(['mp4', 'm4v', 'webm', 'ogv', 'mov']);
 const AUDIO_EXTENSIONS = new Set(['mp3', 'm4a', 'aac', 'wav', 'ogg', 'oga', 'opus', 'flac']);
 export type MediaPreview = { kind: 'video' | 'audio'; url: string };
-export type Preview = { kind: 'text'; text: string } | { kind: 'image'; blob: Blob } | { kind: 'pdf'; bytes: Uint8Array<ArrayBuffer> } | MediaPreview | { kind: 'unsupported'; message: string };
+export type Preview = { kind: 'text'; text: string; edit?: TextSource } | { kind: 'image'; blob: Blob } | { kind: 'pdf'; bytes: Uint8Array<ArrayBuffer> } | MediaPreview | { kind: 'unsupported'; message: string };
 
 export function mediaPreviewKind(name: string): MediaPreview['kind'] | null {
   const extension = name.split('.').at(-1)?.toLowerCase() ?? '';
@@ -71,7 +72,13 @@ export async function loadPreview(client: ApiClient, entry: FileEntry, url: stri
   if (unavailable) return { kind: 'unsupported', message: unavailable };
   const limit = previewLimit(entry);
   let blob: Blob;
-  try { blob = await client.request<Blob>(url, { signal, maxResponseBytes: limit }); }
+  let contentEtag: string | null = null;
+  try {
+    blob = await client.request<Blob>(url, {
+      signal, maxResponseBytes: limit,
+      onResponseHeaders: (headers) => { contentEtag = headers.get('ETag'); },
+    });
+  }
   catch (error) {
     if (error instanceof ResponseTooLargeError) return tooLarge(limit);
     throw error;
@@ -99,7 +106,11 @@ export async function loadPreview(client: ApiClient, entry: FileEntry, url: stri
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) throw new Error('Binary content');
-    return { kind: 'text', text };
+    const revision = /^"([a-f0-9]{32})"$/.exec(contentEtag ?? '')?.[1];
+    const edit = editableTextName(entry.name) && bytes.length <= TEXT_EDIT_LIMIT && revision
+      ? { revision, bom: bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf }
+      : undefined;
+    return edit ? { kind: 'text', text, edit } : { kind: 'text', text };
   } catch {
     return { kind: 'unsupported', message: 'This file is not UTF-8 text. Download the file to open it.' };
   }

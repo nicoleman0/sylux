@@ -18,6 +18,7 @@
   import AccountStatus from './lib/AccountStatus.svelte';
   import HeaderIconButton from './lib/HeaderIconButton.svelte';
   import FilePreview from './lib/FilePreview.svelte';
+  import type { TextEditState } from './lib/text-edit';
   import FileIcon from '@lucide/svelte/icons/file';
   import FolderIcon from '@lucide/svelte/icons/folder';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
@@ -92,6 +93,8 @@
     return () => { clearRouteFeedback(); preference.removeEventListener('change', onChange); window.removeEventListener('popstate', restoreNavigation); window.removeEventListener('scroll', scheduleScrollSave); if (scrollSaveTimer) clearTimeout(scrollSaveTimer); window.removeEventListener('pagehide', saveNavigation); window.history.scrollRestoration = previousScrollRestoration; };
   });
   let user = $state<User | null>(null);
+  let textEdit = $state<{ ownerId: string; state: TextEditState } | null>(null);
+  let textEditSession = $state.raw<AbortController | null>(null);
   let accountView = $state(false);
   let settingsView = $state(false);
   let settingsTab = $state<'accounts' | 'instance' | 'appearance'>('accounts');
@@ -456,7 +459,7 @@
     while (value >= 1024 && index < units.length - 1) { value /= 1024; index++; }
     return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${units[index]}`;
   }
-  let sessionGeneration = 0;
+  let sessionGeneration = $state(0);
   let loggingOut = $state(false);
   let accounts = $state<Account[]>([]);
   const enabledAdministratorCount = $derived(accounts.filter((account) => account.enabled && account.role === 'administrator').length);
@@ -1039,7 +1042,7 @@
 
   function expireSession(generation: number): void {
     if (generation !== sessionGeneration || !user) return;
-    sessionGeneration++; clearAccountForms(); clearWorkspace();
+    sessionGeneration++; clearAccountForms(); clearWorkspace(true);
     client.setSessionExpiredHandler(null); client.setCsrfToken(null);
     user = null; accountView = false; settingsView = false; view = 'login';
     notice = 'Your session ended. Sign in again to continue.';
@@ -1410,6 +1413,10 @@
         notice = 'Setup complete. Sign in with the new account.';
         return;
       }
+      if (textEdit?.ownerId !== user.id) {
+        textEdit = { ownerId: user.id, state: { draft: null, operation: null, stale: false } };
+      }
+      textEditSession = new AbortController();
       recoverRemoval();
       recoverCopy();
       client.setSessionExpiredHandler(() => expireSession(generation));
@@ -1548,7 +1555,14 @@
     } catch { if (generation === sessionGeneration) accountNotice = 'Password could not be reset. Check its length and try again.'; }
     finally { if (generation === sessionGeneration) accountBusy = false; }
   }
-  function clearWorkspace(): void {
+  function clearWorkspace(preserveTextEdit = false): void {
+    textEditSession?.abort();
+    textEditSession = null;
+    if (textEdit) {
+      const { draft, operation } = textEdit.state;
+      if (!preserveTextEdit || !draft || draft.wire === draft.original) textEdit = null;
+      else if (!operation?.inProgress) textEdit.state.operation = null;
+    }
     share = null; shareBusy = false;
     clearSearch();
     archiveBusy = false; archiveTargets = [];
@@ -2248,8 +2262,26 @@
     const trigger = previewTrigger;
     const generation = sessionGeneration;
     const request = navigationRequest;
+    const fallback = accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title';
     previewEntry = null; previewTrigger = null;
-    void tick().then(() => { if (generation === sessionGeneration && request === navigationRequest) restoreFocus(trigger); });
+    void tick().then(() => { if (generation === sessionGeneration && request === navigationRequest) restoreFocus(trigger, fallback); });
+  }
+  async function textEditSaved(entry: Entry): Promise<void> {
+    const visible = previewEntry?.id === entry.id;
+    if (visible) closePreview();
+    const generation = sessionGeneration;
+    const feedback = feedbackRevision;
+    if (searchQuery) browseDirty = true;
+    if (!retainingRoute && !accountView && !settingsView && !showTrash) {
+      const refreshed = await refresh();
+      if (generation === sessionGeneration && feedback === feedbackRevision) {
+        actionNotice = refreshed ? 'Changes saved.' : 'Changes saved. Refresh files to see them.';
+        await tick();
+        if (visible && generation === sessionGeneration && feedback === feedbackRevision && document.activeElement === document.body) {
+          restoreFocus(null);
+        }
+      }
+    } else if (generation === sessionGeneration && feedback === feedbackRevision) actionNotice = 'Changes saved.';
   }
   let share = $state<{ entry: Entry | null; trigger: HTMLElement } | null>(null);
   let shareBusy = $state(false);
@@ -2976,6 +3008,14 @@
           </div>
         </header>
         <div id="main-content" class="workspace-main">
+            {#key sessionGeneration}
+              {#if textEdit?.ownerId === user.id && textEditSession}
+                <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client}
+                  bind:edit={textEdit.state} editSignal={textEditSession.signal}
+                  onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }}
+                  onresume={openPreview} onsaved={textEditSaved} />
+              {/if}
+            {/key}
             {#if archiveBusy}<p role="status" class="workspace-feedback">Preparing download…</p>{/if}
             {#if actionNotice}
               {#key feedbackRevision}<div class="action-feedback workspace-feedback">
@@ -3282,7 +3322,6 @@
         {@render betaNotice(!accountView && !settingsView && !showTrash)}
       </Sidebar.Inset>
     </Sidebar.Provider>
-    <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client} onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }} />
     <Dialog.Root open={createOpen} onOpenChange={(open) => { if (!folderBusy) createOpen = open; }}>
       <Dialog.Content showCloseButton={!folderBusy} onOpenAutoFocus={(event) => { event.preventDefault(); folderInput?.focus(); }} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(createTrigger); createTrigger = null; }}>
         <Dialog.Header><Dialog.Title>Create folder</Dialog.Title><Dialog.Description>Add a folder to {currentFolder.name}.</Dialog.Description></Dialog.Header>

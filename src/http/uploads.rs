@@ -8,16 +8,17 @@ use crate::domain::{
     authz::csrf_matches,
     coordinator::AdmissionTicket,
     upload::{
-        ActiveUpload, UploadAdmission, UploadStorage, VerifiedUploadTicket, WorkerError,
-        admission_fingerprint, blob_id_from_staging, folder_etag, generation_from_etag, hex,
-        parse_digest, random_id, revision_etag, staging_name, validate_id,
+        ActiveUpload, MAX_TEXT_EDIT_LENGTH, UploadAdmission, UploadStorage, VerifiedUploadTicket,
+        WorkerError, admission_fingerprint, blob_id_from_staging, folder_etag,
+        generation_from_etag, hex, is_editable_text, parse_digest, random_id, revision_etag,
+        staging_name, validate_id,
     },
     upload::{UPLOAD_SCOPE, issue_upload_ticket, verify_upload_ticket},
 };
 use crate::persistence::payload::{PayloadError, PublishedPayload, StagingPayload};
 use axum::{
     Json,
-    body::Body,
+    body::{Body, to_bytes},
     extract::{Path, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
@@ -237,13 +238,13 @@ fn check_destination(
     admission: &UploadAdmission,
     name_key: &[u8],
 ) -> Result<(), Response> {
-    let collision: Option<(String, String, String, i64)> = db.query_row(
-        "SELECT entry_id,original_name,kind,generation FROM entry WHERE owner_account_id=?1 AND parent_id=?2 AND name_key=?3 AND state='active'",
+    let collision: Option<(String, String, String, i64, Option<String>)> = db.query_row(
+        "SELECT entry_id,original_name,kind,generation,current_revision_id FROM entry WHERE owner_account_id=?1 AND parent_id=?2 AND name_key=?3 AND state='active'",
         params![account, admission.parent_id, name_key],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).optional().map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "name_lookup_failed"))?;
     if let Some(replacement) = &admission.replacement {
-        let Some((id, _, kind, generation)) = collision else {
+        let Some((id, name, kind, generation, revision)) = collision else {
             return Err(error(
                 StatusCode::PRECONDITION_FAILED,
                 "replacement_changed",
@@ -252,13 +253,16 @@ fn check_destination(
         if kind != "file"
             || id != replacement.entry_id
             || folder_etag(&id, generation as u64) != replacement.etag
+            || replacement.text_revision.as_ref().is_some_and(|expected| {
+                revision.as_ref() != Some(expected) || name != admission.name
+            })
         {
             return Err(error(
                 StatusCode::PRECONDITION_FAILED,
                 "replacement_changed",
             ));
         }
-    } else if let Some((id, name, kind, generation)) = collision {
+    } else if let Some((id, name, kind, generation, _)) = collision {
         return Err(finish((StatusCode::CONFLICT, Json(json!({
             "code": "name_collision", "message": "An item already has this name.", "request_id": "poc",
             "existing": { "id": id, "name": name, "kind": kind, "etag": folder_etag(&id, generation as u64) }
@@ -367,8 +371,28 @@ pub async fn mutation_ticket(
         Err("upload_too_large") => {
             return error(StatusCode::PAYLOAD_TOO_LARGE, "upload_too_large");
         }
+        Err("text_edit_too_large") => {
+            return error(StatusCode::PAYLOAD_TOO_LARGE, "text_edit_too_large");
+        }
+        Err("text_edit_type") => {
+            return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "text_edit_type");
+        }
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_upload_admission"),
     };
+    if let Some(replacement) = &request.admission.replacement
+        && let Some(revision) = &replacement.text_revision
+        && let Err(response) = super::content::validate_text_edit_source(
+            &state,
+            &headers,
+            storage,
+            &replacement.entry_id,
+            revision,
+            &request.admission.name,
+        )
+        .await
+    {
+        return response;
+    }
     let mut response = finish(
         (
             StatusCode::CREATED,
@@ -900,6 +924,24 @@ pub async fn content(
     {
         return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "octet_stream_required");
     }
+    let body = if ticket.admission.text_revision().is_some() {
+        match tokio::time::timeout(
+            storage.chunk_idle_timeout(),
+            to_bytes(body, MAX_TEXT_EDIT_LENGTH as usize),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) if bytes.len() as u64 != ticket.admission.length => {
+                return error(StatusCode::UNPROCESSABLE_ENTITY, "length_mismatch");
+            }
+            Ok(Ok(bytes)) if is_editable_text(&bytes) => Body::from(bytes),
+            Ok(Ok(_)) => return error(StatusCode::UNPROCESSABLE_ENTITY, "text_edit_encoding"),
+            Ok(Err(_)) => return error(StatusCode::BAD_REQUEST, "text_edit_body_invalid"),
+            Err(_) => return error(StatusCode::REQUEST_TIMEOUT, "chunk_idle_timeout"),
+        }
+    } else {
+        body
+    };
     let declared_digest = match ticket.admission.declared_digest() {
         Ok(digest) => digest,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_sha256"),
@@ -1582,6 +1624,9 @@ async fn append_owned(
     };
     if ticket.mutation_id != upload_id {
         return error(StatusCode::NOT_FOUND, "upload_not_found");
+    }
+    if ticket.admission.text_revision().is_some() {
+        return error(StatusCode::BAD_REQUEST, "text_edit_requires_full_content");
     }
     let Some(csrf) = one_header(&headers, "x-csrf-token").and_then(decode_secret) else {
         return error(StatusCode::FORBIDDEN, "csrf_required");
