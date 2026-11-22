@@ -18,6 +18,7 @@
   import AccountStatus from './lib/AccountStatus.svelte';
   import HeaderIconButton from './lib/HeaderIconButton.svelte';
   import FilePreview from './lib/FilePreview.svelte';
+  import type { TextEditState } from './lib/text-edit';
   import FileIcon from '@lucide/svelte/icons/file';
   import FolderIcon from '@lucide/svelte/icons/folder';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
@@ -92,6 +93,8 @@
     return () => { clearRouteFeedback(); preference.removeEventListener('change', onChange); window.removeEventListener('popstate', restoreNavigation); window.removeEventListener('scroll', scheduleScrollSave); if (scrollSaveTimer) clearTimeout(scrollSaveTimer); window.removeEventListener('pagehide', saveNavigation); window.history.scrollRestoration = previousScrollRestoration; };
   });
   let user = $state<User | null>(null);
+  let textEdit = $state<{ ownerId: string; state: TextEditState } | null>(null);
+  let textEditSession = $state.raw<AbortController | null>(null);
   let accountView = $state(false);
   let settingsView = $state(false);
   let settingsTab = $state<'accounts' | 'instance' | 'appearance'>('accounts');
@@ -1038,7 +1041,7 @@
 
   function expireSession(generation: number): void {
     if (generation !== sessionGeneration || !user) return;
-    sessionGeneration++; clearAccountForms(); clearWorkspace();
+    sessionGeneration++; clearAccountForms(); clearWorkspace(true);
     client.setSessionExpiredHandler(null); client.setCsrfToken(null);
     user = null; accountView = false; settingsView = false; view = 'login';
     notice = 'Your session ended. Sign in again to continue.';
@@ -1409,6 +1412,10 @@
         notice = 'Setup complete. Sign in with the new account.';
         return;
       }
+      if (textEdit?.ownerId !== user.id) {
+        textEdit = { ownerId: user.id, state: { draft: null, operation: null, stale: false } };
+      }
+      textEditSession = new AbortController();
       recoverRemoval();
       recoverCopy();
       client.setSessionExpiredHandler(() => expireSession(generation));
@@ -1547,7 +1554,14 @@
     } catch { if (generation === sessionGeneration) accountNotice = 'Password could not be reset. Check its length and try again.'; }
     finally { if (generation === sessionGeneration) accountBusy = false; }
   }
-  function clearWorkspace(): void {
+  function clearWorkspace(preserveTextEdit = false): void {
+    textEditSession?.abort();
+    textEditSession = null;
+    if (textEdit) {
+      const { draft, operation } = textEdit.state;
+      if (!preserveTextEdit || !draft || draft.wire === draft.original) textEdit = null;
+      else if (!operation?.inProgress) textEdit.state.operation = null;
+    }
     share = null; shareBusy = false;
     clearSearch();
     archiveBusy = false; archiveTargets = [];
@@ -2979,9 +2993,12 @@
         </header>
         <div id="main-content" class="workspace-main">
             {#key sessionGeneration}
-              <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client}
-                onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }}
-                onresume={openPreview} onsaved={textEditSaved} />
+              {#if textEdit?.ownerId === user.id && textEditSession}
+                <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client}
+                  bind:edit={textEdit.state} editSignal={textEditSession.signal}
+                  onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }}
+                  onresume={openPreview} onsaved={textEditSaved} />
+              {/if}
             {/key}
             {#if archiveBusy}<p role="status" class="workspace-feedback">Preparing download…</p>{/if}
             {#if actionNotice}

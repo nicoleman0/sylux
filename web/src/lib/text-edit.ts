@@ -1,9 +1,14 @@
-import { HttpError, type ApiClient, type MutationTicket } from './api';
+import { HttpError, type ApiClient, type MutationTicket, type RequestOptions } from './api';
 import type { FileEntry } from './listing';
 import type { UploadContentResult, UploadStatus } from './transfers';
 
 export const TEXT_EDIT_LIMIT = 256 * 1024;
 export type TextSource = { revision: string; bom: boolean };
+export type TextEditState = {
+  draft: { entry: FileEntry; source: TextSource; original: string; text: string; wire: string } | null;
+  operation: TextSave | null;
+  stale: boolean;
+};
 
 export function editableTextName(name: string): boolean {
   return /\.(md|txt)$/i.test(name);
@@ -56,19 +61,26 @@ export class TextSave {
   private inspect = false;
 
   constructor(
-    private readonly client: ApiClient,
     private readonly entry: FileEntry,
     private readonly revision: string,
     private readonly parentEtag: string,
     private readonly bytes: Blob,
-    private readonly signal: AbortSignal,
   ) {}
 
   get inProgress(): boolean { return this.issued !== undefined; }
 
-  async run(): Promise<SaveOutcome> {
-    const { client, entry, parentEtag, bytes, signal } = this;
-    const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await bytes.arrayBuffer())),
+  async run(client: ApiClient, signal: AbortSignal): Promise<SaveOutcome> {
+    const { entry, parentEtag, bytes } = this;
+    async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+      signal.throwIfAborted();
+      const result = await client.request<T>(path, { ...options, signal });
+      signal.throwIfAborted();
+      return result;
+    }
+    signal.throwIfAborted();
+    const content = await bytes.arrayBuffer();
+    signal.throwIfAborted();
+    const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', content)),
       (byte) => byte.toString(16).padStart(2, '0')).join('');
     const admission = {
       parent_id: entry.parent_id, parent_etag: parentEtag, name: entry.name,
@@ -77,8 +89,8 @@ export class TextSave {
     const finished = (state: EditStatus) => state.status === 'committed' && state.state === 'committed' &&
       !!state.revision_id && state.length === bytes.size && state.sha256 === sha256;
     try {
-      this.issued ??= await client.request<MutationTicket>('/mutation-tickets', {
-        method: 'POST', body: { scope: 'upload_create', ...admission }, signal,
+      this.issued ??= await request<MutationTicket>('/mutation-tickets', {
+        method: 'POST', body: { scope: 'upload_create', ...admission },
       });
     } catch (error) {
       return error instanceof HttpError && [404, 412].includes(error.status) ? 'stale' : 'retry';
@@ -87,17 +99,19 @@ export class TextSave {
     const path = `/uploads/${encodeURIComponent(id)}`;
     const headers = { 'X-Mutation-ID': this.issued.ticket, 'If-Match': entry.etag };
     const status = async () => {
-      const state = await client.request<EditStatus>(path, { signal });
+      const state = await request<EditStatus>(path);
       if (state.upload_id !== id || state.mutation_id !== id) throw new Error('Unexpected edit save status');
       return state;
     };
     try {
+      signal.throwIfAborted();
       if (!this.admitted) {
         try {
-          await client.request('/uploads', { method: 'POST', body: admission, headers, signal });
+          await request('/uploads', { method: 'POST', body: admission, headers });
+          signal.throwIfAborted();
           this.admitted = true;
         } catch (error) {
-          if (error instanceof HttpError && [404, 412].includes(error.status)) {
+          if (!signal.aborted && error instanceof HttpError && [404, 412].includes(error.status)) {
             this.issued = undefined;
             return 'stale';
           }
@@ -107,6 +121,7 @@ export class TextSave {
       let staged = false;
       if (this.inspect) {
         const state = await status();
+        signal.throwIfAborted();
         if (finished(state)) return 'saved';
         if (state.state === 'rejected') {
           this.issued = undefined;
@@ -118,14 +133,14 @@ export class TextSave {
       }
       this.inspect = true;
       if (!staged) {
-        const result = await client.request<UploadContentResult>(`${path}/content`, {
-          method: 'PUT', body: bytes, headers, signal,
+        const result = await request<UploadContentResult>(`${path}/content`, {
+          method: 'PUT', body: bytes, headers,
         });
         if (result.upload_id !== id || result.status !== 'staged' || result.length !== bytes.size ||
           result.sha256 !== sha256) return 'unknown';
       }
-      const result = await client.request<EditCommit>(`${path}/commit`, {
-        method: 'POST', body: { parent_etag: parentEtag, sha256 }, headers, signal,
+      const result = await request<EditCommit>(`${path}/commit`, {
+        method: 'POST', body: { parent_etag: parentEtag, sha256 }, headers,
       });
       if (result?.status !== 'committed' || result.mutation_id !== id || result.replaced_entry_id !== entry.id ||
         result.size !== bytes.size || result.sha256 !== sha256 || !result.revision_id) throw new Error('Unconfirmed edit save');
@@ -134,7 +149,8 @@ export class TextSave {
       try {
         if (finished(await status())) return 'saved';
         if (error instanceof HttpError && [404, 412].includes(error.status)) {
-          await client.request(path, { method: 'DELETE', signal });
+          await request(path, { method: 'DELETE' });
+          signal.throwIfAborted();
           this.issued = undefined;
           return 'stale';
         }
@@ -145,11 +161,12 @@ export class TextSave {
     }
   }
 
-  async cancel(): Promise<'saved' | 'canceled' | 'unknown'> {
+  async cancel(client: ApiClient, signal: AbortSignal): Promise<'saved' | 'canceled' | 'unknown'> {
     if (!this.issued) return 'canceled';
     const path = `/uploads/${encodeURIComponent(this.issued.mutation_id)}`;
     try {
-      await this.client.request(path, { method: 'DELETE', signal: this.signal });
+      signal.throwIfAborted();
+      await client.request(path, { method: 'DELETE', signal });
       return 'canceled';
     } catch (error) {
       if (error instanceof HttpError && error.code === 'upload_already_committed') return 'saved';

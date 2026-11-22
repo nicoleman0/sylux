@@ -1850,6 +1850,69 @@ async fn text_edit_commit_rejects_a_second_staged_save_and_keeps_old_bytes_recov
 }
 
 #[tokio::test]
+async fn text_edit_status_and_cancel_accept_a_new_session_for_the_same_account() {
+    let fixture = Fixture::new("text-edit-session-recovery").await;
+    let old = fixture.upload("notes.txt", b"Original\n").await;
+    let proposed = b"Draft\n";
+    let mut admission = fixture.replacement_admission(&old, proposed);
+    admission["replacement"]["text_revision"] = old["revision_id"].clone();
+    let (id, ticket, _) = fixture.admit_replacement(admission).await;
+    assert_eq!(
+        fixture
+            .replacement_content(&id, &ticket, proposed)
+            .await
+            .status,
+        200
+    );
+
+    let session = "00000000000000000000000000000203";
+    let secret = &[42_u8; 32];
+    let csrf = &[43_u8; 32];
+    {
+        let db = fixture.db();
+        let connection = db.lock().unwrap();
+        let now = unix_now();
+        connection
+            .execute(
+                "UPDATE session SET idle_expires_at=?1 WHERE session_id=?2",
+                params![now - 1, OWNER_SESSION],
+            )
+            .unwrap();
+        connection.execute(
+            "INSERT INTO session(session_id,account_id,credential_epoch,verifier,csrf_verifier,created_at,idle_expires_at,absolute_expires_at,revoked) VALUES(?1,?2,0,?3,?4,?5,?6,?7,0)",
+            params![session, OWNER_ID, verifier(secret).as_slice(), verifier(csrf).as_slice(), now, now + 3600, now + 7200],
+        ).unwrap();
+    }
+    let fresh = auth(session, secret, csrf);
+    let path = format!("/uploads/{id}");
+    for (account, expected) in [(owner_auth(), 401), (other_auth(), 404)] {
+        let status = fixture
+            .request("GET", &path, Some(&account), &[], vec![])
+            .await;
+        assert_eq!(status.status, expected, "{}", status.text());
+        let cancel = fixture
+            .mutate("DELETE", &path, &account, None, &[], vec![])
+            .await;
+        assert_eq!(cancel.status, expected, "{}", cancel.text());
+    }
+    let status = fixture
+        .request("GET", &path, Some(&fresh), &[], vec![])
+        .await;
+    assert_eq!(status.status, 200, "{}", status.text());
+    assert_eq!(status.json()["status"], "staged");
+    let cancel = fixture
+        .mutate("DELETE", &path, &fresh, None, &[], vec![])
+        .await;
+    assert_eq!(cancel.status, 204, "{}", cancel.text());
+    let status = fixture
+        .request("GET", &path, Some(&fresh), &[], vec![])
+        .await;
+    assert_eq!(status.status, 200, "{}", status.text());
+    assert_eq!(status.json()["status"], "canceled");
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn text_edit_rejects_renamed_source_at_commit() {
     let fixture = Fixture::new("text-edit-rename").await;
     let old = fixture.upload("notes.txt", b"Original\n").await;

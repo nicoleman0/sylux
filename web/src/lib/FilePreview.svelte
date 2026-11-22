@@ -2,18 +2,20 @@
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import type { ApiClient } from './api';
-  import { onDestroy, tick } from 'svelte';
+  import { tick } from 'svelte';
   import { ListingApi, type Entry, type FileEntry } from './listing';
-  import { TEXT_EDIT_LIMIT, TextSave, draftBytes, editorText, preserveLineEndings, type TextSource } from './text-edit';
+  import { TEXT_EDIT_LIMIT, TextSave, draftBytes, editorText, preserveLineEndings, type TextEditState } from './text-edit';
   import { loadPreview, mediaPreviewKind, type MediaPreview, type Preview } from './preview';
   import { getPdfPreviewCompatibilityError } from './pdf-compatibility';
   import XIcon from '@lucide/svelte/icons/x';
   import DownloadIcon from '@lucide/svelte/icons/download';
 
-  let { entry, url, client, onclose, ondownload, onresume, onsaved }: {
+  let { entry, url, client, edit = $bindable(), editSignal, onclose, ondownload, onresume, onsaved }: {
     entry: Entry | null;
     url: string;
     client: ApiClient;
+    edit: TextEditState;
+    editSignal: AbortSignal;
     onclose: () => void;
     ondownload: () => void;
     onresume: (entry: FileEntry, trigger: HTMLElement) => void;
@@ -27,22 +29,19 @@
   const isPdf = $derived(entry?.name.split('.').at(-1)?.toLowerCase() === 'pdf');
   const mediaKind = $derived(entry?.kind === 'file' ? mediaPreviewKind(entry.name) : null);
 
-  type Draft = { entry: FileEntry; source: TextSource; original: string; text: string; wire: string };
-  let draft = $state<Draft | null>(null);
-  let operation: TextSave | null = null;
   let editBusy = $state<'save' | 'cancel' | null>(null);
-  let editError = $state('');
-  let stale = $state(false);
-  let unresolved = $state(false);
+  let saveError = $state('');
   let textarea = $state<HTMLTextAreaElement | null>(null);
   let editButton = $state<HTMLElement | null>(null);
-  const session = new AbortController();
+  const draft = $derived(edit.draft);
   const editing = $derived(!!draft && entry?.id === draft.entry.id);
   const dirty = $derived(!!draft && draft.wire !== draft.original);
   const payload = $derived(draft ? draftBytes(draft.wire, draft.source.bom) : null);
   const tooLarge = $derived((payload?.size ?? 0) > TEXT_EDIT_LIMIT);
-
-  onDestroy(() => session.abort());
+  const unresolved = $derived(!!edit.operation && !editBusy);
+  const editError = $derived(edit.stale
+    ? 'This file or folder changed. Download your draft, then reopen the current file to apply your changes.'
+    : saveError || (unresolved ? 'Could not confirm the save. Retry to check the same save, or download your draft.' : ''));
 
   $effect(() => {
     if (!dirty && !unresolved && !editBusy) return;
@@ -55,83 +54,78 @@
   });
 
   async function beginEdit() {
-    if (draft || entry?.kind !== 'file' || preview?.kind !== 'text' || !preview.edit) return;
-    draft = { entry, source: preview.edit, original: preview.text, text: editorText(preview.text), wire: preview.text };
+    const signal = editSignal;
+    if (signal.aborted || draft || entry?.kind !== 'file' || preview?.kind !== 'text' || !preview.edit) return;
+    edit.draft = { entry, source: preview.edit, original: preview.text, text: editorText(preview.text), wire: preview.text };
     await tick();
-    textarea?.focus();
+    if (!signal.aborted) textarea?.focus();
   }
 
   function updateDraft(event: Event & { currentTarget: HTMLTextAreaElement }) {
-    if (!draft || editBusy || unresolved) return;
+    if (editSignal.aborted || !draft || editBusy || unresolved) return;
     const text = event.currentTarget.value;
     draft.wire = text === editorText(draft.original)
       ? draft.original : preserveLineEndings(draft.wire, draft.text, text);
     draft.text = text;
-    if (!stale) editError = '';
+    saveError = '';
   }
 
   function clearDraft() {
-    draft = null;
-    operation = null;
-    stale = false;
-    unresolved = false;
-    editError = '';
+    edit.draft = null;
+    edit.operation = null;
+    edit.stale = false;
+    saveError = '';
   }
 
   async function saveDraft() {
-    if (!editing || !draft || !dirty || !payload || tooLarge || stale || editBusy) return;
+    const signal = editSignal;
+    if (signal.aborted || !editing || !draft || !dirty || !payload || tooLarge || edit.stale || editBusy) return;
     const { entry: target, source } = draft;
     const bytes = payload;
     editBusy = 'save';
-    editError = '';
+    saveError = '';
     try {
-      if (!operation) {
-        const path = await new ListingApi(client).path(target.parent_id, session.signal);
+      if (!edit.operation) {
+        const path = await new ListingApi(client).path(target.parent_id, signal);
         const parent = path.items.at(-1);
         if (parent?.id !== target.parent_id) throw new Error('Unexpected edit location');
-        session.signal.throwIfAborted();
-        operation = new TextSave(client, target, source.revision, parent.etag, bytes, session.signal);
+        signal.throwIfAborted();
+        edit.operation = new TextSave(target, source.revision, parent.etag, bytes);
       }
-      const outcome = await operation.run();
-      if (session.signal.aborted) return;
+      const operation = edit.operation;
+      const outcome = await operation.run(client, signal);
+      if (signal.aborted) return;
       if (outcome === 'saved') {
         clearDraft();
         onsaved(target);
       } else if (outcome === 'stale') {
-        operation = null;
-        stale = true;
-        unresolved = false;
-        editError = 'This file or folder changed. Download your draft, then reopen the current file to apply your changes.';
+        edit.operation = null;
+        edit.stale = true;
       } else if (!operation.inProgress) {
-        operation = null;
-        unresolved = false;
-        editError = 'Could not save. Your draft is kept here. Try saving again.';
-      } else {
-        unresolved = true;
-        editError = 'Could not confirm the save. Retry to check the same save, or download your draft.';
+        edit.operation = null;
+        saveError = 'Could not save. Your draft is kept here. Try saving again.';
       }
     } catch {
-      if (!session.signal.aborted) {
-        unresolved = operation?.inProgress ?? false;
-        if (!unresolved) operation = null;
-        editError = unresolved ? 'Could not confirm the save. Retry to check the same save, or download your draft.'
-          : 'Could not save. Your draft is kept here. Try saving again.';
+      if (!signal.aborted && !edit.operation?.inProgress) {
+        edit.operation = null;
+        saveError = 'Could not save. Your draft is kept here. Try saving again.';
       }
     } finally {
-      editBusy = null;
+      if (!signal.aborted) editBusy = null;
     }
   }
 
   async function cancelDraft() {
-    if (!draft || editBusy) return;
-    if (operation?.inProgress) {
+    const signal = editSignal;
+    if (signal.aborted || !draft || editBusy) return;
+    if (edit.operation?.inProgress) {
       const target = draft.entry;
       editBusy = 'cancel';
-      const result = await operation.cancel();
-      if (session.signal.aborted) return;
+      const result = await edit.operation.cancel(client, signal);
+      if (signal.aborted) return;
       editBusy = null;
       if (result === 'unknown') {
-        editError = 'Could not confirm cancellation. Your draft is kept here.';
+        saveError = 'Could not confirm cancellation. Your draft is kept here.';
         return;
       }
       if (result === 'saved') {
@@ -140,19 +134,18 @@
         return;
       }
     }
-    if (stale) {
-      clearDraft();
+    const closeStale = edit.stale;
+    clearDraft();
+    if (closeStale) {
       onclose();
       return;
     }
-    clearDraft();
     await tick();
-    if (editing) return;
-    (editButton ?? downloadButton)?.focus();
+    if (!signal.aborted && !editing) (editButton ?? downloadButton)?.focus();
   }
 
   function downloadDraft() {
-    if (!draft || !payload) return;
+    if (editSignal.aborted || !draft || !payload) return;
     const anchor = document.createElement('a');
     const objectUrl = URL.createObjectURL(payload);
     anchor.href = objectUrl;
@@ -162,6 +155,7 @@
   }
 
   function close() {
+    if (editSignal.aborted) return;
     if (editing && !dirty && !editBusy && !unresolved) clearDraft();
     onclose();
   }
@@ -228,7 +222,7 @@
 {#if draft && !editing}
   <div class="action-feedback workspace-feedback" aria-busy={!!editBusy}>
     <p role="status" class="min-w-0 break-all">{editBusy ? 'Working on your edit' : 'Draft available'} for {draft.entry.name}.</p>
-    <Button variant="outline" size="sm" onclick={(event) => onresume(draft!.entry, event.currentTarget)}>Resume edit</Button>
+    <Button variant="outline" size="sm" onclick={(event) => { if (!editSignal.aborted && draft) onresume(draft.entry, event.currentTarget); }}>Resume edit</Button>
   </div>
 {/if}
 
@@ -333,7 +327,7 @@
         <div class="flex gap-2">
           <Button variant="outline" disabled={editBusy === 'save'} aria-disabled={!!editBusy}
             aria-busy={editBusy === 'cancel'} onclick={cancelDraft}>{editBusy === 'cancel' ? 'Canceling…' : 'Cancel'}</Button>
-          <Button disabled={!dirty || tooLarge || stale || editBusy === 'cancel'}
+          <Button disabled={!dirty || tooLarge || edit.stale || editBusy === 'cancel'}
             aria-disabled={editBusy === 'save' || undefined} aria-busy={editBusy === 'save'} onclick={saveDraft}>
             {editBusy === 'save' ? 'Saving…' : unresolved ? 'Retry save' : 'Save'}
           </Button>
