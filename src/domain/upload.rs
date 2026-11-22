@@ -22,6 +22,7 @@ use unicode_normalization::UnicodeNormalization;
 
 pub const UPLOAD_SCOPE: &str = "upload_create";
 pub const MAX_UPLOAD_LENGTH: u64 = 64 * 1024 * 1024 * 1024;
+pub const MAX_TEXT_EDIT_LENGTH: u64 = 256 * 1024;
 pub const MAX_CHUNK_LENGTH: u64 = 8 * 1024 * 1024;
 /// A chunk body that sends nothing for this long releases its writer.
 pub const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -219,6 +220,8 @@ impl Drop for UploadStorage {
 pub struct Replacement {
     pub entry_id: String,
     pub etag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -247,6 +250,15 @@ impl UploadAdmission {
         if let Some(replacement) = &self.replacement {
             validate_id(&replacement.entry_id)?;
             generation_from_etag(&replacement.etag, &replacement.entry_id)?;
+            if let Some(revision) = &replacement.text_revision {
+                validate_id(revision)?;
+                if !is_editable_text_name(&self.name) {
+                    return Err("text_edit_type");
+                }
+                if self.length > MAX_TEXT_EDIT_LENGTH {
+                    return Err("text_edit_too_large");
+                }
+            }
         }
         normalized_name(&self.name)?;
         if self.length > MAX_UPLOAD_LENGTH {
@@ -258,6 +270,10 @@ impl UploadAdmission {
         Ok(())
     }
 
+    pub fn text_revision(&self) -> Option<&str> {
+        self.replacement.as_ref()?.text_revision.as_deref()
+    }
+
     pub fn name_key(&self) -> Result<Vec<u8>, &'static str> {
         normalized_name(&self.name)
     }
@@ -265,6 +281,19 @@ impl UploadAdmission {
     pub fn declared_digest(&self) -> Result<Option<[u8; 32]>, &'static str> {
         self.sha256.as_deref().map(parse_digest).transpose()
     }
+}
+
+pub fn is_editable_text_name(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, extension)| {
+        extension.eq_ignore_ascii_case("txt") || extension.eq_ignore_ascii_case("md")
+    })
+}
+
+pub fn is_editable_text(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok()
+        && !bytes
+            .iter()
+            .any(|byte| matches!(*byte, 0..=8 | 11..=12 | 14..=31 | 127))
 }
 
 #[derive(Debug, Clone)]
@@ -409,6 +438,10 @@ pub fn admission_fingerprint(ticket: &VerifiedUploadTicket) -> [u8; 32] {
         for field in [replacement.entry_id.as_bytes(), replacement.etag.as_bytes()] {
             hasher.update((field.len() as u64).to_be_bytes());
             hasher.update(field);
+        }
+        if let Some(revision) = &replacement.text_revision {
+            hasher.update((revision.len() as u64).to_be_bytes());
+            hasher.update(revision.as_bytes());
         }
     }
     hasher.finalize().into()

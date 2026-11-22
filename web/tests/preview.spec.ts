@@ -1,14 +1,18 @@
-import { expect, test } from '@playwright/test';
-import { ApiClient, ResponseTooLargeError, type ApiTransport, type RequestOptions } from '../src/lib/api';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { TextSave, draftBytes, editorText, preserveLineEndings } from '../src/lib/text-edit';
+import { expect, test, type Page, type Route } from '@playwright/test';
+import { ApiClient, HttpError, ResponseTooLargeError, type ApiTransport, type RequestOptions } from '../src/lib/api';
 import type { FileEntry } from '../src/lib/listing';
 import { previewUnavailable, loadPreview, PREVIEW_LIMIT, PDF_PREVIEW_LIMIT } from '../src/lib/preview';
 import { scannedPdf, mixedPdf, manyPagesPdf, blankPdf, annotatedPdf } from './fixtures/pdf-fixtures';
 
 const entry = (name: string, size = 10): FileEntry => ({ id: 'preview', parent_id: 'root', kind: 'file', name, size, etag: '"1"' });
-function harness(blob: Blob) {
+function harness(blob: Blob, etag?: string) {
   const requests: Array<{ path: string; options: RequestOptions }> = [];
   const transport: ApiTransport = { async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     requests.push({ path, options });
+    if (etag) options.onResponseHeaders?.(new Headers({ etag }));
     return blob as T;
   } };
   return { client: new ApiClient(transport), requests };
@@ -38,7 +42,22 @@ test('text previews preserve UTF-8 content and request bounded authenticated byt
   const { client, requests } = harness(new Blob([text], { type: 'application/json' }));
   const signal = new AbortController().signal;
   expect(await loadPreview(client, entry('notes.txt'), '/entries/preview/content', signal)).toEqual({ kind: 'text', text });
-  expect(requests).toEqual([{ path: '/entries/preview/content', options: { signal, maxResponseBytes: PREVIEW_LIMIT, headers: {} } }]);
+  expect(requests).toEqual([{ path: '/entries/preview/content', options: { signal, maxResponseBytes: PREVIEW_LIMIT, headers: {}, onResponseHeaders: expect.any(Function) } }]);
+});
+
+test('only bounded Markdown and plain text with a content revision are editable', async () => {
+  const revision = 'a'.repeat(32);
+  const etag = `"${revision}"`;
+  const { client } = harness(new Blob(['\uFEFFline\r\n']), etag);
+  const signal = new AbortController().signal;
+  expect(await loadPreview(client, entry('notes.MD'), '/content', signal)).toEqual({
+    kind: 'text', text: 'line\r\n', edit: { revision, bom: true },
+  });
+  expect(await loadPreview(client, entry('notes.csv'), '/content', signal)).toEqual({ kind: 'text', text: 'line\r\n' });
+  const large = harness(new Blob(['a'.repeat(256 * 1024 + 1)]), etag);
+  const preview = await loadPreview(large.client, entry('large.txt'), '/content', signal);
+  expect(preview.kind).toBe('text');
+  expect(preview).not.toHaveProperty('edit');
 });
 
 test('invalid UTF-8 and binary control bytes do not become text previews', async () => {
@@ -403,3 +422,259 @@ test('unknown search file size still enforces the response preview limit', async
   const preview = await loadPreview(client, file, '/entries/unknown/content', new AbortController().signal);
   expect(preview.kind).toBe('unsupported');
 });
+
+
+test('text edits preserve surrounding separators and the UTF-8 BOM', async () => {
+  const wire = 'first\r\nsecond\nlast\r\n';
+  const changed = preserveLineEndings(wire, editorText(wire), 'first\nsecond 雪\nlast\n');
+  assert.equal(changed, 'first\r\nsecond 雪\nlast\r\n');
+  assert.deepEqual(Buffer.from(await draftBytes(changed, true).arrayBuffer()), Buffer.from('\uFEFFfirst\r\nsecond 雪\nlast\r\n'));
+});
+
+test('inserted lines follow the surrounding convention and empty files use LF', () => {
+  assert.equal(preserveLineEndings('first\r\nlast', 'first\nlast', 'first\nnew\nlast'), 'first\r\nnew\r\nlast');
+  assert.equal(preserveLineEndings('', '', 'first\nlast'), 'first\nlast');
+});
+
+test('removing text between a bare CR and an LF keeps both logical breaks', () => {
+  assert.equal(editorText(preserveLineEndings('a\rb\nc', 'a\nb\nc', 'a\n\nc')), 'a\n\nc');
+});
+
+
+test('cancel resolves a lost committed reply without discarding the result', async () => {
+  const calls: string[] = [];
+  const transport: ApiTransport = { async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    calls.push(`${options.method ?? 'GET'} ${path}`);
+    if (path === '/mutation-tickets') return { mutation_id: 'edit', ticket: 'ticket' } as T;
+    if (path === '/uploads') return {} as T;
+    if (path.endsWith('/content')) return { upload_id: 'edit', status: 'staged', length: 1, sha256: '2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881' } as T;
+    if (path.endsWith('/commit')) throw new Error('reply lost');
+    if (options.method === 'DELETE') throw new HttpError(409, { code: 'upload_already_committed', message: '', request_id: '' });
+    throw new Error('status unavailable');
+  } };
+  const client = new ApiClient(transport);
+  client.setCsrfToken('csrf');
+  const signal = new AbortController().signal;
+  const save = new TextSave(entry('notes.txt'), 'revision', 'parent', new Blob(['x']));
+  expect(await save.run(client, signal)).toBe('unknown');
+  expect(await save.cancel(client, signal)).toBe('saved');
+  expect(calls.filter(call => call.includes('/commit'))).toHaveLength(1);
+});
+
+test('cancel resolves a lost admission that was not created', async () => {
+  const transport: ApiTransport = { async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    if (path === '/mutation-tickets') return { mutation_id: 'edit', ticket: 'ticket' } as T;
+    if (options.method === 'DELETE') throw new HttpError(404, { code: 'upload_not_found', message: '', request_id: '' });
+    throw new Error('admission reply lost');
+  } };
+  const client = new ApiClient(transport);
+  client.setCsrfToken('csrf');
+  const signal = new AbortController().signal;
+  const save = new TextSave(entry('notes.txt'), 'revision', 'parent', new Blob(['x']));
+  expect(await save.run(client, signal)).toBe('unknown');
+  expect(await save.cancel(client, signal)).toBe('canceled');
+});
+
+test('cancel releases an admitted save after a lost content reply', async () => {
+  const transport: ApiTransport = { async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    if (path === '/mutation-tickets') return { mutation_id: 'edit', ticket: 'ticket' } as T;
+    if (path === '/uploads' || options.method === 'DELETE') return {} as T;
+    throw new Error('response lost');
+  } };
+  const client = new ApiClient(transport);
+  client.setCsrfToken('csrf');
+  const signal = new AbortController().signal;
+  const save = new TextSave(entry('notes.txt'), 'revision', 'parent', new Blob(['x']));
+  expect(await save.run(client, signal)).toBe('unknown');
+  expect(await save.cancel(client, signal)).toBe('canceled');
+});
+
+const editFile = entry('private-notes.txt', 13);
+const originalText = '\uFEFFfirst\r\nlast\r\n';
+const editedText = 'first\nprivate draft 雪\nlast\n';
+const editedBytes = Buffer.from('\uFEFFfirst\r\nprivate draft 雪\r\nlast\r\n');
+
+async function signInForEdit(page: Page) {
+  await page.getByLabel('Account name').fill('owner');
+  await page.getByLabel('Password', { exact: true }).fill('password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Refresh folder', exact: true })).toBeEnabled();
+}
+
+async function openTextDraft(page: Page) {
+  const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
+  const auth = { accountId: 'original', sessions: 0, expired: false };
+  await page.route('**/*', route => {
+    const path = new URL(route.request().url()).pathname;
+    const json = (value: unknown) => route.fulfill({ json: value });
+    if (path === '/auth/csrf') return json({ csrf_token: 'bootstrap' });
+    if (path === '/auth/local') {
+      return json({ account_id: auth.accountId, handle: 'owner', role: 'user', csrf_token: `session-${++auth.sessions}` });
+    }
+    if (path === '/auth/logout') return route.fulfill({ status: 204 });
+    if (path === '/folders/children') return json({ root, items: [], next_cursor: null, has_more: false });
+    if (path === '/folders/root/children') {
+      if (auth.expired) return route.fulfill({ status: 401, json: { code: 'unauthorized' } });
+      return json({ items: auth.accountId === 'original' ? [editFile] : [], next_cursor: null, has_more: false });
+    }
+    if (path === '/folders/root/path') return json({ items: [root] });
+    if (path === '/entries/preview/content') {
+      return route.fulfill({ headers: { etag: `"${'a'.repeat(32)}"` }, body: originalText });
+    }
+    return route.continue();
+  });
+  await page.goto('/');
+  await signInForEdit(page);
+  await page.getByRole('button', { name: 'Preview private-notes.txt', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.getByRole('textbox', { name: 'File content', exact: true }).fill(editedText);
+  return auth;
+}
+
+async function expireTextEdit(page: Page, auth: { expired: boolean }) {
+  auth.expired = true;
+  await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
+  await expect(page.getByText('Your session ended. Sign in again to continue.', { exact: true })).toBeVisible();
+  auth.expired = false;
+}
+
+test('a parked text draft stays hidden after expiry and sign-in with the same handle and a different account ID', async ({ page }) => {
+  const auth = await openTextDraft(page);
+  await page.getByRole('button', { name: 'Close preview', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Resume edit', exact: true })).toBeVisible();
+  await expireTextEdit(page, auth);
+  async function expectDraftHidden() {
+    await expect(page.getByRole('button', { name: 'Resume edit', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Download draft', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('textbox', { name: 'File content', exact: true })).toHaveCount(0);
+    await expect(page.locator('body')).not.toContainText(/private-notes|private draft/);
+  }
+  await expectDraftHidden();
+  auth.accountId = 'different';
+  await signInForEdit(page);
+  await expectDraftHidden();
+});
+
+async function holdTextCommit(page: Page) {
+  const write = { tickets: 0, admissions: 0, statuses: 0, sha256: '', commits: [] as Route[] };
+  await page.route('**/mutation-tickets', route => {
+    write.tickets++;
+    expect(route.request().headers()['x-csrf-token']).toBe('session-1');
+    write.sha256 = route.request().postDataJSON().sha256;
+    return route.fulfill({ json: { mutation_id: 'original-write', ticket: 'ticket' } });
+  });
+  await page.route('**/uploads', route => {
+    write.admissions++;
+    expect(route.request().headers()['x-mutation-id']).toBe('ticket');
+    return route.fulfill({ json: {} });
+  });
+  await page.route('**/uploads/original-write/content', route => {
+    expect(route.request().postDataBuffer()).toEqual(editedBytes);
+    return route.fulfill({ json: { upload_id: 'original-write', status: 'staged', length: editedBytes.length, sha256: write.sha256 } });
+  });
+  await page.route('**/uploads/original-write/commit', route => { write.commits.push(route); });
+  await page.route('**/uploads/original-write', route => {
+    write.statuses++;
+    return route.fulfill({ json: {
+      upload_id: 'original-write', mutation_id: 'original-write', status: 'committed', state: 'committed',
+      length: editedBytes.length, sha256: write.sha256, revision_id: 'saved-revision',
+    } });
+  });
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => write.commits.length).toBe(1);
+  return write;
+}
+
+test('the same account can recover exact draft bytes and confirm the original write after session expiry', async ({ page }) => {
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      if (String(input).endsWith('/original-write/commit')) {
+        init?.signal?.addEventListener('abort', () => document.documentElement.setAttribute('data-edit-request-aborted', ''), { once: true });
+      }
+      return nativeFetch(input, init);
+    };
+  });
+  const auth = await openTextDraft(page);
+  const write = await holdTextCommit(page);
+  await page.getByRole('button', { name: 'Close preview', exact: true }).click();
+  await expireTextEdit(page, auth);
+  await expect(page.locator('html')).toHaveAttribute('data-edit-request-aborted', '');
+  await expect(page.getByRole('button', { name: 'Resume edit', exact: true })).toHaveCount(0);
+  await write.commits[0].abort();
+  expect(write.statuses).toBe(0);
+
+  await signInForEdit(page);
+  await page.getByRole('button', { name: 'Resume edit', exact: true }).click();
+  const textarea = page.getByRole('textbox', { name: 'File content', exact: true });
+  await expect(textarea).toHaveValue(editedText);
+  await expect(textarea).not.toBeEditable();
+  await expect(page.getByRole('alert')).toContainText('Could not confirm the save.');
+  const downloadReady = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Download draft', exact: true }).click();
+  const download = await downloadReady;
+  expect(download.suggestedFilename()).toBe('private-notes.draft.txt');
+  expect(await readFile((await download.path())!)).toEqual(editedBytes);
+
+  await page.getByRole('button', { name: 'Retry save', exact: true }).click();
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Resume edit', exact: true })).toHaveCount(0);
+  expect(write.tickets).toBe(1);
+  expect(write.admissions).toBe(1);
+  expect(write.commits).toHaveLength(1);
+  expect(write.statuses).toBe(1);
+});
+
+test('a staged text save can finish with the new session and its original ticket', async ({ page }) => {
+  const auth = await openTextDraft(page);
+  const write = await holdTextCommit(page);
+  await page.route('**/uploads/original-write', route => route.fulfill({ json: {
+    upload_id: 'original-write', mutation_id: 'original-write', status: 'staged', state: 'publishing',
+    length: editedBytes.length, sha256: write.sha256, writer_active: false,
+  } }));
+  await write.commits[0].fulfill({ status: 401, json: { code: 'authentication_required' } });
+  await expect(page.getByText('Your session ended. Sign in again to continue.', { exact: true })).toBeVisible();
+  expect(auth.sessions).toBe(1);
+  await signInForEdit(page);
+  await page.getByRole('button', { name: 'Resume edit', exact: true }).click();
+  await page.getByRole('button', { name: 'Retry save', exact: true }).click();
+  await expect.poll(() => write.commits.length).toBe(2);
+  const retry = write.commits[1];
+  expect(retry.request().headers()).toMatchObject({ 'x-csrf-token': 'session-2', 'x-mutation-id': 'ticket' });
+  expect(retry.request().postDataJSON()).toEqual(write.commits[0].request().postDataJSON());
+  await retry.fulfill({ json: {
+    status: 'committed', mutation_id: 'original-write', replaced_entry_id: editFile.id,
+    size: editedBytes.length, sha256: write.sha256, revision_id: 'saved-revision',
+  } });
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  expect(write.tickets).toBe(1);
+  expect(write.admissions).toBe(1);
+});
+
+test('closing a text preview during a save still acknowledges the confirmed write', async ({ page }) => {
+  await openTextDraft(page);
+  const write = await holdTextCommit(page);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('Working on your edit for private-notes.txt.', { exact: true })).toBeVisible();
+  await write.commits[0].fulfill({ json: {
+    status: 'committed', mutation_id: 'original-write', replaced_entry_id: editFile.id,
+    size: editedBytes.length, sha256: write.sha256, revision_id: 'saved-revision',
+  } });
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Resume edit', exact: true })).toHaveCount(0);
+});
+
+for (const endSession of ['sign out', 'reload'] as const) {
+  test(`${endSession} clears a text draft in the tab`, async ({ page }) => {
+    await openTextDraft(page);
+    await page.getByRole('button', { name: 'Close preview', exact: true }).click();
+    if (endSession === 'reload') await page.reload();
+    else await page.getByRole('button', { name: 'Log out', exact: true }).click();
+    await signInForEdit(page);
+    await expect(page.getByRole('button', { name: 'Resume edit', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Preview private-notes.txt', exact: true }).click();
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: 'File content', exact: true })).toHaveValue('first\nlast\n');
+  });
+}

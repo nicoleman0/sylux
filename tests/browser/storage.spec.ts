@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import https from 'node:https';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import type { Browser, BrowserContext, Page } from '../../web/node_modules/playwright-core';
+import type { Browser, BrowserContext, Page, Request } from '../../web/node_modules/playwright-core';
 
 const requireWeb = createRequire(path.resolve(__dirname, '../../web/package.json'));
 const { test, expect, chromium }: typeof import('../../web/node_modules/@playwright/test') = requireWeb('@playwright/test');
@@ -33,12 +33,12 @@ function patterned(length: number): Buffer {
   return bytes;
 }
 
-async function signIn(): Promise<void> {
-  await page.goto(origin);
-  await page.getByLabel('Account name').fill(fixtures.handle);
-  await page.getByLabel('Password').fill(password);
-  await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
+async function signIn(tab = page): Promise<void> {
+  await tab.goto(origin);
+  await tab.getByLabel('Account name').fill(fixtures.handle);
+  await tab.getByLabel('Password').fill(password);
+  await tab.getByRole('button', { name: 'Sign in' }).click();
+  await expect(tab.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
 }
 
 function markListingProgress(marker: string): void {
@@ -69,13 +69,18 @@ test.beforeAll(async ({}, workerInfo) => {
   });
   expect(browser.version()).toBe('158.0.8127.18');
 });
-test.beforeEach(async () => {
-  context = await browser.newContext({ ignoreHTTPSErrors: false, acceptDownloads: true, viewport: { width: 1440, height: 900 } });
-  await context.route('**/*', async route => {
+async function storageContext(): Promise<BrowserContext> {
+  const owned = await browser.newContext({ ignoreHTTPSErrors: false, acceptDownloads: true, viewport: { width: 1440, height: 900 } });
+  await owned.route('**/*', async route => {
     const url = new URL(route.request().url());
     if (url.hostname === 'fixture.test' && url.port === new URL(origin).port && url.protocol === 'https:') await route.continue();
     else await route.abort('blockedbyclient');
   });
+  return owned;
+}
+
+test.beforeEach(async () => {
+  context = await storageContext();
   page = await context.newPage();
 });
 test.afterEach(async () => { await context?.close(); });
@@ -330,6 +335,35 @@ test('cancel aborts the in-flight upload without claiming a saved file', { annot
   await expect(page.locator('.file-row').filter({ hasText: fileName })).toHaveCount(0);
 });
 
+async function forwardFixtureCommit(request: Request): Promise<number> {
+  const fixtureOrigin = new URL(origin);
+  const target = new URL(request.url());
+  if (target.origin !== fixtureOrigin.origin || target.search || !/^\/uploads\/[A-Za-z0-9-]+\/commit$/.test(target.pathname) || request.method() !== 'POST') {
+    throw new Error('unexpected fixture commit route');
+  }
+  const headers = await request.allHeaders();
+  const ca = fs.readFileSync(process.env.S1_CA_CERT!);
+  return new Promise<number>((resolve, reject) => {
+    const forwarded = https.request({
+      hostname: fixtureOrigin.hostname,
+      family: 4,
+      port: Number(fixtureOrigin.port),
+      path: target.pathname,
+      method: request.method(),
+      headers,
+      ca,
+      rejectUnauthorized: true,
+      lookup: (_hostname, _options, callback) => callback(null, '127.0.0.1', 4),
+    }, response => {
+      response.once('end', () => resolve(response.statusCode ?? 0));
+      response.resume();
+    });
+    forwarded.setTimeout(10_000, () => forwarded.destroy(new Error('fixture commit forward timed out')));
+    forwarded.once('error', reject);
+    forwarded.end(request.postDataBuffer() ?? undefined);
+  });
+}
+
 test('lost commit response is resolved through the original upload status', { annotation: { type: 'harness_case', description: 'storage_lost_commit_response' } }, async () => {
   await signIn();
   const fixtureOrigin = new URL(origin);
@@ -350,35 +384,7 @@ test('lost commit response is resolved through the original upload status', { an
     await route.continue();
   });
   await page.route('**/uploads/*/commit', async route => {
-    const request = route.request();
-    const target = new URL(request.url());
-    if (target.origin !== fixtureOrigin.origin || target.search || !/^\/uploads\/[A-Za-z0-9-]+\/commit$/.test(target.pathname) || request.method() !== 'POST') {
-      throw new Error('unexpected fixture commit route');
-    }
-    const headers = await request.allHeaders();
-    const body = request.postDataBuffer();
-    const statusCode = await new Promise<number>((resolve, reject) => {
-      const forwarded = https.request({
-        hostname: 'fixture.test',
-        servername: 'fixture.test',
-        family: 4,
-        port: Number(fixtureOrigin.port),
-        path: `${target.pathname}${target.search}`,
-        method: request.method(),
-        headers,
-        ca,
-        rejectUnauthorized: true,
-        lookup: (_hostname, _options, callback) => callback(null, '127.0.0.1', 4),
-      }, response => {
-        response.once('end', () => resolve(response.statusCode ?? 0));
-        response.resume();
-      });
-      forwarded.setTimeout(10_000, () => forwarded.destroy(new Error('fixture commit forward timed out')));
-      forwarded.once('error', reject);
-      if (body) forwarded.write(body);
-      forwarded.end();
-    });
-    expect(statusCode).toBe(201);
+    expect(await forwardFixtureCommit(route.request())).toBe(201);
     dropped = true;
     await route.abort('connectionreset');
   });
@@ -600,4 +606,158 @@ test('owner shares and revokes a file downloaded in a separate signed-out TLS co
   } finally {
     await signedOut.close();
   }
+});
+
+async function openTextEditor(tab: Page, name: string) {
+  await tab.getByRole('button', { name: `Preview ${name}`, exact: true }).click();
+  await tab.getByRole('dialog', { name: `Preview ${name}` }).getByRole('button', { name: 'Edit', exact: true }).click();
+  const dialog = tab.getByRole('dialog', { name: `Edit ${name}` });
+  await expect(dialog.getByRole('textbox', { name: 'File content' })).toBeFocused();
+  return dialog;
+}
+
+test('text previews save and download exact Markdown and plain text bytes', {
+  annotation: { type: 'harness_case', description: 'storage_text_edit_roundtrip' },
+}, async () => {
+  await signIn();
+  const cases = [
+    { name: `notes-${phase}.md`, before: '# Café\n\n  old\n', after: '# Café\n\n  new 雪\n', width: 1280 },
+    { name: `notes-${phase}.txt`, before: '\uFEFFFirst\r\nSecond\r\n', after: '\uFEFFFirst\r\nSecond 🧪\r\n', width: 390 },
+  ];
+  for (const { name, before, after, width } of cases) {
+    await page.setViewportSize({ width, height: 844 });
+    const theme = width === 390 ? 'dark' : 'light';
+    const toggle = page.getByRole('button', { name: `Switch to ${theme} mode`, exact: true });
+    if (await toggle.isVisible()) await toggle.click();
+    await chooseUpload({ name, mimeType: 'application/octet-stream', buffer: Buffer.from(before) });
+    const dialog = await openTextEditor(page, name);
+    const input = dialog.getByRole('textbox');
+    const original = before.replace(/^\uFEFF/, '').replaceAll('\r\n', '\n');
+    const changed = after.replace(/^\uFEFF/, '').replaceAll('\r\n', '\n');
+    await expect(input).toHaveValue(original);
+    await input.fill('discard me');
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeFocused();
+    await expect(page.getByRole('dialog').locator('pre')).toHaveText(original.trim());
+    await page.getByRole('button', { name: 'Edit', exact: true }).press('Enter');
+    await expect(input).toHaveValue(original);
+    await input.fill(changed);
+    await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeInViewport();
+    await input.press('Control+s');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByRole('status').filter({ hasText: 'Changes saved.' })).toBeVisible();
+    await page.getByRole('button', { name: `Preview ${name}`, exact: true }).click();
+    const reopened = page.getByRole('dialog', { name: `Preview ${name}` });
+    await expect(reopened.locator('pre')).toHaveText(changed.trim());
+    const requested = page.waitForEvent('download');
+    await reopened.getByRole('button', { name: 'Download file' }).click();
+    const download = await requested;
+    expect(download.suggestedFilename()).toBe(name);
+    expect(fs.readFileSync((await download.path())!)).toEqual(Buffer.from(after));
+    await reopened.getByRole('button', { name: 'Close preview' }).click();
+    await page.getByRole('button', { name: 'Refresh folder' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Changes saved.' })).toHaveCount(0);
+  }
+});
+
+test('a stale second tab keeps its draft after the real commit rejects it', {
+  annotation: { type: 'harness_case', description: 'storage_text_edit_conflict' },
+}, async () => {
+  await signIn();
+  const name = `edit-conflict-${phase}.txt`;
+  await chooseUpload({ name, mimeType: 'text/plain', buffer: Buffer.from('Original\r\n') });
+  const local = await openTextEditor(page, name);
+  await local.getByRole('textbox').fill('My draft\n');
+  const secondContext = await storageContext();
+  const other = await secondContext.newPage();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  try {
+    await signIn(other);
+    const remote = await openTextEditor(other, name);
+    await remote.getByRole('textbox').fill('Saved in another tab\n');
+    let commits = 0;
+    await page.route('**/uploads/*/commit', async route => {
+      commits++;
+      await held;
+      await route.continue();
+    });
+    const attempted = page.waitForRequest(request => new URL(request.url()).pathname.endsWith('/commit'), { timeout: 8000 });
+    await local.getByRole('button', { name: 'Save', exact: true }).click();
+    await attempted;
+    const busy = local.getByRole('button', { name: 'Saving…' });
+    await expect(busy).toHaveAttribute('aria-busy', 'true');
+    await busy.press('Enter');
+    await local.getByRole('textbox').press('Control+s');
+    expect(commits).toBe(1);
+    await remote.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(other.getByRole('status').filter({ hasText: 'Changes saved.' })).toBeVisible();
+    const rejected = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/commit'), { timeout: 8000 });
+    release();
+    expect((await rejected).status()).toBe(412);
+    await expect(local.getByRole('alert')).toContainText('This file or folder changed');
+    await expect(local.getByRole('textbox')).toHaveValue('My draft\n');
+    await expect(local.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+    const draft = page.waitForEvent('download');
+    await local.getByRole('button', { name: 'Download draft' }).click();
+    expect(fs.readFileSync((await (await draft).path())!)).toEqual(Buffer.from('My draft\r\n'));
+    await other.getByRole('button', { name: `Preview ${name}`, exact: true }).click();
+    await expect(other.getByRole('dialog').locator('pre')).toHaveText('Saved in another tab');
+  } finally {
+    release();
+    await secondContext.close();
+  }
+});
+
+test('navigation keeps the draft and retry finishes the same staged edit', {
+  annotation: { type: 'harness_case', description: 'storage_text_edit_retry' },
+}, async () => {
+  await signIn();
+  const name = `edit-retry-${phase}.md`;
+  await chooseUpload({ name, mimeType: 'text/markdown', buffer: Buffer.from('# Before\n') });
+  const editor = await openTextEditor(page, name);
+  await editor.getByRole('textbox').fill('# After\n');
+  await editor.getByRole('textbox').press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('navigation', { name: 'Files', exact: true }).getByRole('button', { name: 'Trash' }).click();
+  await expect(page.getByRole('heading', { name: 'Trash', exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole('heading', { name: 'Files', exact: true, level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Resume edit' }).click();
+  await expect(editor.getByRole('textbox')).toHaveValue('# After\n');
+
+  const commits: string[] = [];
+  await page.route('**/uploads/*/commit', route => {
+    commits.push(new URL(route.request().url()).pathname);
+    return commits.length === 1 ? route.abort('failed') : route.continue();
+  });
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor.getByRole('alert')).toContainText('Could not confirm the save');
+  await expect(editor.getByRole('textbox')).toHaveValue('# After\n');
+  await editor.getByRole('button', { name: 'Close preview' }).click();
+  await page.getByRole('button', { name: 'Resume edit' }).click();
+  await expect(editor.getByRole('textbox')).toHaveValue('# After\n');
+  await editor.getByRole('button', { name: 'Retry save' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Changes saved.' })).toBeVisible();
+  expect(commits).toHaveLength(2);
+  expect(commits[0]).toBe(commits[1]);
+  await page.getByRole('button', { name: `Preview ${name}`, exact: true }).click();
+  await expect(page.getByRole('dialog').locator('pre')).toHaveText('# After');
+  await page.getByRole('button', { name: 'Close preview' }).click();
+
+  await page.unrouteAll({ behavior: 'wait' });
+  const recovered = await openTextEditor(page, name);
+  await recovered.getByRole('textbox').fill('# Confirmed by status\n');
+  let lostReplies = 0;
+  await page.route('**/uploads/*/commit', async route => {
+    expect(await forwardFixtureCommit(route.request())).toBe(201);
+    lostReplies++;
+    await route.abort('failed');
+  });
+  await recovered.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: 'Changes saved.' })).toBeVisible();
+  expect(lostReplies).toBe(1);
+  await page.getByRole('button', { name: `Preview ${name}`, exact: true }).click();
+  await expect(page.getByRole('dialog').locator('pre')).toHaveText('# Confirmed by status');
 });
