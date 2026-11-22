@@ -16,16 +16,17 @@ Private file storage for small groups, with a browser interface for everyday fil
 
 ## Product Direction
 
-Compete for the everyday file workflows small groups use in Nextcloud while keeping Sylux's operating overhead low. Favor clear workflows and measured resource use. Add capabilities that solve a concrete problem for these users; do not pursue broad feature parity for its own sake.
+Build a pleasant, fast and efficient file server for small groups. Compete for the everyday file workflows small groups use in Nextcloud while keeping Sylux's operating overhead low. Favor clear workflows and measured resource use. Add capabilities that solve a concrete problem for these users; do not pursue broad feature parity for its own sake.
 
 ## Capabilities and Constraints
 
-- Local accounts with administrator and user roles.
+- Local accounts have administrator and user roles (`src/http/accounts.rs`).
 - Files are private to each account by default. An owner can share one file through a revocable, expiring download link that anyone holding it can use. Public links are a current capability, not an excluded feature.
 - Preserve existing upload reconciliation, replacement confirmation and recovery boundaries.
 - Instance naming belongs in administrator Settings, persists on the server and applies to all users.
-- PDF previews render locally, with page and zoom controls and a download fallback.
-- OIDC, shared folders and WebDAV are not currently supported or stated as planned. Do not present them as available capabilities.
+- Text and image previews are implemented in `web/src/lib/preview.ts`; PDF previews render locally, with page and zoom controls and a download fallback (`docs/pdf-preview.md`).
+- Planned, with no committed release dates: shared folders and public folder links (SYL-110, SYL-111), OIDC sign-in (SYL-114, SYL-115) and WebDAV access (SYL-116). Public single-file links are available now (`docs/sharing.md`). Do not present planned capabilities as available.
+- Prototype data and account actions are simulated. The prototype is not deployment or durability evidence.
 
 ## Brand Commitments
 
