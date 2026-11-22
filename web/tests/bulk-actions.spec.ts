@@ -296,6 +296,44 @@ test('refresh reconciles committed trash beyond page one after its response fail
   expect(trashReads).toEqual([0, 100]);
 });
 
+test('header selection moves only the loaded page to an allowed destination', async ({ page }) => {
+  const backend = await installBulkBackend(page, true);
+  const allowed = backend.entries.find(entry => entry.id === 'later')!;
+  Object.assign(allowed, { name: 'Allowed', kind: 'folder' });
+  backend.entries.push({ id: 'child', parent_id: 'destination', name: 'Child', kind: 'folder', etag: '"child:1"' });
+  const table = page.getByRole('table', { name: 'Files in current folder' });
+  await table.getByRole('checkbox', { name: 'Select all loaded items', exact: true }).check();
+  await expect(page.getByText('4 selected', { exact: true })).toBeVisible();
+  await expect(table.getByRole('checkbox', { name: 'Select Allowed', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Move selected', exact: true }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Move 4 selected items' });
+  const folders = dialog.getByRole('group', { name: 'Destination folders' });
+  const confirm = dialog.getByRole('button', { name: 'Move here', exact: true });
+  await expect(dialog.getByText('The selected items are already here.')).toBeVisible();
+  await expect(confirm).toBeDisabled();
+  await expect(folders.getByRole('button', { name: 'Destination', exact: true })).toHaveCount(0);
+  await expect(folders.getByRole('button', { name: 'Child', exact: true })).toHaveCount(0);
+  await folders.getByRole('button', { name: 'More destination folders' }).click();
+  await folders.getByRole('button', { name: 'Allowed', exact: true }).click();
+  await expect(confirm).toBeEnabled();
+  expect(backend.mutations).toEqual([]);
+  await confirm.click();
+
+  await expect(page.getByRole('region', { name: 'Move results' }).getByRole('status')).toHaveText('4 items moved');
+  expect(backend.mutations).toEqual(['alpha', 'beta', 'gamma', 'destination'].map(id => ({
+    id, action: 'move', parent: 'later', etag: `"${id}:1"`,
+  })));
+  for (const name of ['alpha.bin', 'beta.bin', 'gamma.bin', 'Destination']) {
+    await expect(table.getByRole('row', { name, exact: true })).toHaveCount(0);
+  }
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Allowed', exact: true }).click();
+  for (const name of ['alpha.bin', 'beta.bin', 'gamma.bin', 'Destination']) {
+    await expect(table.getByRole('row', { name, exact: true })).toBeVisible();
+  }
+});
+
 test('mixed selection with no valid destination hides the selected branch and returns focus', async ({ page }, testInfo) => {
   const backend = await installBulkBackend(page);
   backend.entries.push({ id: 'nested', parent_id: 'destination', name: 'Nested', kind: 'folder', etag: '"nested:1"' });
