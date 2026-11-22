@@ -124,7 +124,7 @@ test('appearance form fits both themes and narrow layout with keyboard focus', a
       await page.keyboard.press('Tab');
       await expect(page.getByRole('button', { name: 'Use default' }).first()).toBeFocused();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCSS('color', dark ? 'rgb(228, 234, 232)' : 'rgb(32, 43, 43)');
+      await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCSS('color', await page.locator('body').evaluate(node => getComputedStyle(node).color));
       await page.screenshot({ path: test.info().outputPath(`appearance-${width}-${dark ? 'dark' : 'light'}.png`), fullPage: true, animations: 'disabled' });
     }
   }

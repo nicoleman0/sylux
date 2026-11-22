@@ -1,6 +1,6 @@
 # Sylux design system
 
-Sylux is a quiet file workspace. Keep its own system sans-serif type, green-gray surfaces and teal actions. Files and account tasks take priority over decoration.
+Sylux is a quiet file workspace. Keep its own system sans-serif type, slate surfaces and iris actions. Files and account tasks take priority over decoration.
 
 ## Source of truth
 
@@ -35,15 +35,15 @@ Tokens provide light defaults and `.dark` overrides. Choose a role by meaning, n
 | --- | --- | --- |
 | Workspace | `--background`, `--foreground` | Main surface and readable text |
 | Secondary surface | `--muted`, `--muted-foreground` | Hover areas and supporting text |
-| Primary action | `--primary`, `--primary-foreground` | Main action and its label |
-| Selection | `--accent`, `--accent-foreground` | Current destination or drop target |
+| Primary action | `--primary`, `--primary-hover`, `--primary-foreground` | Main action and its label |
+| Selection | `--accent`, `--accent-foreground` | Selected rows, current destination and drop targets |
 | Secondary action | `--secondary`, `--secondary-foreground` | Lower-emphasis filled controls |
 | Destructive action | `--destructive`, `--destructive-foreground` | Destructive actions and errors |
 | Floating surface | `--popover`, `--popover-foreground` | Dialogs, menus and tooltips |
 | Structure | `--border`, `--input`, `--ring` | Dividers, field boundaries and keyboard focus |
 | Sidebar | `--sidebar-*` | Navigation-specific surface, text, selection and focus |
 
-Use paired foreground/background roles together. Keep normal text at least 4.5:1 contrast and large text at least 3:1. A new state needs a usable light and dark treatment; reducing opacity alone is not a substitute for checking readability.
+Use paired foreground/background roles together. Keep normal text at least 4.5:1 contrast and large text at least 3:1. Keep focus and essential control boundaries at least 3:1 against adjacent colors. A filled primary action uses an opaque hover color. A disabled primary action uses the muted surface and text. Reserve red for destructive actions and errors.
 
 ## Controls and surfaces
 
