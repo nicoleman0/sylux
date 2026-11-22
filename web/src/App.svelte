@@ -20,6 +20,7 @@
   import FilePreview from './lib/FilePreview.svelte';
   import FileIcon from '@lucide/svelte/icons/file';
   import FolderIcon from '@lucide/svelte/icons/folder';
+  import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import CheckIcon from '@lucide/svelte/icons/check';
   import SortHeader from './lib/SortHeader.svelte';
@@ -847,8 +848,18 @@
   let moveLoading = $state(false);
   let moveDestinationReady = $state(false);
   let moveBusy = $state(false);
+  const destinationBusy = $derived(moveBusy || bulkBusy);
+  const moveTargets = $derived(bulkAction === 'move' ? bulkTargets : moveTarget ? [moveTarget] : []);
+  const excludedMoveFolders = $derived(new Set(moveTargets.filter(entry => entry.kind === 'folder').map(entry => entry.id)));
+  const destinationFolders = $derived(destinationAction === 'copy' ? moveFolders :
+    moveFolders.filter(folder => !excludedMoveFolders.has(folder.id)));
+  const moveAlreadyHere = $derived(moveTargets.length > 0 &&
+    moveTargets.every(entry => entry.parent_id === movePath.at(-1)?.id));
+  const canConfirmMove = $derived(moveDestinationReady && !moveLoading && !moveNeedsRefresh &&
+    movePath.length > 0 && !moveAlreadyHere && !movePath.some(folder => excludedMoveFolders.has(folder.id)));
   let moveRequest = 0;
   let moveTrigger: HTMLElement | null = null;
+  let moveDialog = $state<HTMLElement | null>(null);
   type ReplacementPrompt = { file: File; folder: Folder; target: { id: string; name: string; etag: string } };
   let replacementPrompt = $state<ReplacementPrompt | null>(null);
   let uploadReplacement = $state(false);
@@ -1693,6 +1704,7 @@
   async function loadMoveFolder(path: Folder[], cursor: string | null = null): Promise<void> {
     const destination = path.at(-1);
     if (!destination || (!moveTarget && bulkAction !== 'move')) return;
+    if (destinationAction === 'move' && path.some(folder => excludedMoveFolders.has(folder.id))) return;
     const request = ++moveRequest;
     const generation = sessionGeneration;
     moveLoading = true; moveDestinationReady = false; moveError = ''; movePath = path;
@@ -1710,6 +1722,14 @@
       if (request === moveRequest && generation === sessionGeneration) moveError = 'Could not open this destination. Choose another folder or try again.';
     } finally { if (request === moveRequest) moveLoading = false; }
   }
+  async function navigateMoveFolder(path: Folder[]): Promise<void> {
+    const loading = loadMoveFolder(path);
+    if (destinationAction === 'move') {
+      await tick();
+      moveDialog?.querySelector<HTMLElement>('[aria-current="location"]')?.focus();
+    }
+    await loading;
+  }
   async function beginDestination(entry: Entry, trigger: HTMLElement, action: 'move' | 'copy'): Promise<void> {
     if (bulkBusy || bulkNeedsRefresh || dropPending || moveNeedsRefresh || namespaceUnknown) return;
     if (action === 'copy' && pendingCopy) return;
@@ -1722,7 +1742,7 @@
     const target = moveTarget;
     const destination = movePath.at(-1);
     if (namespaceUnknown) { moveError = 'Close this dialog and check Files and Trash before continuing.'; return; }
-    if (!target || !destination || moveBusy || moveLoading || !moveDestinationReady || destination.id === target.parent_id) return;
+    if (!target || !destination || moveBusy || !canConfirmMove) return;
     const generation = sessionGeneration;
     moveBusy = true; moveError = '';
     try {
@@ -1736,6 +1756,8 @@
       return;
     }
     if (generation !== sessionGeneration) return;
+    // Refresh can replace the source row in both folder and search views.
+    moveTrigger = null;
     closeMove(); moveBusy = false;
     clearCompletedFeedback(); actionNotice = `Moved to ${destination.name}`;
     const completion = feedbackRevision;
@@ -1891,16 +1913,11 @@
     bulkAction = null; bulkTargets = [];
   }
 
-  function bulkDestinationBlocked(folder: Folder): boolean {
-    return bulkTargets.some((entry) => entry.id === folder.id);
-  }
-
   async function runBulk(): Promise<void> {
     const action = bulkAction;
     const destination = action === 'move' ? movePath.at(-1) ?? null : null;
     if (!action || !bulkTargets.length || fileMutationBusy || loading || searchLoading ||
-      (action === 'move' && (!destination || moveLoading || !moveDestinationReady ||
-        bulkDestinationBlocked(destination) || bulkTargets.every((entry) => entry.parent_id === destination.id)))) return;
+      (action === 'move' && (!destination || !canConfirmMove))) return;
     const generation = sessionGeneration;
     const targets = bulkTargets.map((entry) => ({ ...entry }));
     const report: BulkReport = bulkRetry && bulkReport ? bulkReport : {
@@ -2855,7 +2872,7 @@
   {:else}{@const label = entry.kind === 'folder' ? 'Modified date not applicable' : 'Modified date unknown'}<span title={label}><span class="sr-only">{label}</span><span aria-hidden="true">—</span></span>{/if}
 {/snippet}
 
-<svelte:window ondragover={externalDrag} ondrop={externalDrag} onkeydown={listKeydown} onfocusin={trackListFocus} />
+<svelte:window ondragover={externalDrag} ondrop={externalDrag} onkeydown={listKeydown} onfocusin={trackListFocus} onpointerdowncapture={(event) => { if (destinationAction === 'move' && destinationBusy && moveDialog && event.target instanceof Node && !moveDialog.contains(event.target)) event.preventDefault(); }} />
 <svelte:head>
   <title>{instanceName} · Private files</title>
   <meta name="description" content="Private file storage" />
@@ -3124,25 +3141,42 @@
             {/if}
           </section>
         {:else if showTrash}
+            {@const trashEmpty = !restorationPending && !trashLoading && !trashError && deletedItems.length === 0}
             <section class="trash-content grid gap-4" aria-labelledby="trash-heading" inert={retainingRoute} aria-busy={trashLoading || restorationPending}>
               <div class="trash-heading-row"><h1 id="trash-heading" tabindex="-1">Trash</h1><div class="flex flex-wrap justify-end gap-2"><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={restorationPending || trashBusy || removalSubmitting} onclick={refreshWorkspace} /><Button variant="outline" size="sm" disabled={removalBlocked || !deletedItems.length} aria-busy={removalPreparing === 'all'} onclick={(event) => prepareRemoval(true, event.currentTarget)}>{removalPreparing === 'all' ? 'Preparing…' : 'Empty Trash'}</Button></div></div>
               {#if removalError}<p role="alert">{removalError}</p>{/if}
               {#if deletedItems.length}<div class="flex flex-wrap items-center gap-3"><label class="flex items-center gap-2"><input type="checkbox" aria-label="Select all items on this page" disabled={removalBlocked} checked={!!deletedItems.length && removalSelection.length === deletedItems.length} onchange={(event) => removalSelection = event.currentTarget.checked ? deletedItems.map(item => item.id) : []} />Select page</label>{#if removalSelection.length}<span>{removalSelection.length} selected</span><Button variant="destructive" size="sm" disabled={removalBlocked} aria-busy={removalPreparing === 'selected'} onclick={(event) => prepareRemoval(false, event.currentTarget)}>{removalPreparing === 'selected' ? 'Preparing…' : 'Remove permanently'}</Button>{/if}</div>{/if}
               {#if trashNotice}<p role="status">{trashNotice}</p>{/if}
               {#if trashError}<p role="alert">{trashError}</p>{#if trashRetry}<Button id="trash-page-retry" variant="outline" class="justify-self-start" disabled={trashLoading || trashBusy} aria-busy={trashPaging === 'retry' && trashLoading} onclick={() => pageTrash('retry')}>{trashPaging === 'retry' && trashLoading ? 'Retrying…' : 'Try again'}</Button>{/if}{/if}
-              {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{:else if trashLoading && !restorationPending}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}
-                <div class="narrow-sort"><Label for="trash-sort">Sort Trash by</Label><select id="trash-sort" aria-busy={trashLoading} value={trashSort} disabled={resultSortBlocked} onchange={(event) => setResultSort('trash', event.currentTarget.value as ResultSort)}>{@render resultSortOptions()}</select></div><div role="table" aria-label="Trash items"><div class="trash-sort" role="row"><span role="columnheader"><span class="sr-only">Kind</span></span><SortHeader label="Name" column="name" sort={trashSort} busy={trashLoading && trashSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'name'))} /><SortHeader label="Location" column="location" sort={trashSort} busy={trashLoading && trashSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'location'))} /><SortHeader label="Modified" column="modified" sort={trashSort} busy={trashLoading && trashSort.startsWith('modified_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'modified'))} /><SortHeader label="Size" column="size" sort={trashSort} busy={trashLoading && trashSort.startsWith('size_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'size'))} /><span role="columnheader"><span class="sr-only">Actions</span></span></div>
-              {#if deletedItems.length > 0}
-                <ul role="rowgroup">
-                  {#each deletedItems as item (item.id)}
-                    <li class="trash-row" role="row" aria-label={item.name}>
-                      <span role="cell" class="trash-kind" class:folder-icon={item.kind === 'folder'}><label><input type="checkbox" aria-label={`Select ${item.name}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}`} disabled={removalBlocked} checked={removalSelection.includes(item.id)} onchange={(event) => removalSelection = event.currentTarget.checked ? [...removalSelection, item.id] : removalSelection.filter(id => id !== item.id)} /></label><span aria-label={item.kind}>{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span></span>
-                      <span role="cell" class="trash-item"><span class="trash-name">{item.name}</span><span class="trash-metadata" aria-hidden="true">{@render modifiedDateLabel(item)} · {typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span></span><span role="cell" class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span><span role="cell" class="file-modified">{@render modifiedDateLabel(item)}</span><span role="cell" class="file-size">{typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
-                      <div role="cell" class="trash-actions"><Button variant="outline" size="sm" disabled={removalBlocked} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button></div>
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
+              {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{:else if trashLoading && !restorationPending}<p role="status">Loading trash…</p>{/if}
+              <p id="trash-empty-status" class="sr-only" aria-live="polite">{trashEmpty ? 'Trash is empty.' : ''}</p>
+              <div class="narrow-sort"><Label for="trash-sort">Sort Trash by</Label><select id="trash-sort" aria-busy={trashLoading} value={trashSort} disabled={resultSortBlocked} onchange={(event) => setResultSort('trash', event.currentTarget.value as ResultSort)}>{@render resultSortOptions()}</select></div>
+              <div role="table" aria-label="Trash items" aria-describedby={trashEmpty ? 'trash-empty-status' : undefined}>
+                <div class="trash-sort" role="row">
+                  <SortHeader label="Name" column="name" sort={trashSort} busy={trashLoading && trashSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'name'))} />
+                  <SortHeader label="Location" column="location" sort={trashSort} busy={trashLoading && trashSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'location'))} />
+                  <SortHeader label="Modified" column="modified" sort={trashSort} busy={trashLoading && trashSort.startsWith('modified_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'modified'))} />
+                  <SortHeader label="Size" column="size" class="trash-size-sort" sort={trashSort} busy={trashLoading && trashSort.startsWith('size_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'size'))} />
+                  <span role="columnheader" aria-label="Selection"></span>
+                  <span role="columnheader"><span class="sr-only">Actions</span></span>
+                </div>
+                {#if deletedItems.length > 0}
+                  <ul role="rowgroup">
+                    {#each deletedItems as item (item.id)}
+                      <li class="trash-row" role="row" aria-label={item.name}>
+                        <span role="cell" class="trash-item">
+                          <span class="trash-name"><span class="trash-kind" class:folder-icon={item.kind === 'folder'} role="img" aria-label={item.kind}>{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span>{item.name}</span></span>
+                          <span class="trash-metadata" aria-hidden="true">{@render modifiedDateLabel(item)} · {typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
+                        </span>
+                        <span role="cell" class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span>
+                        <span role="cell" class="file-modified">{@render modifiedDateLabel(item)}</span>
+                        <span role="cell" class="file-size">{typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
+                        <span role="cell" class="trash-selection"><label><input type="checkbox" aria-label={`Select ${item.name}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}`} disabled={removalBlocked} checked={removalSelection.includes(item.id)} onchange={(event) => removalSelection = event.currentTarget.checked ? [...removalSelection, item.id] : removalSelection.filter(id => id !== item.id)} /></label></span>
+                        <div role="cell" class="trash-actions"><Button variant="outline" size="sm" disabled={removalBlocked} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button></div>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
               </div>
               {#if trashPageIndex > 0 || trashHasMore}
                 <nav class="flex flex-wrap gap-2" aria-label="Trash pages">
@@ -3257,19 +3291,62 @@
     </Dialog.Root>
     {#if share}<ShareLinks {client} entry={share.entry} bind:busy={shareBusy} onclose={closeShare} />{/if}
 
-    <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !moveBusy && !bulkBusy) closeMove(); }}>
-      <Dialog.Content showCloseButton={!bulkBusy && (destinationAction === 'move' || !moveBusy)} class="max-h-[85dvh] overflow-y-auto" onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger ?? moveTrigger); moveTrigger = null; bulkTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>{destinationAction === 'copy' ? 'Copy' : 'Move'} {bulkAction === 'move' ? `${bulkTargets.length} selected items` : moveTarget?.name}</Dialog.Title><Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.{bulkAction === 'move' ? ' Each item is handled separately; some items may stay in place.' : ''}</Dialog.Description></Dialog.Header>
-        <nav aria-label={destinationAction === 'copy' ? 'Copy destination path' : 'Move destination path'} class="flex flex-wrap gap-2">{#each movePath as folder, index (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => loadMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>{/each}</nav>
-        <div class="grid gap-2 rounded-lg border p-3" aria-label="Destination folders" aria-busy={moveLoading}>
-          {#if moveLoading}<p role="status">Loading destinations...</p>{:else if moveFolders.length === 0}<p class="text-muted-foreground text-sm">No folders here.</p>{/if}
-          {#each moveFolders as folder (folder.id)}<Button variant="ghost" class="h-auto min-h-9 justify-start text-left break-all whitespace-normal" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy || folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder))} onclick={() => loadMoveFolder([...movePath, folder])}><FolderIcon class="size-4 shrink-0" />{folder.name}{folder.id === moveTarget?.id || (bulkAction === 'move' && bulkDestinationBlocked(folder)) ? ` (cannot ${destinationAction} into itself)` : ''}</Button>{/each}
-          {#if moveCursor}<Button variant="outline" disabled={moveCloseRefreshBusy || moveLoading || moveBusy || bulkBusy} onclick={() => loadMoveFolder(movePath, moveCursor)}>More destination folders</Button>{/if}
+    <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !destinationBusy) closeMove(); }}>
+      <Dialog.Content
+        bind:ref={moveDialog}
+        showCloseButton={!destinationBusy}
+        escapeKeydownBehavior={destinationBusy ? 'ignore' : 'close'}
+        interactOutsideBehavior={destinationBusy ? 'ignore' : 'close'}
+        class="max-h-[85dvh] overflow-y-auto"
+        {...(destinationAction === 'move' ? { 'aria-describedby': undefined } : {})}
+        onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger ?? moveTrigger); moveTrigger = null; bulkTrigger = null; }}
+      >
+        <Dialog.Header>
+          <Dialog.Title class="pr-8 [overflow-wrap:anywhere]">{destinationAction === 'copy' ? 'Copy' : 'Move'} {bulkAction === 'move' ? `${bulkTargets.length} selected items` : moveTarget?.name}</Dialog.Title>
+          {#if destinationAction === 'copy'}
+            <Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.</Dialog.Description>
+          {/if}
+        </Dialog.Header>
+        {#if movePath.length}
+          <nav aria-label={destinationAction === 'copy' ? 'Copy destination path' : 'Move destination path'} class="flex flex-wrap items-center gap-x-2 gap-y-1">
+            {#each movePath as folder, index (folder.id)}
+              {#if index > 0}<ChevronRightIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />{/if}
+              {#if destinationAction === 'move' && index === movePath.length - 1}
+                <span tabindex="-1" class="min-w-0 font-medium [overflow-wrap:anywhere]" aria-current="location">{folder.name}</span>
+              {:else}
+                <Button variant="link" class="h-auto min-h-[var(--control-height)] max-w-full min-w-0 p-0 text-left whitespace-normal [overflow-wrap:anywhere]" disabled={moveCloseRefreshBusy || moveLoading || destinationBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => navigateMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>
+              {/if}
+            {/each}
+          </nav>
+        {/if}
+        <div class="grid gap-1 rounded-lg border p-2" role="group" aria-label="Destination folders" aria-busy={moveLoading}>
+          {#if moveLoading}
+            <p role="status" class="px-2 py-1">Loading destinations…</p>
+          {:else if moveDestinationReady && !destinationFolders.length && !moveCursor}
+            <p class="text-muted-foreground px-2 py-1">{destinationAction === 'move' && moveAlreadyHere ? 'No other folders here.' : 'No folders here.'}</p>
+          {/if}
+          {#each destinationFolders as folder (folder.id)}
+            <Button variant="ghost" class="h-auto min-h-9 min-w-0 justify-start text-left whitespace-normal [overflow-wrap:anywhere]" disabled={moveCloseRefreshBusy || moveLoading || destinationBusy || (destinationAction === 'copy' && folder.id === moveTarget?.id)} onclick={() => navigateMoveFolder([...movePath, folder])}>
+              <FolderIcon class="size-4 shrink-0" />{folder.name}{destinationAction === 'copy' && folder.id === moveTarget?.id ? ' (cannot copy into itself)' : ''}
+            </Button>
+          {/each}
+          {#if moveCursor}<Button variant="outline" disabled={moveCloseRefreshBusy || moveLoading || destinationBusy} onclick={() => loadMoveFolder(movePath, moveCursor)}>More destination folders</Button>{/if}
         </div>
-        <p class="text-sm break-all">Destination: {movePath.map((folder) => folder.name).join(' / ') || 'Choose a folder'}</p>
-        {#if movePath.at(-1)?.id === moveTarget?.parent_id || (bulkAction === 'move' && bulkTargets.every((entry) => entry.parent_id === movePath.at(-1)?.id))}<p class="text-muted-foreground text-sm">{bulkAction === 'move' ? 'The selected items are already here.' : 'This item is already here.'} Open another folder or choose an ancestor above.</p>{/if}
+        {#if destinationAction === 'copy'}
+          <p class="text-sm break-all">Destination: {movePath.map((folder) => folder.name).join(' / ') || 'Choose a folder'}</p>
+          {#if moveAlreadyHere}<p class="text-muted-foreground text-sm">This item is already here. Open another folder or choose an ancestor above.</p>{/if}
+        {:else if moveDestinationReady && moveAlreadyHere && (destinationFolders.length || moveCursor)}
+          <p class="text-muted-foreground">{bulkAction === 'move' ? 'The selected items are already here.' : 'This item is already here.'}</p>
+        {/if}
         {#if moveError}<p role="alert">{moveError}</p>{/if}{#if moveNeedsRefresh || moveCloseRefreshBusy}<RefreshButton label="Close and refresh files" busyLabel="Refreshing files…" busy={moveCloseRefreshBusy} disabled={moveBusy || moveLoading} onclick={closeMoveAndRefresh} />{:else if moveError || moveLoading}<RefreshButton label="Refresh destinations" busyLabel="Refreshing destinations…" busy={moveLoading} disabled={moveBusy} onclick={() => loadMoveFolder(movePath.length ? movePath : folders.slice(0, 1))} />{/if}
-        <Dialog.Footer><Button variant="outline" disabled={moveBusy || bulkBusy} onclick={closeMove}>Cancel</Button><Button disabled={moveBusy || bulkBusy || moveNeedsRefresh || moveLoading || !moveDestinationReady || !movePath.length || movePath.at(-1)?.id === moveTarget?.parent_id || (bulkAction === 'move' && bulkTargets.every((entry) => entry.parent_id === movePath.at(-1)?.id))} aria-busy={moveBusy || bulkBusy} onclick={() => bulkAction === 'move' ? runBulk() : destinationAction === 'copy' ? copyEntry() : moveEntry()}>{destinationAction === 'copy' ? (moveBusy ? 'Copying…' : 'Copy here') : (moveBusy || bulkBusy ? 'Moving...' : 'Move here')}</Button></Dialog.Footer>
+        <Dialog.Footer>
+          <Button variant="outline" disabled={destinationBusy} onclick={closeMove}>Cancel</Button>
+          <Button disabled={!canConfirmMove} aria-disabled={destinationBusy || undefined} aria-busy={destinationBusy} class="aria-disabled:cursor-default" onclick={() => {
+            if (!destinationBusy) return bulkAction === 'move' ? runBulk() : destinationAction === 'copy' ? copyEntry() : moveEntry();
+          }}>
+            {destinationAction === 'copy' ? (moveBusy ? 'Copying…' : 'Copy here') : (destinationBusy ? 'Moving…' : 'Move here')}
+          </Button>
+        </Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={bulkAction === 'trash'} onOpenChange={(open) => { if (!open) closeBulk(); }}>
