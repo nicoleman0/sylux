@@ -456,7 +456,7 @@
     while (value >= 1024 && index < units.length - 1) { value /= 1024; index++; }
     return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${units[index]}`;
   }
-  let sessionGeneration = 0;
+  let sessionGeneration = $state(0);
   let loggingOut = $state(false);
   let accounts = $state<Account[]>([]);
   const enabledAdministratorCount = $derived(accounts.filter((account) => account.enabled && account.role === 'administrator').length);
@@ -2247,8 +2247,26 @@
     const trigger = previewTrigger;
     const generation = sessionGeneration;
     const request = navigationRequest;
+    const fallback = accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title';
     previewEntry = null; previewTrigger = null;
-    void tick().then(() => { if (generation === sessionGeneration && request === navigationRequest) restoreFocus(trigger); });
+    void tick().then(() => { if (generation === sessionGeneration && request === navigationRequest) restoreFocus(trigger, fallback); });
+  }
+  async function textEditSaved(entry: Entry): Promise<void> {
+    const visible = previewEntry?.id === entry.id;
+    if (visible) closePreview();
+    const generation = sessionGeneration;
+    const feedback = feedbackRevision;
+    if (searchQuery) browseDirty = true;
+    if (!retainingRoute && !accountView && !settingsView && !showTrash) {
+      const refreshed = await refresh();
+      if (visible && generation === sessionGeneration && feedback === feedbackRevision) {
+        actionNotice = refreshed ? 'Changes saved.' : 'Changes saved. Refresh files to see them.';
+        await tick();
+        if (generation === sessionGeneration && feedback === feedbackRevision && document.activeElement === document.body) {
+          restoreFocus(null);
+        }
+      }
+    } else if (visible) actionNotice = 'Changes saved.';
   }
   let share = $state<{ entry: Entry | null; trigger: HTMLElement } | null>(null);
   let shareBusy = $state(false);
@@ -2960,6 +2978,11 @@
           </div>
         </header>
         <div id="main-content" class="workspace-main">
+            {#key sessionGeneration}
+              <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client}
+                onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }}
+                onresume={openPreview} onsaved={textEditSaved} />
+            {/key}
             {#if archiveBusy}<p role="status" class="workspace-feedback">Preparing download…</p>{/if}
             {#if actionNotice}
               {#key feedbackRevision}<div class="action-feedback workspace-feedback">
@@ -3266,7 +3289,6 @@
         {@render betaNotice(!accountView && !settingsView && !showTrash)}
       </Sidebar.Inset>
     </Sidebar.Provider>
-    <FilePreview entry={previewEntry} url={previewEntry ? listing.downloadUrl(previewEntry.id) : ''} {client} onclose={closePreview} ondownload={() => { if (previewEntry) void download(previewEntry); }} />
     <Dialog.Root open={createOpen} onOpenChange={(open) => { if (!folderBusy) createOpen = open; }}>
       <Dialog.Content showCloseButton={!folderBusy} onOpenAutoFocus={(event) => { event.preventDefault(); folderInput?.focus(); }} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(createTrigger); createTrigger = null; }}>
         <Dialog.Header><Dialog.Title>Create folder</Dialog.Title><Dialog.Description>Add a folder to {currentFolder.name}.</Dialog.Description></Dialog.Header>

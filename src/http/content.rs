@@ -3,7 +3,7 @@
 use super::{AuthState, middleware::session_cookie};
 use crate::domain::{
     authz::validate_session,
-    upload::{revision_etag, validate_id},
+    upload::{MAX_TEXT_EDIT_LENGTH, is_editable_text, revision_etag, validate_id},
 };
 use crate::persistence::payload::PayloadError;
 use axum::{
@@ -106,6 +106,54 @@ async fn resolve(
         snapshot.commit()?;
         Ok(content)
     }).await.map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "database_unavailable"))?
+}
+
+pub(super) async fn validate_text_edit_source(
+    state: &AuthState,
+    headers: &HeaderMap,
+    storage: std::sync::Arc<crate::domain::upload::UploadStorage>,
+    entry_id: &str,
+    revision: &str,
+    name: &str,
+) -> Result<(), Response> {
+    let source = resolve(state, headers, entry_id).await?;
+    if source.revision_id != revision || source.name != name {
+        return Err(error(
+            StatusCode::PRECONDITION_FAILED,
+            "replacement_changed",
+        ));
+    }
+    if source.length > MAX_TEXT_EDIT_LENGTH {
+        return Err(error(StatusCode::PAYLOAD_TOO_LARGE, "text_edit_too_large"));
+    }
+    let bytes = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let verified =
+            storage
+                .payloads
+                .open_verified(&source.blob_id, source.length, source.sha256)?;
+        let mut bytes = Vec::with_capacity(source.length as usize);
+        verified
+            .file
+            .take(source.length + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| PayloadError::Io("text_edit_read_failed"))?;
+        if bytes.len() as u64 != source.length {
+            return Err(PayloadError::Integrity);
+        }
+        Ok(bytes)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .ok_or_else(|| error(StatusCode::INTERNAL_SERVER_ERROR, "content_integrity_error"))?;
+    if !is_editable_text(&bytes) {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "text_edit_encoding",
+        ));
+    }
+    Ok(())
 }
 
 fn now() -> i64 {

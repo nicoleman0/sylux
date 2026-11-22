@@ -14,6 +14,7 @@ export type RequestOptions = {
   headers?: Record<string, string>;
   signal?: AbortSignal;
   maxResponseBytes?: number;
+  onResponseHeaders?: (headers: Headers) => void;
   onUploadProgress?: (loaded: number, total: number) => void;
 };
 
@@ -96,6 +97,7 @@ export class HttpTransport implements ApiTransport {
       throw new HttpError(response.status, details);
     }
     if (response.status === 204) return undefined as T;
+    options.onResponseHeaders?.(response.headers);
     const contentType = response.headers.get('content-type') ?? '';
     if (options.maxResponseBytes !== undefined) {
       const limit = options.maxResponseBytes;

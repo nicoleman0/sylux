@@ -1596,7 +1596,7 @@ async fn declared_length_and_client_digest_are_checked_before_byte_zero_retry() 
 }
 
 impl Fixture {
-    async fn replacement(&self, existing: &Value, bytes: &[u8]) -> (String, String, Value) {
+    fn replacement_admission(&self, existing: &Value, bytes: &[u8]) -> Value {
         let parent = existing["parent_id"].as_str().unwrap();
         let parent_generation: i64 = self
             .db()
@@ -1619,23 +1619,34 @@ impl Fixture {
                 |row| row.get(0),
             )
             .unwrap();
-        let admission = serde_json::json!({
+        serde_json::json!({
             "parent_id": parent, "parent_etag": folder_etag(parent, parent_generation as u64),
             "name": existing["name"], "length": bytes.len(), "sha256": hex(&Sha256::digest(bytes)),
             "replacement": { "entry_id": id, "etag": folder_etag(id, generation as u64) },
-        });
+        })
+    }
+
+    async fn issue_replacement(&self, admission: &Value, auth: &Auth) -> Response {
         let mut ticket_body = admission.clone();
         ticket_body["scope"] = "upload_create".into();
-        let issued = self
-            .mutate(
-                "POST",
-                "/mutation-tickets",
-                &owner_auth(),
-                None,
-                &[("Content-Type", "application/json".to_owned())],
-                serde_json::to_vec(&ticket_body).unwrap(),
-            )
-            .await;
+        self.mutate(
+            "POST",
+            "/mutation-tickets",
+            auth,
+            None,
+            &[("Content-Type", "application/json".to_owned())],
+            serde_json::to_vec(&ticket_body).unwrap(),
+        )
+        .await
+    }
+
+    async fn replacement(&self, existing: &Value, bytes: &[u8]) -> (String, String, Value) {
+        self.admit_replacement(self.replacement_admission(existing, bytes))
+            .await
+    }
+
+    async fn admit_replacement(&self, admission: Value) -> (String, String, Value) {
+        let issued = self.issue_replacement(&admission, &owner_auth()).await;
         assert_eq!(issued.status, 201, "{}", issued.text());
         let ticket = issued.header("x-mutation-id").unwrap().to_owned();
         let id = issued.json()["mutation_id"].as_str().unwrap().to_owned();
@@ -1707,6 +1718,173 @@ impl Fixture {
         assert_eq!(response.status, 200, "{}", response.text());
         assert_eq!(response.body.as_ref(), expected);
     }
+}
+
+#[tokio::test]
+async fn text_edit_validates_type_size_encoding_and_owner() {
+    use sylux::domain::upload::MAX_TEXT_EDIT_LENGTH;
+    let fixture = Fixture::new("text-edit-eligibility").await;
+    let valid = fixture
+        .upload_current("notes.TXT", b"First\r\nSecond\r\n")
+        .await;
+    let bad_source = fixture.upload_current("binary.txt", b"bad\xff").await;
+    let large = fixture
+        .upload_current("large.md", &vec![b'a'; MAX_TEXT_EDIT_LENGTH as usize + 1])
+        .await;
+    let other_type = fixture.upload_current("notes.log", b"UTF-8").await;
+    for (entry, length, expected, code) in [
+        (&bad_source, 1, 422, "text_edit_encoding"),
+        (&large, 1, 413, "text_edit_too_large"),
+        (&other_type, 1, 415, "text_edit_type"),
+        (&valid, MAX_TEXT_EDIT_LENGTH + 1, 413, "text_edit_too_large"),
+    ] {
+        let mut admission = fixture.replacement_admission(entry, b"x");
+        admission["length"] = length.into();
+        admission["replacement"]["text_revision"] = entry["revision_id"].clone();
+        let response = fixture.issue_replacement(&admission, &owner_auth()).await;
+        assert_eq!(response.status, expected, "{}", response.text());
+        assert_eq!(response.json()["code"], code);
+    }
+
+    let invalid = b"x\x00";
+    let mut admission = fixture.replacement_admission(&valid, invalid);
+    admission["replacement"]["text_revision"] = valid["revision_id"].clone();
+    let no_access = fixture.issue_replacement(&admission, &other_auth()).await;
+    assert_eq!(no_access.status, 404, "{}", no_access.text());
+    let mut stale_revision = admission.clone();
+    stale_revision["replacement"]["text_revision"] = bad_source["revision_id"].clone();
+    assert_eq!(
+        fixture
+            .issue_replacement(&stale_revision, &owner_auth())
+            .await
+            .status,
+        412
+    );
+    let (id, ticket, admission) = fixture.admit_replacement(admission).await;
+    let forbidden = fixture
+        .mutate(
+            "PUT",
+            &format!("/uploads/{id}/content"),
+            &other_auth(),
+            Some(&ticket),
+            &[("Content-Type", "application/octet-stream".into())],
+            invalid.to_vec(),
+        )
+        .await;
+    assert_eq!(forbidden.status, 401, "{}", forbidden.text());
+    let append = fixture
+        .mutate(
+            "PATCH",
+            &format!("/uploads/{id}/content"),
+            &owner_auth(),
+            Some(&ticket),
+            &[],
+            invalid.to_vec(),
+        )
+        .await;
+    assert_eq!(append.json()["code"], "text_edit_requires_full_content");
+    let response = fixture.replacement_content(&id, &ticket, invalid).await;
+    assert_eq!(response.status, 422, "{}", response.text());
+    assert_eq!(response.json()["code"], "text_edit_encoding");
+    assert_eq!(
+        fixture
+            .replacement_commit(&id, &ticket, &admission)
+            .await
+            .status,
+        409
+    );
+    fixture.assert_content(&valid, b"First\r\nSecond\r\n").await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn text_edit_commit_rejects_a_second_staged_save_and_keeps_old_bytes_recoverable() {
+    let fixture = Fixture::new("text-edit-two-staged").await;
+    let original = "original café\r\n".as_bytes();
+    let old = fixture.upload("notes.md", original).await;
+    let winner = "# Updated 📝\r\n\r\n".as_bytes();
+    let loser = b"stale draft\r\n";
+    let mut first = fixture.replacement_admission(&old, winner);
+    first["replacement"]["text_revision"] = old["revision_id"].clone();
+    let mut second = fixture.replacement_admission(&old, loser);
+    second["replacement"]["text_revision"] = old["revision_id"].clone();
+    let (a, a_ticket, a_admission) = fixture.admit_replacement(first).await;
+    let (b, b_ticket, b_admission) = fixture.admit_replacement(second).await;
+    assert_eq!(
+        fixture
+            .replacement_content(&a, &a_ticket, winner)
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        fixture
+            .replacement_content(&b, &b_ticket, loser)
+            .await
+            .status,
+        200
+    );
+    let saved = fixture
+        .replacement_commit(&a, &a_ticket, &a_admission)
+        .await;
+    assert_eq!(saved.status, 201, "{}", saved.text());
+    assert_eq!(
+        fixture
+            .replacement_commit(&b, &b_ticket, &b_admission)
+            .await
+            .status,
+        412
+    );
+    fixture.assert_content(&saved.json(), winner).await;
+    let db = fixture.db();
+    let (state, digest): (String, Vec<u8>) = db.lock().unwrap().query_row(
+        "SELECT e.state,r.sha256 FROM entry e JOIN revision r ON r.revision_id=e.current_revision_id WHERE e.entry_id=?1",
+        [old["id"].as_str().unwrap()], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(state, "deleted");
+    assert_eq!(digest, Sha256::digest(original).as_slice());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn text_edit_rechecks_content_revision_even_when_entry_and_parent_etags_match() {
+    let fixture = Fixture::new("text-edit-content-revision").await;
+    let bytes = b"Original\n";
+    let old = fixture.upload("notes.txt", bytes).await;
+    let proposed = b"Draft\n";
+    let mut admission = fixture.replacement_admission(&old, proposed);
+    admission["replacement"]["text_revision"] = old["revision_id"].clone();
+    let (id, ticket, admission) = fixture.admit_replacement(admission).await;
+    assert_eq!(
+        fixture
+            .replacement_content(&id, &ticket, proposed)
+            .await
+            .status,
+        200
+    );
+
+    let entry = old["id"].as_str().unwrap();
+    let replacement_revision = "fedcba9876543210fedcba9876543210";
+    {
+        let db = fixture.db();
+        let connection = db.lock().unwrap();
+        connection.execute(
+            "INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id)
+             SELECT ?1,entry_id,blob_id,length,sha256,committed_at,actor_account_id FROM revision WHERE revision_id=?2",
+            params![replacement_revision, old["revision_id"].as_str().unwrap()],
+        ).unwrap();
+        connection
+            .execute(
+                "UPDATE entry SET current_revision_id=?1 WHERE entry_id=?2",
+                params![replacement_revision, entry],
+            )
+            .unwrap();
+    }
+    let result = fixture.replacement_commit(&id, &ticket, &admission).await;
+    assert_eq!(result.status, 412, "{}", result.text());
+    assert_eq!(result.json()["code"], "replacement_changed");
+    fixture.assert_content(&old, bytes).await;
+    fixture.close().await;
 }
 
 #[tokio::test]

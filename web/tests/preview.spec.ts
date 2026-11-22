@@ -1,3 +1,5 @@
+import assert from 'node:assert/strict';
+import { draftBytes, editorText, preserveLineEndings } from '../src/lib/text-edit';
 import { expect, test } from '@playwright/test';
 import { ApiClient, ResponseTooLargeError, type ApiTransport, type RequestOptions } from '../src/lib/api';
 import type { FileEntry } from '../src/lib/listing';
@@ -5,10 +7,11 @@ import { previewUnavailable, loadPreview, PREVIEW_LIMIT, PDF_PREVIEW_LIMIT } fro
 import { scannedPdf, mixedPdf, manyPagesPdf, blankPdf, annotatedPdf } from './fixtures/pdf-fixtures';
 
 const entry = (name: string, size = 10): FileEntry => ({ id: 'preview', parent_id: 'root', kind: 'file', name, size, etag: '"1"' });
-function harness(blob: Blob) {
+function harness(blob: Blob, etag?: string) {
   const requests: Array<{ path: string; options: RequestOptions }> = [];
   const transport: ApiTransport = { async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     requests.push({ path, options });
+    if (etag) options.onResponseHeaders?.(new Headers({ etag }));
     return blob as T;
   } };
   return { client: new ApiClient(transport), requests };
@@ -38,7 +41,22 @@ test('text previews preserve UTF-8 content and request bounded authenticated byt
   const { client, requests } = harness(new Blob([text], { type: 'application/json' }));
   const signal = new AbortController().signal;
   expect(await loadPreview(client, entry('notes.txt'), '/entries/preview/content', signal)).toEqual({ kind: 'text', text });
-  expect(requests).toEqual([{ path: '/entries/preview/content', options: { signal, maxResponseBytes: PREVIEW_LIMIT, headers: {} } }]);
+  expect(requests).toEqual([{ path: '/entries/preview/content', options: { signal, maxResponseBytes: PREVIEW_LIMIT, headers: {}, onResponseHeaders: expect.any(Function) } }]);
+});
+
+test('only bounded Markdown and plain text with a content revision are editable', async () => {
+  const revision = 'a'.repeat(32);
+  const etag = `"${revision}"`;
+  const { client } = harness(new Blob(['\uFEFFline\r\n']), etag);
+  const signal = new AbortController().signal;
+  expect(await loadPreview(client, entry('notes.MD'), '/content', signal)).toEqual({
+    kind: 'text', text: 'line\r\n', edit: { revision, bom: true },
+  });
+  expect(await loadPreview(client, entry('notes.csv'), '/content', signal)).toEqual({ kind: 'text', text: 'line\r\n' });
+  const large = harness(new Blob(['a'.repeat(256 * 1024 + 1)]), etag);
+  const preview = await loadPreview(large.client, entry('large.txt'), '/content', signal);
+  expect(preview.kind).toBe('text');
+  expect(preview).not.toHaveProperty('edit');
 });
 
 test('invalid UTF-8 and binary control bytes do not become text previews', async () => {
@@ -402,4 +420,21 @@ test('unknown search file size still enforces the response preview limit', async
   } });
   const preview = await loadPreview(client, file, '/entries/unknown/content', new AbortController().signal);
   expect(preview.kind).toBe('unsupported');
+});
+
+
+test('text edits preserve surrounding separators and the UTF-8 BOM', async () => {
+  const wire = 'first\r\nsecond\nlast\r\n';
+  const changed = preserveLineEndings(wire, editorText(wire), 'first\nsecond 雪\nlast\n');
+  assert.equal(changed, 'first\r\nsecond 雪\nlast\r\n');
+  assert.deepEqual(Buffer.from(await draftBytes(changed, true).arrayBuffer()), Buffer.from('\uFEFFfirst\r\nsecond 雪\nlast\r\n'));
+});
+
+test('inserted lines follow the surrounding convention and empty files use LF', () => {
+  assert.equal(preserveLineEndings('first\r\nlast', 'first\nlast', 'first\nnew\nlast'), 'first\r\nnew\r\nlast');
+  assert.equal(preserveLineEndings('', '', 'first\nlast'), 'first\nlast');
+});
+
+test('removing text between a bare CR and an LF keeps both logical breaks', () => {
+  assert.equal(editorText(preserveLineEndings('a\rb\nc', 'a\nb\nc', 'a\n\nc')), 'a\n\nc');
 });
