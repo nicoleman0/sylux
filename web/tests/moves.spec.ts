@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 
 async function installMoveBackend(page: Page) {
   const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
@@ -33,10 +33,10 @@ async function installMoveBackend(page: Page) {
   await page.getByLabel('Password', { exact: true }).fill('password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await expect(page.locator('.file-row').filter({ hasText: 'notes.bin' })).toBeVisible();
-  return { moves, setFailure: (code: string | null) => { failure = code; } };
+  return { entries, moves, setFailure: (code: string | null) => { failure = code; } };
 }
 
-test('file moves use a nested destination and explain collisions on narrow screens', async ({ page }) => {
+test('file moves stay pending until the request settles and explain collisions on narrow screens', async ({ page }, testInfo) => {
   const backend = await installMoveBackend(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Options for notes.bin', exact: true }).click();
@@ -45,16 +45,44 @@ test('file moves use a nested destination and explain collisions on narrow scree
   await expect(dialog.getByRole('button', { name: 'Move here', exact: true })).toBeDisabled();
   await dialog.getByRole('button', { name: 'Destination', exact: true }).click();
   await dialog.getByRole('button', { name: 'Nested', exact: true }).click();
-  await expect(dialog.getByText('Destination: Files / Destination / Nested', { exact: true })).toBeVisible();
+  const breadcrumb = dialog.getByRole('navigation', { name: 'Move destination path' });
+  await expect(breadcrumb.locator('[aria-current="location"]')).toHaveText('Nested');
+  await expect(dialog.getByText('Nested', { exact: true })).toHaveCount(1);
+  let held: Route | undefined;
+  await page.route('**/entries/file/move', route => { held = route; });
   backend.setFailure('name_conflict');
-  await dialog.getByRole('button', { name: 'Move here', exact: true }).click();
+  const confirm = dialog.getByRole('button', { name: 'Move here', exact: true });
+  await expect(confirm).toBeEnabled();
+  await confirm.focus();
+  const requests: string[] = [];
+  page.on('request', request => {
+    if (request.url().endsWith('/entries/file/move')) requests.push(request.url());
+  });
+  await page.keyboard.press('Enter');
+  await expect.poll(() => !!held).toBe(true);
+  const pending = dialog.getByRole('button', { name: 'Moving…', exact: true });
+  await expect(pending).toBeDisabled();
+  await expect(pending).toHaveAttribute('aria-busy', 'true');
+  await expect(pending).toBeFocused();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Escape');
+  await expect(pending).toBeFocused();
+  await page.mouse.click(2, 2);
+  await expect(dialog).toBeVisible();
+  await dialog.screenshot({ path: testInfo.outputPath('move-narrow-pending.png'), animations: 'disabled' });
+  await held!.fallback();
+  await page.unroute('**/entries/file/move');
   await expect(dialog.getByRole('alert')).toContainText('Choose another folder');
+  expect(requests).toHaveLength(1);
+  await dialog.screenshot({ path: testInfo.outputPath('move-narrow-conflict.png'), animations: 'disabled' });
   await expect(page.locator('.file-row').filter({ hasText: 'notes.bin' })).toBeVisible();
   backend.setFailure(null);
   await dialog.getByRole('button', { name: 'Move here', exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByRole('status')).toContainText('Moved to Nested');
   await expect(page.locator('.file-row').filter({ hasText: 'notes.bin' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath('move-narrow-success.png'), animations: 'disabled' });
   expect(backend.moves).toEqual([
     { id: 'file', parent: 'nested', etag: '"file:1"' },
     { id: 'file', parent: 'nested', etag: '"file:1"' },
@@ -65,19 +93,65 @@ test('file moves use a nested destination and explain collisions on narrow scree
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test('folder picker prevents cycles and returns focus after keyboard dismissal', async ({ page }) => {
+test('folder picker hides a selected branch and keeps siblings and ancestors reachable by keyboard', async ({ page }, testInfo) => {
   const backend = await installMoveBackend(page);
-  const trigger = page.getByRole('button', { name: 'Options for Destination', exact: true });
-  await trigger.click();
-  await page.getByRole('menuitem', { name: 'Move', exact: true }).click();
+  backend.entries.push(
+    { id: 'descendant', parent_id: 'nested', name: 'Descendant', kind: 'folder', etag: '"descendant:1"' },
+    { id: 'sibling', parent_id: 'destination', name: 'Sibling', kind: 'folder', etag: '"sibling:1"' },
+  );
+  const visited: string[] = [];
+  page.on('request', request => {
+    const match = new URL(request.url()).pathname.match(/^\/folders\/([^/]+)\/children$/);
+    if (match) visited.push(match[1]!);
+  });
+  await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+  const trigger = page.getByRole('button', { name: 'Options for Nested', exact: true });
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('button', { name: 'Destination (cannot move into itself)', exact: true })).toBeDisabled();
-  await expect(dialog.getByRole('button', { name: 'Move here', exact: true })).toBeDisabled();
-  await page.keyboard.press('Escape');
-  await expect(dialog).toBeHidden();
-  await expect(trigger).toBeFocused();
+  const breadcrumb = dialog.getByRole('navigation', { name: 'Move destination path' });
+  const confirm = dialog.getByRole('button', { name: 'Move here', exact: true });
+  for (const width of [390, 1280]) {
+    for (const theme of ['light', 'dark'] as const) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.emulateMedia({ colorScheme: theme });
+      await trigger.focus();
+      await page.keyboard.press('Enter');
+      const move = page.getByRole('menuitem', { name: 'Move', exact: true });
+      await move.focus();
+      await page.keyboard.press('Enter');
+      await expect(confirm).toBeEnabled();
+      await dialog.getByRole('button', { name: 'Destination', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      await expect(breadcrumb.locator('[aria-current="location"]')).toHaveText('Destination');
+      await expect(confirm).toBeDisabled();
+      await expect(dialog.getByRole('group', { name: 'Destination folders' }).getByText(/Nested|Descendant/)).toHaveCount(0);
+      const sibling = dialog.getByRole('button', { name: 'Sibling', exact: true });
+      await sibling.focus();
+      await expect(sibling).toBeFocused();
+      await expect(page.locator('html')).toHaveClass(theme === 'dark' ? /dark/ : '');
+      expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await dialog.screenshot({ path: testInfo.outputPath(`move-${width}-${theme}.png`), animations: 'disabled' });
+      await page.keyboard.press('Enter');
+      await expect(breadcrumb.locator('[aria-current="location"]')).toHaveText('Sibling');
+      await expect(confirm).toBeEnabled();
+      await breadcrumb.getByRole('button', { name: 'Files', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      await expect(breadcrumb.locator('[aria-current="location"]')).toHaveText('Files');
+      await expect(confirm).toBeEnabled();
+      await page.keyboard.press('Escape');
+      await expect(dialog).toBeHidden();
+      await expect(trigger).toBeFocused();
+    }
+  }
+  expect(visited).not.toContain('nested');
+  expect(visited).not.toContain('descendant');
+  expect(backend.moves).toEqual([]);
+});
+
+test('a destination that disappears is reported by the Move picker', async ({ page }) => {
+  const backend = await installMoveBackend(page);
   await page.getByRole('button', { name: 'Options for notes.bin', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Move', exact: true }).click();
+  const dialog = page.getByRole('dialog');
   await dialog.getByRole('button', { name: 'Destination', exact: true }).click();
   backend.setFailure('not_found');
   await dialog.getByRole('button', { name: 'Move here', exact: true }).click();
@@ -98,7 +172,7 @@ test('failed destination navigation blocks moving until that destination loads',
   await expect(dialog.getByRole('button', { name: 'Move here', exact: true })).toBeEnabled();
   await dialog.getByRole('button', { name: 'Nested', exact: true }).click();
   await expect(dialog.getByRole('alert')).toContainText('Could not open this destination');
-  await expect(dialog.getByText('Destination: Files / Destination / Nested', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('navigation', { name: 'Move destination path' }).locator('[aria-current="location"]')).toHaveText('Nested');
   await expect(dialog.getByRole('button', { name: 'Move here', exact: true })).toBeDisabled();
   expect(backend.moves).toHaveLength(0);
   unavailable = false;
