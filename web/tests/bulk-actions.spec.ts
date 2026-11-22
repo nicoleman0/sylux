@@ -333,6 +333,47 @@ async function installSearchBulkBackend(page: Page, count = 4, pageSize = 50) {
   return { ...backend, staleNext: () => { staleNext = true; }, searches: () => searches };
 }
 
+for (const surface of ['Files', 'Search'] as const) {
+  for (const width of [1280, 390]) {
+    for (const theme of ['light', 'dark'] as const) {
+      test(`${surface} header stays under the pointer at ${width}px in ${theme}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 900 });
+        if (surface === 'Search') await installSearchBulkBackend(page);
+        else await installBulkBackend(page);
+        if (theme === 'dark') await page.getByRole('button', { name: 'Switch to dark mode' }).click();
+        const table = page.getByRole('table', { name: surface === 'Files' ? 'Files in current folder' : 'Search matches' });
+        const header = table.getByRole('checkbox', { name: 'Select all loaded items' });
+        const rows = table.getByRole('cell').getByRole('checkbox');
+        await expect(rows).toHaveCount(4);
+        const box = (await header.boundingBox())!;
+        const x = box.x + box.width / 2;
+        const y = box.y + box.height / 2;
+        for (let iteration = 0; iteration < 2; iteration++) {
+          await page.mouse.click(x, y);
+          await expect(header).toBeChecked();
+          await expect(page.getByText('4 selected', { exact: true })).toBeVisible();
+          expect(await header.boundingBox()).toEqual(box);
+          await page.screenshot({ path: test.info().outputPath(`${surface}-${width}-${theme}.png`), animations: 'disabled' });
+          await page.mouse.click(x, y);
+          await expect(header).not.toBeChecked();
+          await expect(table.locator('[role=cell] input:checked')).toHaveCount(0);
+          expect(await header.boundingBox()).toEqual(box);
+        }
+        await header.focus();
+        await page.keyboard.press('Space');
+        await expect(header).toBeChecked();
+        await expect(header).toBeFocused();
+        await page.keyboard.press('Space');
+        await expect(header).not.toBeChecked();
+        await expect(header).toBeFocused();
+        await rows.first().check();
+        await expect(header).toBeChecked({ indeterminate: true });
+        expect(await header.boundingBox()).toEqual(box);
+      });
+    }
+  }
+}
+
 test('search selection supports pointer and keyboard ranges and clears on query or page changes', async ({ page }) => {
   await installSearchBulkBackend(page, 6, 4);
   const checkboxes = page.getByRole('table', { name: 'Search matches' }).getByRole('cell').getByRole('checkbox');

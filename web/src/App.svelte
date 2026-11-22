@@ -3179,8 +3179,8 @@
                 {:else if searchError}<Alert.Root variant="destructive" role="alert"><Alert.Title>Search failed</Alert.Title><Alert.Description><p>{searchError}</p><Button id="search-page-retry" variant="outline" size="sm" class="mt-2" onclick={() => runSearch(searchRetryCursor, searchRetryPage)}>Try again</Button></Alert.Description></Alert.Root>
                 {:else if searchItems.length === 0}<p>No matching files or folders.</p>
                 {/if}
-                {@render selectionToolbar()}
                 <div role="table" aria-label="Search matches"><div role="rowgroup" class="file-list"><div role="row" class="list-head selectable-head modified-head search-head">{@render selectionHeader(searchLoading || !!searchInputError || !!searchError)}<SortHeader label="Name" column="name" sort={searchSort} busy={searchLoading && searchSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'name'))} /><SortHeader label="Location" column="location" class="file-location" sort={searchSort} busy={searchLoading && searchSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'location'))} /><SortHeader label="Modified" column="modified" sort={searchSort} busy={searchLoading && searchSort.startsWith('modified_')} class="file-modified" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'modified'))} /><SortHeader label="Size" column="size" sort={searchSort} busy={searchLoading && searchSort.startsWith('size_')} class="file-size" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'size'))} /><span role="columnheader"><span class="sr-only">Options</span></span></div></div>
+                {@render selectionToolbar()}
                 <div role="rowgroup" class="file-list">
                 {#if !searchLoading && !searchInputError && !searchError}
                   {#each searchItems as hit (hit.entry.id)}
@@ -3210,7 +3210,6 @@
               <RefreshButton size="default" label="Refresh" busyLabel="Refreshing…" busy={loading || searchLoading} disabled={restorationPending || bulkBusy || bulkNeedsRefresh} onclick={() => { if (restorationPending || loading || searchLoading || bulkBusy || bulkNeedsRefresh) return; void refreshWorkspace(); }} aria-label="Refresh folder" />
             </section>
             {#if !folderChooserSupported}<p id="folder-upload-help" class="text-xs text-muted-foreground mb-3">Folder selection is unavailable in this browser. Choose files or drop a folder instead.</p>{/if}
-            {@render selectionToolbar()}
             {#if currentSortAttempt?.failed}<p class="mb-2 text-sm text-destructive" role="alert">Could not sort files. Choose a column to try again.</p>{/if}
             <section class="file-drop-region" role="table" aria-label="Files in current folder" ondragover={(event) => dragOver(event, currentFolder)} ondragleave={(event) => dragLeave(event, currentFolder)} ondrop={(event) => dropEntry(event, currentFolder)} data-drop-target="current-folder" data-drop-active={dropTarget === currentFolder.id}>
             {#if !listingError && entriesFolderId && entriesFolderId === currentFolder.id && (entries.length || !loading)}
@@ -3224,6 +3223,7 @@
                 </div>
               </div>
             {/if}
+            {@render selectionToolbar()}
             {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}{#if restorationUnavailable}<Button variant="outline" class="mt-2" onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files'); }}>Open Files</Button>{:else}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy || (restorationPending && !restorationFailed)} class="mt-2" onclick={retryFolder} />{/if}{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
             {:else if restorationPending && (!presentedRoute || searchDuringRoute)}{@render routePlaceholder()}
             {:else if loading && !restorationPending && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
