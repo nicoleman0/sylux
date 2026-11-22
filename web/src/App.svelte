@@ -3108,25 +3108,42 @@
             {/if}
           </section>
         {:else if showTrash}
+            {@const trashEmpty = !restorationPending && !trashLoading && !trashError && deletedItems.length === 0}
             <section class="trash-content grid gap-4" aria-labelledby="trash-heading" inert={retainingRoute} aria-busy={trashLoading || restorationPending}>
               <div class="trash-heading-row"><h1 id="trash-heading" tabindex="-1">Trash</h1><div class="flex flex-wrap justify-end gap-2"><RefreshButton label="Refresh trash" busyLabel="Refreshing trash…" busy={trashLoading} disabled={restorationPending || trashBusy || removalSubmitting} onclick={refreshWorkspace} /><Button variant="outline" size="sm" disabled={removalBlocked || !deletedItems.length} aria-busy={removalPreparing === 'all'} onclick={(event) => prepareRemoval(true, event.currentTarget)}>{removalPreparing === 'all' ? 'Preparing…' : 'Empty Trash'}</Button></div></div>
               {#if removalError}<p role="alert">{removalError}</p>{/if}
               {#if deletedItems.length}<div class="flex flex-wrap items-center gap-3"><label class="flex items-center gap-2"><input type="checkbox" aria-label="Select all items on this page" disabled={removalBlocked} checked={!!deletedItems.length && removalSelection.length === deletedItems.length} onchange={(event) => removalSelection = event.currentTarget.checked ? deletedItems.map(item => item.id) : []} />Select page</label>{#if removalSelection.length}<span>{removalSelection.length} selected</span><Button variant="destructive" size="sm" disabled={removalBlocked} aria-busy={removalPreparing === 'selected'} onclick={(event) => prepareRemoval(false, event.currentTarget)}>{removalPreparing === 'selected' ? 'Preparing…' : 'Remove permanently'}</Button>{/if}</div>{/if}
               {#if trashNotice}<p role="status">{trashNotice}</p>{/if}
               {#if trashError}<p role="alert">{trashError}</p>{#if trashRetry}<Button id="trash-page-retry" variant="outline" class="justify-self-start" disabled={trashLoading || trashBusy} aria-busy={trashPaging === 'retry' && trashLoading} onclick={() => pageTrash('retry')}>{trashPaging === 'retry' && trashLoading ? 'Retrying…' : 'Try again'}</Button>{/if}{/if}
-              {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{:else if trashLoading && !restorationPending}<p role="status">Loading trash…</p>{:else if !trashError && deletedItems.length === 0}<p>Trash is empty.</p>{/if}
-                <div class="narrow-sort"><Label for="trash-sort">Sort Trash by</Label><select id="trash-sort" aria-busy={trashLoading} value={trashSort} disabled={resultSortBlocked} onchange={(event) => setResultSort('trash', event.currentTarget.value as ResultSort)}>{@render resultSortOptions()}</select></div><div role="table" aria-label="Trash items"><div class="trash-sort" role="row"><span role="columnheader"><span class="sr-only">Kind</span></span><SortHeader label="Name" column="name" sort={trashSort} busy={trashLoading && trashSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'name'))} /><SortHeader label="Location" column="location" sort={trashSort} busy={trashLoading && trashSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'location'))} /><SortHeader label="Modified" column="modified" sort={trashSort} busy={trashLoading && trashSort.startsWith('modified_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'modified'))} /><SortHeader label="Size" column="size" sort={trashSort} busy={trashLoading && trashSort.startsWith('size_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'size'))} /><span role="columnheader"><span class="sr-only">Actions</span></span></div>
-              {#if deletedItems.length > 0}
-                <ul role="rowgroup">
-                  {#each deletedItems as item (item.id)}
-                    <li class="trash-row" role="row" aria-label={item.name}>
-                      <span role="cell" class="trash-kind" class:folder-icon={item.kind === 'folder'}><label><input type="checkbox" aria-label={`Select ${item.name}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}`} disabled={removalBlocked} checked={removalSelection.includes(item.id)} onchange={(event) => removalSelection = event.currentTarget.checked ? [...removalSelection, item.id] : removalSelection.filter(id => id !== item.id)} /></label><span aria-label={item.kind}>{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span></span>
-                      <span role="cell" class="trash-item"><span class="trash-name">{item.name}</span><span class="trash-metadata" aria-hidden="true">{@render modifiedDateLabel(item)} · {typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span></span><span role="cell" class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span><span role="cell" class="file-modified">{@render modifiedDateLabel(item)}</span><span role="cell" class="file-size">{typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
-                      <div role="cell" class="trash-actions"><Button variant="outline" size="sm" disabled={removalBlocked} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button></div>
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
+              {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{:else if trashLoading && !restorationPending}<p role="status">Loading trash…</p>{/if}
+              <p id="trash-empty-status" class="sr-only" aria-live="polite">{trashEmpty ? 'Trash is empty.' : ''}</p>
+              <div class="narrow-sort"><Label for="trash-sort">Sort Trash by</Label><select id="trash-sort" aria-busy={trashLoading} value={trashSort} disabled={resultSortBlocked} onchange={(event) => setResultSort('trash', event.currentTarget.value as ResultSort)}>{@render resultSortOptions()}</select></div>
+              <div role="table" aria-label="Trash items" aria-describedby={trashEmpty ? 'trash-empty-status' : undefined}>
+                <div class="trash-sort" role="row">
+                  <SortHeader label="Name" column="name" sort={trashSort} busy={trashLoading && trashSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'name'))} />
+                  <SortHeader label="Location" column="location" sort={trashSort} busy={trashLoading && trashSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'location'))} />
+                  <SortHeader label="Modified" column="modified" sort={trashSort} busy={trashLoading && trashSort.startsWith('modified_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'modified'))} />
+                  <SortHeader label="Size" column="size" class="trash-size-sort" sort={trashSort} busy={trashLoading && trashSort.startsWith('size_')} disabled={resultSortBlocked} onclick={() => setResultSort('trash', nextSort(trashSort, 'size'))} />
+                  <span role="columnheader" aria-label="Selection"></span>
+                  <span role="columnheader"><span class="sr-only">Actions</span></span>
+                </div>
+                {#if deletedItems.length > 0}
+                  <ul role="rowgroup">
+                    {#each deletedItems as item (item.id)}
+                      <li class="trash-row" role="row" aria-label={item.name}>
+                        <span role="cell" class="trash-item">
+                          <span class="trash-name"><span class="trash-kind" class:folder-icon={item.kind === 'folder'} role="img" aria-label={item.kind}>{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span>{item.name}</span></span>
+                          <span class="trash-metadata" aria-hidden="true">{@render modifiedDateLabel(item)} · {typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
+                        </span>
+                        <span role="cell" class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span>
+                        <span role="cell" class="file-modified">{@render modifiedDateLabel(item)}</span>
+                        <span role="cell" class="file-size">{typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
+                        <span role="cell" class="trash-selection"><label><input type="checkbox" aria-label={`Select ${item.name}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}`} disabled={removalBlocked} checked={removalSelection.includes(item.id)} onchange={(event) => removalSelection = event.currentTarget.checked ? [...removalSelection, item.id] : removalSelection.filter(id => id !== item.id)} /></label></span>
+                        <div role="cell" class="trash-actions"><Button variant="outline" size="sm" disabled={removalBlocked} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button></div>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
               </div>
               {#if trashPageIndex > 0 || trashHasMore}
                 <nav class="flex flex-wrap gap-2" aria-label="Trash pages">

@@ -153,7 +153,7 @@ test('a held Files refresh does not block Trash refresh', async ({ page }) => {
   let requests = 0;
   await page.route('**/trash?*', route => { requests++; return route.fulfill({ json: { items: [], next_cursor: null, has_more: false } }); });
   await refresh.click();
-  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   expect(requests).toBe(1);
   await held!.fulfill({ json: { items: [file], next_cursor: null, has_more: false } });
 });

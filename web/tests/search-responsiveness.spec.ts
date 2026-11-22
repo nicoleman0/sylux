@@ -86,7 +86,7 @@ test('scoped search retains its folder across pages, sorting and Back', async ({
   expect(requests.at(-1)?.searchParams.has('cursor')).toBe(false);
   await expect(page.getByRole('row', { name: 'Draft-one.txt', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
-  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   const previousCount = requests.length;
   await page.goBack();
   await expect.poll(() => requests.length).toBeGreaterThan(previousCount);
@@ -281,7 +281,7 @@ test('late responses cannot replace newer results or a navigated destination', a
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
   await pending.get('leaving')!.fulfill({ status: 503, json: { code: 'unavailable' } });
   await page.waitForFunction(() => (window as Window & { searchResponses?: string[] }).searchResponses?.includes('leaving'));
-  await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   await expect(page.getByRole('alert')).toHaveCount(0);
   await page.getByRole('button', { name: 'Files', exact: true }).click();
   await expect(input).toHaveValue('');

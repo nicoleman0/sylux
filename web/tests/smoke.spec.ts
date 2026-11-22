@@ -483,13 +483,13 @@ test('deleted names stay with their session when a request finishes late', async
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Trash' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
-  await expect(page.getByText('Trash is empty.')).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   const lateResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/trash');
   release();
   await lateResponse;
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   await expect(page.getByRole('button', { name: 'Restore Private A' })).toHaveCount(0);
-  await expect(page.getByText('Trash is empty.')).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
 });
 
 test('trash entries show their original folders for duplicate names', async ({ page }) => {
@@ -539,7 +539,7 @@ test('sign out hides account controls until the logout request finishes', async 
   await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
-  await expect(page.getByText('Trash is empty.')).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   await expect(page.getByRole('button', { name: 'Restore Private A' })).toHaveCount(0);
 });
 
@@ -1090,7 +1090,7 @@ test('password change clears trash before the next session', async ({ page }) =>
   await page.getByLabel('Account name').fill('second'); await page.getByLabel('Password').fill('mock-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
-  await expect(page.getByText('Trash is empty.')).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   await expect(page.getByRole('button', { name: 'Restore Private A' })).toHaveCount(0);
 });
 
@@ -1179,7 +1179,7 @@ for (const resource of ['accounts', 'trash'] as const) {
     await page.unroute(`**/${resource}${resource === 'trash' ? '?*' : ''}`);
     await page.getByRole('button', { name: resource === 'accounts' ? 'Refresh' : 'Refresh trash' }).click();
     if (resource === 'accounts') await expect(page.getByText('Administrator', { exact: true })).toBeVisible();
-    else await expect(page.getByText('Trash is empty.', { exact: true })).toBeVisible();
+    else await expect(page.getByRole('table', { name: 'Trash items' })).toHaveAccessibleDescription('Trash is empty.');
   });
 }
 
