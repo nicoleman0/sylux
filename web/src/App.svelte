@@ -668,6 +668,7 @@
   let searchItems = $state<SearchHit[]>([]);
   const activeEntries = $derived(searchQuery ? searchItems.map((hit) => hit.entry) : entries);
   const selectedEntries = $derived(activeEntries.filter((entry) => selectedIds.includes(entry.id)));
+  const allLoadedSelected = $derived(activeEntries.length > 0 && selectedEntries.length === activeEntries.length);
   let searchLoading = $state(false);
   let searchError = $state('');
   let searchInputError = $state('');
@@ -2861,12 +2862,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 </svelte:head>
 
+{#snippet selectionHeader(disabled: boolean)}
+  <div role="columnheader" class="entry-selection">
+    <label title="Select all loaded items">
+      <input
+        type="checkbox"
+        aria-label="Select all loaded items"
+        checked={allLoadedSelected}
+        indeterminate={selectedEntries.length > 0 && !allLoadedSelected}
+        disabled={disabled || fileMutationBusy || !activeEntries.length}
+        onchange={(event) => {
+          if (event.currentTarget.checked) selectedIds = activeEntries.map((entry) => entry.id);
+          else clearSelection();
+        }}
+      />
+    </label>
+  </div>
+{/snippet}
+
 {#snippet selectionToolbar()}
             {#if selectedEntries.length}
               <div class="selection-toolbar" role="group" aria-label="Selected items">
                 <span aria-live="polite">{selectedEntries.length} selected</span>
                 {#if searchQuery}<span class="text-xs text-muted-foreground">Current loaded page only</span>{/if}
-                <Button variant="ghost" size="sm" disabled={fileMutationBusy} onclick={() => selectedIds = activeEntries.map((entry) => entry.id)}>Select all loaded items</Button>
                 <Button variant="ghost" size="sm" disabled={!selectedIds.length || bulkBusy} onclick={clearSelectionFromToolbar}>Clear selection</Button>
                 {#if selectedEntries.length}<Button variant="outline" size="sm" disabled={archiveBusy || bulkBusy} aria-busy={archiveBusy} onclick={() => downloadArchive(selectedEntries)}>{archiveBusy ? 'Preparing…' : 'Download'}</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('move', event.currentTarget)}>Move selected</Button><Button variant="outline" size="sm" disabled={fileMutationBusy} onclick={(event) => beginBulk('trash', event.currentTarget)}>Move selected to trash</Button>{/if}
               </div>
@@ -3162,7 +3180,7 @@
                 {:else if searchItems.length === 0}<p>No matching files or folders.</p>
                 {/if}
                 {@render selectionToolbar()}
-                <div role="table" aria-label="Search matches"><div role="rowgroup" class="file-list"><div role="row" class="list-head selectable-head modified-head search-head"><span role="columnheader"><span class="sr-only">Selection</span></span><SortHeader label="Name" column="name" sort={searchSort} busy={searchLoading && searchSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'name'))} /><SortHeader label="Location" column="location" class="file-location" sort={searchSort} busy={searchLoading && searchSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'location'))} /><SortHeader label="Modified" column="modified" sort={searchSort} busy={searchLoading && searchSort.startsWith('modified_')} class="file-modified" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'modified'))} /><SortHeader label="Size" column="size" sort={searchSort} busy={searchLoading && searchSort.startsWith('size_')} class="file-size" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'size'))} /><span role="columnheader"><span class="sr-only">Options</span></span></div></div>
+                <div role="table" aria-label="Search matches"><div role="rowgroup" class="file-list"><div role="row" class="list-head selectable-head modified-head search-head">{@render selectionHeader(searchLoading || !!searchInputError || !!searchError)}<SortHeader label="Name" column="name" sort={searchSort} busy={searchLoading && searchSort.startsWith('name_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'name'))} /><SortHeader label="Location" column="location" class="file-location" sort={searchSort} busy={searchLoading && searchSort.startsWith('location_')} disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'location'))} /><SortHeader label="Modified" column="modified" sort={searchSort} busy={searchLoading && searchSort.startsWith('modified_')} class="file-modified" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'modified'))} /><SortHeader label="Size" column="size" sort={searchSort} busy={searchLoading && searchSort.startsWith('size_')} class="file-size" disabled={resultSortBlocked} onclick={() => setResultSort('search', nextSort(searchSort, 'size'))} /><span role="columnheader"><span class="sr-only">Options</span></span></div></div>
                 <div role="rowgroup" class="file-list">
                 {#if !searchLoading && !searchInputError && !searchError}
                   {#each searchItems as hit (hit.entry.id)}
@@ -3198,7 +3216,7 @@
             {#if !listingError && entriesFolderId && entriesFolderId === currentFolder.id && (entries.length || !loading)}
               <div role="rowgroup" class="file-list">
                 <div role="row" class="list-head selectable-head modified-head folder-sort-head">
-                  <span role="columnheader"><span class="sr-only">Selection</span></span>
+                  {@render selectionHeader(loading)}
                   <SortHeader label="Name" column="name" sort={folderSort} pendingSort={pendingFolderSort} disabled={folderSortBlocked} onclick={() => sortFolderBy('name')} />
                   <SortHeader label="Modified" column="modified" sort={folderSort} pendingSort={pendingFolderSort} disabled={folderSortBlocked} onclick={() => sortFolderBy('modified')} />
                   <SortHeader label="Size" column="size" sort={folderSort} pendingSort={pendingFolderSort} disabled={folderSortBlocked} onclick={() => sortFolderBy('size')} />

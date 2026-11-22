@@ -28,6 +28,7 @@ async function installBulkBackend(page: Page, paginated = false) {
       return json({ account_id: handle, handle, role: 'user', csrf_token: 'csrf' });
     }
     if (path === '/auth/logout') return route.fulfill({ status: 204 });
+    if (path === '/entries/search') return json({ items: [], next_cursor: null, has_more: false });
     if (path === '/trash') return json({ items: entries.filter(entry => deleted.has(entry.id)).map(entry => ({ ...entry, original_path: [] })), next_cursor: null, has_more: false });
     if (path === '/folders/children' || /^\/folders\/[^/]+\/children$/.test(path)) {
       const isRoot = path === '/folders/children' || path === '/folders/root/children';
@@ -88,18 +89,53 @@ async function trashSelected(page: Page) {
 
 test('selection works with keyboard and pointer, selects loaded items only, and resets across pages and folders', async ({ page }) => {
   const backend = await installBulkBackend(page, true);
+  const header = page.getByRole('columnheader').getByRole('checkbox', { name: 'Select all loaded items', exact: true });
   const alpha = page.getByRole('checkbox', { name: 'Select alpha.bin', exact: true });
+  await expect(header).toBeVisible();
+  await expect(header).toBeEnabled();
+  await expect(header).not.toBeChecked();
+  await expect(page.getByRole('group', { name: 'Selected items' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Refresh folder', exact: true }).focus();
+  await page.keyboard.press('Tab');
+  await expect(header).toBeFocused();
+  await page.keyboard.press('Space');
+  await expect(header).toBeChecked();
+  await expect(page.getByText('4 selected', { exact: true })).toBeVisible();
+  await page.keyboard.press('Space');
+  await expect(header).not.toBeChecked();
+  await expect(header).toBeFocused();
+  await expect(alpha).not.toBeChecked();
   await alpha.focus();
   await page.keyboard.press('Space');
   await expect(alpha).toBeChecked();
   await expect(page.getByText('1 selected', { exact: true })).toBeVisible();
   await select(page, 'beta.bin');
   await expect(page.getByText('2 selected', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await expect(header).toBeChecked({ indeterminate: true });
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const theme of ['light', 'dark']) {
+      if (theme === 'dark') await page.getByRole('button', { name: 'Switch to dark mode', exact: true }).click();
+      await page.keyboard.press('Tab');
+      await header.focus();
+      await expect(header).toHaveCSS('outline-style', 'solid');
+      const target = await header.locator('..').boundingBox();
+      expect(target?.width).toBeGreaterThanOrEqual(44);
+      expect(target?.height).toBeGreaterThanOrEqual(44);
+      expect((await header.boundingBox())?.x).toBeCloseTo((await alpha.boundingBox())!.x, 0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.screenshot({ path: test.info().outputPath(`folder-mixed-${width}-${theme}.png`), animations: 'disabled' });
+    }
+    await page.getByRole('button', { name: 'Switch to light mode', exact: true }).click();
+  }
+  await header.click();
+  await expect(header).toBeChecked();
   await expect(page.getByText('4 selected', { exact: true })).toBeVisible();
   await expect(page.getByRole('checkbox', { name: 'Select later.bin', exact: true })).toHaveCount(0);
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await header.click();
+  await expect(header).not.toBeChecked();
+  await expect(alpha).not.toBeChecked();
+  await header.click();
   await page.getByRole('button', { name: 'Clear selection', exact: true }).click();
   await expect(alpha).not.toBeChecked();
   await select(page, 'alpha.bin');
@@ -110,8 +146,43 @@ test('selection works with keyboard and pointer, selects loaded items only, and 
   await expect(alpha).not.toBeChecked();
   await select(page, 'alpha.bin');
   await page.getByRole('button', { name: 'Open Destination', exact: true }).click();
+  await expect(page.getByText('This folder is empty')).toBeVisible();
+  await expect(header).toBeDisabled();
+  await expect(header).not.toBeChecked();
   await expect(page.getByRole('button', { name: 'Move selected', exact: true })).toHaveCount(0);
   expect(backend.mutations).toEqual([]);
+});
+
+test('header selection submits only the loaded file on a later folder page', async ({ page }) => {
+  const backend = await installBulkBackend(page, true);
+  const header = page.getByRole('columnheader').getByRole('checkbox', { name: 'Select all loaded items', exact: true });
+  await header.click();
+  await expect(page.getByText('4 selected', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  const later = page.getByRole('checkbox', { name: 'Select later.bin', exact: true });
+  await expect(later).toBeVisible();
+  await expect(header).not.toBeChecked();
+  await header.click();
+  await expect(later).toBeChecked();
+  await expect(page.getByText('1 selected', { exact: true })).toBeVisible();
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/entries/later', async route => {
+    if (route.request().method() === 'DELETE') await pending;
+    await route.fallback();
+  });
+  try {
+    await trashSelected(page);
+    await expect(page.getByRole('dialog').getByRole('button', { name: 'Moving to trash…', exact: true })).toBeDisabled();
+    await expect(page.getByRole('checkbox', { name: 'Select all loaded items', exact: true, includeHidden: true })).toBeDisabled();
+  } finally {
+    release();
+  }
+  const report = page.getByRole('region', { name: 'Trash results' });
+  await expect(report.getByRole('status')).toHaveText('Moved to trash');
+  expect(backend.mutations).toEqual([{ id: 'later', action: 'trash', etag: '"later:1"' }]);
+  await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();
+  await expect(report).toHaveCount(0);
 });
 
 test('bulk move confirms a destination, reports per-item failures, and retries only failed IDs', async ({ page }) => {
@@ -264,7 +335,7 @@ async function installSearchBulkBackend(page: Page, count = 4, pageSize = 50) {
 
 test('search selection supports pointer and keyboard ranges and clears on query or page changes', async ({ page }) => {
   await installSearchBulkBackend(page, 6, 4);
-  const checkboxes = page.getByRole('region', { name: 'Search results', exact: true }).getByRole('checkbox');
+  const checkboxes = page.getByRole('table', { name: 'Search matches' }).getByRole('cell').getByRole('checkbox');
   await checkboxes.nth(0).click();
   await checkboxes.nth(2).click({ modifiers: ['Shift'] });
   await expect(page.getByText('3 selected', { exact: true })).toBeVisible();
@@ -288,6 +359,11 @@ test('search selection supports pointer and keyboard ranges and clears on query 
   await expect(page.getByRole('button', { name: 'Move selected', exact: true })).toHaveCount(0);
   await page.getByRole('searchbox').fill('match');
   await expect(checkboxes).toHaveCount(4);
+  await page.getByRole('searchbox').fill('no-matches');
+  await expect(page.getByText('No matching files or folders.')).toBeVisible();
+  const header = page.getByRole('columnheader').getByRole('checkbox', { name: 'Select all loaded items', exact: true });
+  await expect(header).toBeDisabled();
+  await expect(header).not.toBeChecked();
 });
 
 test('search range checkboxes name duplicate files by containing folder and clear selection after stale cursor restart', async ({ page }) => {
@@ -307,7 +383,7 @@ test('search range checkboxes name duplicate files by containing folder and clea
 test('search moves 50 loaded matches with their ETags and shows changed locations', async ({ page }) => {
   const backend = await installSearchBulkBackend(page, 51);
   await page.getByRole('checkbox', { name: 'Select match-00.bin in Files / Work', exact: true }).check();
-  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select all loaded items', exact: true }).click();
   await expect(page.getByText('50 selected', { exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -331,8 +407,7 @@ test('search moves 50 loaded matches with their ETags and shows changed location
 test('search bulk retries conflicts across original folders and reconciles applied uncertain trash without replay', async ({ page }) => {
   const backend = await installSearchBulkBackend(page, 2);
   backend.failures.set('match-1', { status: 409, code: 'name_conflict' });
-  await page.getByRole('checkbox').first().check();
-  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select all loaded items', exact: true }).click();
   await moveSelected(page);
   await expect(page.getByRole('region', { name: 'Move results' }).getByText('1 of 2 succeeded.', { exact: true })).toBeVisible();
   backend.failures.clear();
@@ -344,8 +419,7 @@ test('search bulk retries conflicts across original folders and reconciles appli
   await page.getByRole('button', { name: 'Dismiss results', exact: true }).click();
   backend.failures.set('match-0', { status: 503, code: 'unavailable' });
   backend.appliedFailures.add('match-0');
-  await page.getByRole('checkbox').first().check();
-  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select all loaded items', exact: true }).click();
   await trashSelected(page);
   await expect(page.getByRole('button', { name: 'Refresh before retry', exact: true })).toBeVisible();
   backend.failures.clear();
@@ -360,9 +434,7 @@ test('search trash reports a folder conflict and keeps it available', async ({ p
   backend.entries.push({ id: 'match-folder', parent_id: 'source-0', name: 'match-folder', kind: 'folder', etag: '"match-folder:1"' });
   backend.failures.set('match-folder', { status: 409, code: 'namespace_conflict' });
   await page.getByRole('searchbox').fill('match-');
-  await expect(page.getByRole('checkbox')).toHaveCount(3);
-  await page.getByRole('checkbox').first().check();
-  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select all loaded items', exact: true }).click();
   await trashSelected(page);
   await expect(page.getByRole('region', { name: 'Trash results' })).toContainText('This item could not be moved to trash. Refresh before retrying.');
   await expect(page.getByRole('checkbox', { name: 'Select match-folder in Files / Work', exact: true })).not.toBeChecked();
@@ -373,8 +445,7 @@ test('search changes clear completed failures without retrying their mutations',
   const backend = await installSearchBulkBackend(page, 2);
   backend.failures.set('match-0', { status: 409, code: 'name_conflict' });
   backend.failures.set('match-1', { status: 409, code: 'name_conflict' });
-  await page.getByRole('checkbox').first().check();
-  await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select all loaded items', exact: true }).click();
   await moveSelected(page);
   await expect(page.getByRole('region', { name: 'Move results' }).getByText('0 of 2 succeeded.', { exact: true })).toBeVisible();
   backend.failures.clear();
@@ -441,7 +512,7 @@ for (const scenario of ['single-success', 'large-success', 'partial-failure', 'u
     await select(page, 'alpha.bin');
     if (scenario !== 'single-success') {
       if (scenario === 'large-success') {
-        await page.getByRole('button', { name: 'Select all loaded items', exact: true }).click();
+        await page.getByRole('checkbox', { name: 'Select all loaded items', exact: true }).click();
         await page.getByRole('checkbox', { name: 'Select Destination', exact: true }).uncheck();
       }
       else await select(page, 'beta.bin');
