@@ -15,6 +15,7 @@ async function installMoveBackend(page: Page) {
     const json = (value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
     if (path === '/auth/csrf') return json({ csrf_token: 'csrf' });
     if (path === '/auth/local') return json({ account_id: 'owner', handle: 'owner', role: 'user', csrf_token: 'csrf' });
+    if (path === '/entries/search') return json({ items: entries.filter(entry => entry.name.includes('notes')).map(entry => ({ entry, location: [root] })), next_cursor: null, has_more: false });
     if (path === '/folders/children') return json({ root, items: entries.filter(entry => entry.parent_id === 'root'), next_cursor: null, has_more: false });
     if (/^\/folders\/[^/]+\/children$/.test(path)) return json({ items: entries.filter(entry => entry.parent_id === path.split('/')[2]), next_cursor: null, has_more: false });
     if (/^\/entries\/[^/]+\/move$/.test(path)) {
@@ -69,6 +70,7 @@ test('file moves stay pending until the request settles and explain collisions o
   await expect(pending).toBeFocused();
   await page.mouse.click(2, 2);
   await expect(dialog).toBeVisible();
+  await expect(pending).toBeFocused();
   await dialog.screenshot({ path: testInfo.outputPath('move-narrow-pending.png'), animations: 'disabled' });
   await held!.fallback();
   await page.unroute('**/entries/file/move');
@@ -122,6 +124,9 @@ test('folder picker hides a selected branch and keeps siblings and ancestors rea
       await dialog.getByRole('button', { name: 'Destination', exact: true }).focus();
       await page.keyboard.press('Enter');
       await expect(breadcrumb.locator('[aria-current="location"]')).toHaveText('Destination');
+      await expect(breadcrumb.locator('[aria-current="location"]')).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(dialog).toBeVisible();
       await expect(confirm).toBeDisabled();
       await expect(dialog.getByRole('group', { name: 'Destination folders' }).getByText(/Nested|Descendant/)).toHaveCount(0);
       const sibling = dialog.getByRole('button', { name: 'Sibling', exact: true });
@@ -136,6 +141,9 @@ test('folder picker hides a selected branch and keeps siblings and ancestors rea
       await breadcrumb.getByRole('button', { name: 'Files', exact: true }).focus();
       await page.keyboard.press('Enter');
       await expect(breadcrumb.locator('[aria-current="location"]')).toHaveText('Files');
+      await expect(breadcrumb.locator('[aria-current="location"]')).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(dialog).toBeVisible();
       await expect(confirm).toBeEnabled();
       await page.keyboard.press('Escape');
       await expect(dialog).toBeHidden();
@@ -270,3 +278,22 @@ for (const boundary of ['dismiss', 'navigation']) {
     await expect(page.locator('.workspace-feedback')).toHaveCount(0);
   });
 }
+
+
+test('moving a search result keeps focus after results refresh', async ({ page }) => {
+  await installMoveBackend(page);
+  await page.getByLabel('Search files and folders').fill('notes');
+  const trigger = page.getByRole('button', { name: 'Options for notes.bin', exact: true });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  await page.getByRole('menuitem', { name: 'Move', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: 'Destination', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Move here', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('status')).toContainText('Moved to Destination');
+  await expect(page.getByRole('button', { name: 'Options for notes.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeFocused();
+  await page.waitForTimeout(500);
+  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeFocused();
+});

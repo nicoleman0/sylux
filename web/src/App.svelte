@@ -858,6 +858,7 @@
     movePath.length > 0 && !moveAlreadyHere && !movePath.some(folder => excludedMoveFolders.has(folder.id)));
   let moveRequest = 0;
   let moveTrigger: HTMLElement | null = null;
+  let moveDialog = $state<HTMLElement | null>(null);
   type ReplacementPrompt = { file: File; folder: Folder; target: { id: string; name: string; etag: string } };
   let replacementPrompt = $state<ReplacementPrompt | null>(null);
   let uploadReplacement = $state(false);
@@ -1720,6 +1721,14 @@
       if (request === moveRequest && generation === sessionGeneration) moveError = 'Could not open this destination. Choose another folder or try again.';
     } finally { if (request === moveRequest) moveLoading = false; }
   }
+  async function navigateMoveFolder(path: Folder[]): Promise<void> {
+    const loading = loadMoveFolder(path);
+    if (destinationAction === 'move') {
+      await tick();
+      moveDialog?.querySelector<HTMLElement>('[aria-current="location"]')?.focus();
+    }
+    await loading;
+  }
   async function beginDestination(entry: Entry, trigger: HTMLElement, action: 'move' | 'copy'): Promise<void> {
     if (bulkBusy || bulkNeedsRefresh || dropPending || moveNeedsRefresh || namespaceUnknown) return;
     if (action === 'copy' && pendingCopy) return;
@@ -1746,8 +1755,8 @@
       return;
     }
     if (generation !== sessionGeneration) return;
-    // The source row leaves the folder after revalidation.
-    if (!searchQuery) moveTrigger = null;
+    // Refresh can replace the source row in both folder and search views.
+    moveTrigger = null;
     closeMove(); moveBusy = false;
     clearCompletedFeedback(); actionNotice = `Moved to ${destination.name}`;
     const completion = feedbackRevision;
@@ -2862,7 +2871,7 @@
   {:else}{@const label = entry.kind === 'folder' ? 'Modified date not applicable' : 'Modified date unknown'}<span title={label}><span class="sr-only">{label}</span><span aria-hidden="true">—</span></span>{/if}
 {/snippet}
 
-<svelte:window ondragover={externalDrag} ondrop={externalDrag} onkeydown={listKeydown} onfocusin={trackListFocus} />
+<svelte:window ondragover={externalDrag} ondrop={externalDrag} onkeydown={listKeydown} onfocusin={trackListFocus} onpointerdowncapture={(event) => { if (destinationAction === 'move' && destinationBusy && moveDialog && event.target instanceof Node && !moveDialog.contains(event.target)) event.preventDefault(); }} />
 <svelte:head>
   <title>{instanceName} · Private files</title>
   <meta name="description" content="Private file storage" />
@@ -3268,6 +3277,7 @@
 
     <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !destinationBusy) closeMove(); }}>
       <Dialog.Content
+        bind:ref={moveDialog}
         showCloseButton={!destinationBusy}
         escapeKeydownBehavior={destinationBusy ? 'ignore' : 'close'}
         interactOutsideBehavior={destinationBusy ? 'ignore' : 'close'}
@@ -3286,9 +3296,9 @@
             {#each movePath as folder, index (folder.id)}
               {#if index > 0}<ChevronRightIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />{/if}
               {#if destinationAction === 'move' && index === movePath.length - 1}
-                <span class="min-w-0 font-medium [overflow-wrap:anywhere]" aria-current="location">{folder.name}</span>
+                <span tabindex="-1" class="min-w-0 font-medium [overflow-wrap:anywhere]" aria-current="location">{folder.name}</span>
               {:else}
-                <Button variant="link" class="h-auto min-h-[var(--control-height)] max-w-full min-w-0 p-0 text-left whitespace-normal [overflow-wrap:anywhere]" disabled={moveCloseRefreshBusy || moveLoading || destinationBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => loadMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>
+                <Button variant="link" class="h-auto min-h-[var(--control-height)] max-w-full min-w-0 p-0 text-left whitespace-normal [overflow-wrap:anywhere]" disabled={moveCloseRefreshBusy || moveLoading || destinationBusy} aria-current={index === movePath.length - 1 ? 'page' : undefined} onclick={() => navigateMoveFolder(movePath.slice(0, index + 1))}>{folder.name}</Button>
               {/if}
             {/each}
           </nav>
@@ -3300,7 +3310,7 @@
             <p class="text-muted-foreground px-2 py-1">{destinationAction === 'move' && moveAlreadyHere ? 'No other folders here.' : 'No folders here.'}</p>
           {/if}
           {#each destinationFolders as folder (folder.id)}
-            <Button variant="ghost" class="h-auto min-h-9 min-w-0 justify-start text-left whitespace-normal [overflow-wrap:anywhere]" disabled={moveCloseRefreshBusy || moveLoading || destinationBusy || (destinationAction === 'copy' && folder.id === moveTarget?.id)} onclick={() => loadMoveFolder([...movePath, folder])}>
+            <Button variant="ghost" class="h-auto min-h-9 min-w-0 justify-start text-left whitespace-normal [overflow-wrap:anywhere]" disabled={moveCloseRefreshBusy || moveLoading || destinationBusy || (destinationAction === 'copy' && folder.id === moveTarget?.id)} onclick={() => navigateMoveFolder([...movePath, folder])}>
               <FolderIcon class="size-4 shrink-0" />{folder.name}{destinationAction === 'copy' && folder.id === moveTarget?.id ? ' (cannot copy into itself)' : ''}
             </Button>
           {/each}
