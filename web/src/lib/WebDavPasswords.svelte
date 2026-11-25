@@ -134,7 +134,7 @@
       <Dialog.Footer><Button onclick={() => void forget()}>Done</Button></Dialog.Footer>
     {:else}
       {#if passwords.length}
-        <ul aria-label="Active app passwords" class="grid gap-2 max-h-52 overflow-auto">
+        <ul aria-label="Active app passwords" class="grid gap-2 max-h-52 -mx-1 overflow-auto p-1">
           {#each passwords as password (password.id)}
             <li class="flex items-center justify-between gap-3 border-b pb-2">
               <div class="min-w-0"><div class="break-words">{password.name}</div>
