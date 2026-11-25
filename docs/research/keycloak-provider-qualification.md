@@ -66,19 +66,19 @@ Run on 25 November 2026 with macOS 26.6.2 arm64, Docker Desktop daemon
 
 | Journey | Observation |
 | --- | --- |
-| Identity continuity | The exact verified issuer and subject survived rename. Deleting and recreating the same username produced a different verified subject under the same issuer. |
+| Identity continuity | After admin readback confirmed the rename, a fresh browser signed in with the renamed username and received the same verified issuer and subject. Deleting and recreating the same username produced a different verified subject under the same issuer. |
 | Freshness with existing SSO | Silent SSO returned the earlier signed authentication time. After crossing a whole-second boundary, `max_age=0` displayed the provider password form and the completed attempt returned a newer signed `auth_time`. |
-| Effective and observed code limit | Keycloak reported a 20 s code lifetime. A code issued before disablement got `invalid_grant` at an age of at most 1.36 s. A form opened before disablement also denied after submission. The enabled-user expiry control rejected an unredeemed code at an age of at least 22 s. |
+| Effective and observed code limit | Keycloak reported a 20 s code lifetime. A code issued before disablement got `invalid_grant` with `User disabled` at an age of at most 1.35 s. A form opened before disablement also denied after submission. The enabled-user expiry control rejected an unredeemed code at an age of at least 22 s. |
 | Previously issued ID token | Keycloak issued a token with a 60 s signed lifetime. Its signature still verified offline after disablement with 57 s to expiry. The run passed its signed expiry before sampling ended. The token was held only to observe offline verification and expiry. |
-| Outage and recovery | With the container stopped, new browser authorization and an in-flight token exchange both failed at the transport boundary in 0.07 s, with a 5 s limit per request. Restart, validated discovery and a new fresh proof with the same issuer and subject took 7.15 s from restart initiation. |
+| Outage and recovery | With the container stopped, new browser authorization and an in-flight token exchange both failed at the transport boundary in 0.13 s, with a 5 s limit per request. Restart, validated discovery and a new fresh proof with the same issuer and subject took 4.55 s from restart initiation. |
 
 The admin disable write took 0.01 s to acknowledge. The first pair of
-fresh browser attempts completed denial by 0.54 s after acknowledgement.
+fresh browser attempts completed denial by 0.50 s after acknowledgement.
 Each pair used a clean browser context and a separate context initialized
 from the pre-disable SSO cookie state. Both attempts received a
-provider-rendered credential denial at every sample, scheduled immediately
+provider-rendered disabled-account denial at every sample, scheduled immediately
 and at 5, 30, 60, 120, 180, 240, 290 and 300 s. The last pair finished at
-300.54 s after acknowledgement.
+300.50 s after acknowledgement.
 
 These observations are consistent with the proposed **P ≤ 5 minutes** for
 the exercised paths on this host. Sampling gives an upper bound on when

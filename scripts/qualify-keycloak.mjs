@@ -188,7 +188,7 @@ function signedClaims(token, keys) {
     return JSON.parse(Buffer.from(body, 'base64url'));
 }
 
-async function exchange(provider, callback, transaction, code, { status = 200, fresh = true } = {}) {
+async function exchange(provider, callback, transaction, code, { status = 200, fresh = true, disabled = false } = {}) {
     check(!transaction.consumed && performance.now() < transaction.deadline, 'Authorization attempt spent or expired');
     transaction.consumed = true;
     const tokens = await request(provider.metadata.token_endpoint, {
@@ -197,7 +197,8 @@ async function exchange(provider, callback, transaction, code, { status = 200, f
             code_verifier: transaction.verifier, code },
     });
     if (status !== 200) {
-        check(tokens?.error === 'invalid_grant', 'Expected authorization-code grant denial');
+        check(tokens?.error === 'invalid_grant' && (!disabled || tokens.error_description === 'User disabled'),
+            'Expected authorization-code denial with the required reason');
         return null;
     }
     check(typeof tokens.id_token === 'string' && !tokens.refresh_token &&
@@ -220,11 +221,16 @@ async function exchange(provider, callback, transaction, code, { status = 200, f
 }
 
 const loginForm = (page) => page.locator('#password');
-async function submit(page, username) {
+async function submit(page, username, requireUsername = false) {
     const action = await page.locator('#kc-form-login').getAttribute('action');
     check(new URL(action, page.url()).origin === origin, 'Unexpected login form destination');
     const usernameField = page.locator('#username');
-    if (await usernameField.isVisible()) await usernameField.fill(username);
+    const visible = await usernameField.isVisible();
+    check(!requireUsername || visible, 'Fresh sign-in requires a visible username field');
+    if (visible) {
+        await usernameField.fill(username);
+        check(await usernameField.inputValue() === username, 'Username was not entered');
+    }
     await loginForm(page).fill(password);
     await page.locator('#kc-login').click();
 }
@@ -235,11 +241,11 @@ async function start(page, provider, callback, fresh = true) {
     return transaction;
 }
 
-async function authorize(page, provider, callback, username) {
+async function authorize(page, provider, callback, username, requireUsername = false) {
     const transaction = await start(page, provider, callback);
     await loginForm(page).waitFor();
     const beforeSubmit = performance.now();
-    await submit(page, username);
+    await submit(page, username, requireUsername);
     await page.waitForURL(`${callback}?*`);
     return { transaction, beforeSubmit, code: callbackCode(page, callback, transaction) };
 }
@@ -253,7 +259,7 @@ async function denied(page, callback, transaction, username) {
     await loginForm(page).waitFor();
     await submit(page, username);
     // Require a provider-rendered credential denial. A transport failure cannot pass.
-    await page.getByText(/^(Invalid username or password\.|Account is disabled.*)$/i).first().waitFor();
+    await page.getByText(/^Account is disabled, contact your administrator\.$/).waitFor();
     check(new URL(page.url()).origin === origin && !transaction.consumed &&
         !page.url().startsWith(callback), 'Unexpected browser outcome after disablement');
 }
@@ -296,8 +302,18 @@ async function run(browser, callback) {
 
     step = 'rename continuity';
     await admin(user, { method: 'PUT', status: 204, json: { username: renamed } });
+    const renamedUser = await admin(user);
+    check(renamedUser.username === renamed, 'Provider did not persist the renamed username');
     await wait(1100);
-    const beforeDisable = await signIn(page, provider, callback, renamed);
+    const renamedContext = await browserContext(browser, callback);
+    let beforeDisable;
+    try {
+        const renamedPage = await renamedContext.newPage();
+        const renamedAttempt = await authorize(renamedPage, provider, callback, renamed, true);
+        beforeDisable = await exchange(provider, callback, renamedAttempt.transaction, renamedAttempt.code);
+    } finally {
+        await renamedContext.close();
+    }
     check(first.claims.iss === beforeDisable.claims.iss && first.claims.sub === beforeDisable.claims.sub,
         'Rename changed the verified identity key');
     console.log('Rename preserved the verified issuer and subject.');
@@ -313,7 +329,7 @@ async function run(browser, callback) {
     const writeStarted = performance.now();
     await admin(user, { method: 'PUT', status: 204, json: { enabled: false } });
     const acknowledged = performance.now();
-    await exchange(provider, callback, held.transaction, held.code, { status: 400 });
+    await exchange(provider, callback, held.transaction, held.code, { status: 400, disabled: true });
     const heldAge = (performance.now() - held.beforeSubmit) / 1000;
     check(heldAge < codeLifetime, 'Held code could have expired during disablement probe');
     await denied(heldForm, callback, pending, renamed);
