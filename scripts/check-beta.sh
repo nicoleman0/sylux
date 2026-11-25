@@ -15,13 +15,14 @@ printf 'Private beta evidence: %s\n' "$S1_HARNESS_OUTPUT"
 cargo clippy --locked --features test-harness --all-targets -- -D warnings
 node scripts/test-browser-reporter.mjs
 cargo test --locked --features test-harness --no-fail-fast
+bash scripts/check-oidc.sh
 npm --prefix web run smoke
 
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   {
     printf '## Beta contract and browser checks passed\n\n'
     printf 'Candidate: %s\n\n' "${GITHUB_SHA:-local}"
-    printf 'Feature-enabled lint, unit/contract/integration/fault tests, real TLS browser journeys and web smoke checks passed.\n'
+    printf 'Feature-enabled lint, unit/contract/integration/fault tests, real TLS browser journeys, disposable OIDC provider checks and web smoke checks passed.\n'
     printf 'Installation and stopped-service recovery require the separate Linux container recovery job.\n'
   } >> "$GITHUB_STEP_SUMMARY"
 fi

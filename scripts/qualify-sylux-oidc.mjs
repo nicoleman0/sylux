@@ -140,8 +140,10 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         }
         return response.status();
     }
-    async function upload(context, csrf, name) {
-        const [library] = (await json(context, 'GET', '/libraries', 200)).items;
+    async function upload(context, csrf, name, library) {
+        if (!library) {
+            [library] = (await json(context, 'GET', '/libraries', 200)).items;
+        }
         const bytes = Buffer.from(`disposable ${name} hello\n`);
         const sha256 = createHash('sha256').update(bytes).digest('hex');
         const data = { parent_id: library.id, parent_etag: library.etag, name, length: bytes.length, sha256 };
@@ -158,6 +160,36 @@ export async function qualifySylux(fixture, executable, browser, provider) {
             csrf, headers, data: { sha256, parent_etag: library.etag },
         });
         return { ...stored, bytes };
+    }
+    async function expectBytes(context, path, bytes, headers) {
+        const response = await api(context, 'GET', path, 200, { headers });
+        check((await response.body()).equals(bytes), 'Fixture download changed bytes');
+    }
+    async function shareForConversion(ownerContext, owner, file, recipient, handle) {
+        const csrf = owner.csrf_token;
+        const [root] = (await json(ownerContext, 'GET', '/libraries', 200)).items;
+        const grantPath = `/entries/${root.id}/direct-grants`;
+        const grant = await json(ownerContext, 'POST', grantPath, 200, { csrf, data: { handle } });
+        check(!!grant.id && grant.handle === handle, 'Fixture grant was not created');
+        const library = await json(ownerContext, 'POST', '/libraries', 201,
+            { csrf, data: { name: 'Published fixture' } });
+        const published = await upload(ownerContext, csrf, 'published.txt', library);
+        const publication = await json(ownerContext, 'POST', `/libraries/${library.id}/publication`, 200, { csrf });
+        check(!!publication.id, 'Fixture publication was not created');
+
+        return async () => {
+            const grants = await json(ownerContext, 'GET', grantPath, 200);
+            check(grants.items.some((item) => item.id === grant.id && item.handle === handle), 'Owned grant changed');
+            const incoming = await json(recipient, 'GET', '/shared', 200);
+            check(incoming.items.some((item) => item.entry.id === root.id), 'Received grant disappeared');
+            await expectBytes(recipient, `/shared/entries/${file.id}/content`, file.bytes);
+
+            const managed = await json(ownerContext, 'GET', `/entries/${library.id}/direct-grants`, 200);
+            check(managed.publication_id === publication.id, 'Managed publication changed');
+            const visible = await json(recipient, 'GET', '/published', 200);
+            check(visible.items.some((item) => item.entry.id === library.id), 'Published library disappeared');
+            await expectBytes(recipient, `/shared/entries/${published.id}/content`, published.bytes);
+        };
     }
     async function approve(context, csrf, subject, handle, account_id, expected = 201) {
         const response = await api(context, 'POST', '/auth/oidc/approvals', expected, {
@@ -185,14 +217,49 @@ export async function qualifySylux(fixture, executable, browser, provider) {
             mock.fault(undefined);
             const identity = await approve(adminContext, adminCsrf, 'fault-subject', 'fault-user');
 
-            step('local callback and signed token fault controls');
-            for (const fault of ['nonce', 'issuer', 'audience', 'azp', 'expiry', 'future', 'kid', 'algorithm', 'signature', 'auth_time', 'bad_json']) {
+            step('L2 callback issuer and cross-attempt state controls');
+            await approve(adminContext, adminCsrf, 'callback-subject', 'callback-user');
+            async function callbackAttempt() {
+                const instance = await context();
+                const url = mock.proof(await begin(instance, 'callback-user'), 'callback-subject');
+                return { instance, url };
+            }
+            async function validCallback() {
+                const { instance, url } = await callbackAttempt();
+                await callback(instance, url, 303);
+                return (await me(instance)).account_id;
+            }
+            const controlAccount = await validCallback();
+            const exchanges = mock.counts().exchanges;
+            const wrongIssuer = await callbackAttempt();
+            wrongIssuer.url.searchParams.set('iss', mock.issuer + '/different');
+            await callback(wrongIssuer.instance, wrongIssuer.url, 401);
+            await api(wrongIssuer.instance, 'GET', '/me', 401);
+
+            const firstAttempt = await callbackAttempt();
+            const secondAttempt = await callbackAttempt();
+            const firstState = firstAttempt.url.searchParams.get('state');
+            const secondState = secondAttempt.url.searchParams.get('state');
+            check(firstState !== secondState, 'State control requires distinct attempts');
+            firstAttempt.url.searchParams.set('state', secondState);
+            secondAttempt.url.searchParams.set('state', firstState);
+            for (const { instance, url } of [firstAttempt, secondAttempt]) {
+                await callback(instance, url, 401);
+                await api(instance, 'GET', '/me', 401);
+            }
+            check(mock.counts().exchanges === exchanges, 'Invalid callback reached token exchange');
+
+            step('L2 unsigned and other invalid token controls');
+            for (const fault of ['nonce', 'issuer', 'audience', 'azp', 'expiry', 'future', 'kid', 'algorithm', 'unsigned', 'signature', 'auth_time', 'bad_json']) {
                 mock.fault(fault);
-                const proof = mock.proof(await begin(browser, 'fault-user'), 'fault-subject');
+                const before = mock.counts().exchanges;
+                const proof = mock.proof(await begin(browser, 'callback-user'), 'callback-subject');
                 await callback(browser, proof, 401);
                 await api(browser, 'GET', '/me', 401);
+                check(mock.counts().exchanges === before + 1, 'Token fault did not reach exchange: ' + fault);
             }
             mock.fault(undefined);
+            check(await validCallback() === controlAccount, 'Valid callback control changed owner');
             const valid = mock.proof(await begin(browser, 'fault-user'), 'fault-subject');
             const malformed = new URL(valid);
             malformed.searchParams.append('state', malformed.searchParams.get('state'));
@@ -283,6 +350,7 @@ export async function qualifySylux(fixture, executable, browser, provider) {
             } finally {
                 db.close();
             }
+            console.log('Local TLS faults: wrong callback issuer, state swapped between browsers, unsigned token and future iat denied. Valid signed callbacks passed before and after the faults.');
             console.log('Local fault provider: discovery limits and redirects, strict token validation, replay, atomic audit rollback, concurrent activation, and held exchange versus disable/re-enable and approver demotion.');
         } finally {
             await mock.close();
@@ -320,6 +388,25 @@ export async function qualifySylux(fixture, executable, browser, provider) {
             csrf: owner.csrf_token, headers: { 'If-Match': trashEntry.etag },
         });
 
+        step('M4 sharing and WebDAV before local owner conversion');
+        await api(adminContext, 'POST', '/accounts', 204, {
+            csrf: adminCsrf, data: { handle: 'peer', password: localPassword },
+        });
+        const peerContext = await context();
+        const peer = await local(peerContext, 'peer');
+        const peerFile = await upload(peerContext, peer.csrf_token, 'peer-live.txt');
+        const verifyOwned = await shareForConversion(ownerContext, owner, liveFile, peerContext, 'peer');
+        const verifyReceived = await shareForConversion(peerContext, peer, peerFile, ownerContext, 'alice');
+        await verifyOwned();
+        await verifyReceived();
+        const dav = await json(ownerContext, 'POST', '/me/webdav', 201, {
+            csrf: owner.csrf_token, data: { name: 'Desktop', read_only: true },
+        });
+        const davClient = await context();
+        const davPath = '/dav/Files/owner-live.txt';
+        const davHeaders = { Authorization: 'Basic ' + Buffer.from('alice:' + dav.password).toString('base64') };
+        await expectBytes(davClient, davPath, liveFile.bytes, davHeaders);
+
         step('L1 and L2 exact approval and conversion');
         const identity = await approve(adminContext, adminCsrf, ownerSubject, 'alice', owner.account_id);
         const wrongBrowser = await context();
@@ -336,8 +423,7 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         await local(staleLocal, 'alice', 401);
         const external = await me(ownerContext);
         check(external.account_id === owner.account_id && external.role === 'user', 'Converted owner changed');
-        const download = await api(ownerContext, 'GET', `/entries/${liveFile.id}/content`, 200);
-        check((await download.body()).equals(liveFile.bytes), 'Converted owner bytes changed');
+        await expectBytes(ownerContext, `/entries/${liveFile.id}/content`, liveFile.bytes);
         const trash = await json(ownerContext, 'GET', '/trash', 200);
         const trashed = trash.items.find((entry) => entry.id === trashFile.id);
         check(!!trashed, 'Converted owner Trash changed');
@@ -350,6 +436,11 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         await api(ownerContext, 'POST', '/me/webdav', 409, {
             csrf: external.csrf_token, data: { name: 'Desktop', read_only: true },
         });
+        step('M4 sharing and WebDAV after local owner conversion');
+        await verifyOwned();
+        await verifyReceived();
+        await api(davClient, 'GET', davPath, 401, { headers: davHeaders });
+        console.log('M4 real provider: owned and received direct grants and publications retained access in both directions. The pre-conversion WebDAV credential stopped working.');
 
         step('L1 and L7 new account proof and two-user isolation');
         const otherContext = await context();
@@ -371,8 +462,7 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         await api(bobBrowser, 'POST', restore, 404, { csrf: other.csrf_token, headers: precondition });
         await api(adminContext, 'POST', restore, 404, { csrf: adminCsrf, headers: precondition });
         await api(ownerContext, 'POST', restore, 204, { csrf: external.csrf_token, headers: precondition });
-        const restored = await api(ownerContext, 'GET', `/entries/${trashFile.id}/content`, 200);
-        check((await restored.body()).equals(trashFile.bytes), 'Restored Trash bytes changed');
+        await expectBytes(ownerContext, `/entries/${trashFile.id}/content`, trashFile.bytes);
         console.log('L1/L2/L7 real provider: exact approval, password conversion, owner ID, bytes, Trash, cross-account denial.');
 
         step('L3 held callback after disable/re-enable');
@@ -390,11 +480,30 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         await callback(renamedBrowser, renamed, 303);
         check((await me(renamedBrowser)).account_id === owner.account_id, 'Provider rename changed Sylux owner');
 
-        step('L5 revoked key and same-name recreation');
+        step('L4 explicit restoration of the original subject after revoke');
+        const oldCookies = await renamedBrowser.cookies(origin);
+        const replay = await context();
+        check(oldCookies.length > 0, 'Revocation control requires the original cookie');
+        await replay.addCookies(oldCookies);
         await api(adminContext, 'POST', `/auth/oidc/approvals/${identity}/revoke`, 204, { csrf: adminCsrf });
         await api(renamedBrowser, 'GET', '/me', 401);
         await api(adminContext, 'POST', `/accounts/${owner.account_id}/enable`, 409, { csrf: adminCsrf });
         await approve(adminContext, adminCsrf, ownerSubject, 'different', undefined, 409);
+        const unapproved = await context();
+        await callback(unapproved, await proof(unapproved, await begin(unapproved, 'alice'), 'alice-renamed'), 401);
+        const renewed = await approve(adminContext, adminCsrf, ownerSubject, 'alice', owner.account_id);
+        check(renewed === identity, 'Restoration changed the reserved identity ID');
+        const restoredOwner = await context();
+        await browserSignIn(restoredOwner, await begin(restoredOwner, 'alice'), 'alice-renamed');
+        check((await me(restoredOwner)).account_id === owner.account_id, 'Restoration changed the owner');
+        await expectBytes(restoredOwner, `/entries/${liveFile.id}/content`, liveFile.bytes);
+        await expectBytes(restoredOwner, `/entries/${trashFile.id}/content`, trashFile.bytes);
+        await api(replay, 'GET', '/me', 401);
+        await api(ownerContext, 'GET', '/me', 401);
+        console.log('L4 real provider: fresh approval restored the original subject, owner and exact bytes. Old sessions stayed revoked.');
+
+        step('L5 revoked key and same-name recreation');
+        await api(adminContext, 'POST', `/auth/oidc/approvals/${identity}/revoke`, 204, { csrf: adminCsrf });
         await admin(ownerPath, { method: 'DELETE', status: 204 });
         await createUser('alice-renamed');
         await approve(adminContext, adminCsrf, ownerSubject, 'alice', owner.account_id);

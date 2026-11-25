@@ -76,7 +76,7 @@ export async function faultProvider(fixture, clientId, clientSecret) {
             }
             if (fault === 'bad_json') return response.writeHead(200, { 'Content-Type': 'application/json' }).end('{');
             const header = {
-                alg: fault === 'algorithm' ? 'RS512' : 'RS256',
+                alg: fault === 'unsigned' ? 'none' : fault === 'algorithm' ? 'RS512' : 'RS256',
                 kid: fault === 'kid' ? 'wrong-kid' : jwk.kid,
                 typ: 'JWT',
             };
@@ -92,7 +92,8 @@ export async function faultProvider(fixture, clientId, clientSecret) {
                 auth_time: fault === 'auth_time' ? undefined : now,
             };
             const signed = encode(header) + '.' + encode(claims);
-            const signature = sign('RSA-SHA256', Buffer.from(signed), privateKey);
+            const signature = fault === 'unsigned' ? Buffer.alloc(0) :
+                sign('RSA-SHA256', Buffer.from(signed), privateKey);
             if (fault === 'signature') signature[0] ^= 1;
             return json({
                 token_type: 'Bearer', access_token: random(), expires_in: 30, scope: 'openid',
