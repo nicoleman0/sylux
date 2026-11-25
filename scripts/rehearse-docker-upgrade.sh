@@ -42,6 +42,10 @@ fi
 mkdir -m 0700 -- "$fixture"
 stage='preparing supported storage and the loopback certificate'
 exec 3>&1
+fail() {
+  printf 'Upgrade rehearsal: %s\n' "$*" >&3
+  exit 1
+}
 trap 'status=$?; trap - ERR; printf "Upgrade rehearsal failed while %s (line %s, exit %s; output withheld).\n" "$stage" "$LINENO" "$status" >&3' ERR
 exec >"$fixture/private.log" 2>&1
 unset DEBUG PWDEBUG
@@ -67,7 +71,7 @@ mkdir "$fixture/archive"
 sudo install -d -o 10001 -g 10001 -m 0700 "$fixture/live" "$fixture/tls"
 check_storage "$fixture/live"
 live_device=$(findmnt -n -o SOURCE -T "$fixture/live")
-live_major_minor=$(findmnt -n -o MAJ:MIN -T "$fixture/live")
+live_major_minor=$(findmnt -rn -o MAJ:MIN -T "$fixture/live")
 [[ "$live_major_minor" =~ ^[0-9]+:[0-9]+$ && -e "/sys/dev/block/$live_major_minor" ]]
 truncate -s 128M "$fixture/archive.ext4"
 mkfs.ext4 -q -F "$fixture/archive.ext4"
@@ -75,7 +79,7 @@ sudo mount -o loop,nosuid,nodev,noexec "$fixture/archive.ext4" "$fixture/archive
 sudo chmod 0700 "$fixture/archive"
 check_storage "$fixture/archive"
 archive_device=$(findmnt -n -o SOURCE --mountpoint "$fixture/archive")
-archive_major_minor=$(findmnt -n -o MAJ:MIN --mountpoint "$fixture/archive")
+archive_major_minor=$(findmnt -rn -o MAJ:MIN --mountpoint "$fixture/archive")
 [[ -b "$archive_device" && "$live_major_minor" != "$archive_major_minor" ]]
 [[ "$(stat -c %d "$fixture/live")" != "$(stat -c %d "$fixture/archive")" ]]
 docker_version=$(docker_local version --format '{{.Server.Version}}')

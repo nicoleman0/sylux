@@ -42,6 +42,6 @@ Update the release pins to beta.10 and the published stable bundle. Seed
 beta.10 and run the driver's `grants` phase there before the stopped archive.
 Keep the resulting `expected-grants.json` alongside `expected.json`. After
 the stable upgrade, run `verify`, `trash-bytes` and `verify-grants` against the
-same fixture directory. The last phase compares the named library and owner
-download and checks that the member still cannot list or download from that
-library.
+same fixture directory. The last phase verifies the revoked library remains
+unavailable and the active library remains the member's only incoming share,
+with its exact listing and download bytes intact.
