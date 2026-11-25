@@ -216,6 +216,8 @@ power loss, production storage, or upgrades.
 ## 4. Stop, back up, and restore
 
 Use `docker compose stop` for a clean stop and `docker compose up -d` to start again. `docker compose ps` shows whether it is running. Keep the data directory when replacing a container.
+For optional desktop access, see [WebDAV setup and compatibility](webdav.md).
+
 
 For a consistent archive, stop the service first. Choose a **separate mounted filesystem** for `/mnt/backup`; keep its archive private because it contains account data and file contents:
 

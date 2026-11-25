@@ -93,7 +93,7 @@ impl Fixture {
             let bound = root::open_bound_database(&product, BUSY).unwrap();
             let identity = legacy_identity.as_ref().unwrap();
             let upgraded = root::upgrade_binding(&bound, &product, identity).unwrap();
-            assert_eq!(upgraded.schema_version, 4);
+            assert_eq!(upgraded.schema_version, schema::SUPPORTED_SCHEMA_VERSION);
             drop(bound);
             let rebound = root::open_bound_database(&product, BUSY).unwrap();
             assert_eq!(

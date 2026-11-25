@@ -25,12 +25,12 @@ use std::io::SeekFrom;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
-struct ContentRef {
-    name: String,
-    revision_id: String,
-    blob_id: String,
-    length: u64,
-    sha256: [u8; 32],
+pub(super) struct ContentRef {
+    pub(super) name: String,
+    pub(super) revision_id: String,
+    pub(super) blob_id: String,
+    pub(super) length: u64,
+    pub(super) sha256: [u8; 32],
 }
 
 fn finish(mut response: Response) -> Response {
@@ -305,6 +305,15 @@ async fn serve(state: AuthState, entry_id: String, headers: HeaderMap, head: boo
         Ok(reference) => reference,
         Err(response) => return response,
     };
+    serve_reference(&state, reference, headers, head).await
+}
+
+pub(super) async fn serve_reference(
+    state: &AuthState,
+    reference: ContentRef,
+    headers: HeaderMap,
+    head: bool,
+) -> Response {
     let storage = match state.storage.clone() {
         Some(storage) => storage,
         None => return error(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"),

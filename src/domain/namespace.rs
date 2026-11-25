@@ -3,7 +3,7 @@ use super::names::{EntryName, NAME_KEY_VERSION};
 use super::upload::folder_etag;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-pub(super) const MAX_ENTRY_DEPTH: i64 = 128;
+pub(crate) const MAX_ENTRY_DEPTH: i64 = 128;
 const MAX_COPY_ENTRIES: usize = 10_000;
 pub const MAX_TRASH_PAGE_SIZE: usize = 200;
 
@@ -431,11 +431,22 @@ pub fn move_entry(
     destination: &str,
     if_match: &str,
 ) -> Result<Entry, NamespaceError> {
+    move_entry_as(db, owner, entry, destination, if_match, None)
+}
+
+pub(crate) fn move_entry_as(
+    db: &Transaction<'_>,
+    owner: &str,
+    entry: &str,
+    destination: &str,
+    if_match: &str,
+    name: Option<&EntryName>,
+) -> Result<Entry, NamespaceError> {
     let row: Option<(Option<String>, String, String, i64)> = db.query_row(
         "SELECT parent_id,original_name,kind,generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='active'",
         params![entry, owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
     ).optional().map_err(|_| NamespaceError::Sql)?;
-    let Some((Some(parent), name, kind, generation)) = row else {
+    let Some((Some(parent), original_name, kind, generation)) = row else {
         return Err(NamespaceError::NotFound);
     };
     folder_path(db, owner, &parent)?;
@@ -470,9 +481,15 @@ pub fn move_entry(
     if destination_depth + 1 + subtree_depth > MAX_ENTRY_DEPTH {
         return Err(NamespaceError::DepthLimit);
     }
+    let (display, key) = match name {
+        Some(name) => (Some(name.display.as_str()), Some(name.key.as_slice())),
+        None => (None, None),
+    };
     let changed = db.execute(
-        "UPDATE entry SET parent_id=?1,generation=generation+1 WHERE entry_id=?2 AND owner_account_id=?3 AND generation=?4",
-        params![destination, entry, owner, generation]
+        "UPDATE entry SET parent_id=?1,generation=generation+1,
+             original_name=coalesce(?5,original_name),name_key=coalesce(?6,name_key)
+         WHERE entry_id=?2 AND owner_account_id=?3 AND generation=?4",
+        params![destination, entry, owner, generation, display, key]
     ).map_err(|error| if matches!(error, rusqlite::Error::SqliteFailure(ref e, _) if e.code == rusqlite::ErrorCode::ConstraintViolation) { NamespaceError::Conflict } else { NamespaceError::Sql })?;
     if changed != 1 {
         return Err(NamespaceError::Stale);
@@ -484,7 +501,7 @@ pub fn move_entry(
     Ok(Entry {
         id: entry.to_owned(),
         parent_id: Some(destination.to_owned()),
-        name,
+        name: display.map_or(original_name, str::to_owned),
         kind,
         generation: generation + 1,
         etag: folder_etag(entry, (generation + 1) as u64),

@@ -25,7 +25,8 @@ Build a pleasant, fast and efficient file server for small groups. Compete for t
 - Preserve existing upload reconciliation, replacement confirmation and recovery boundaries.
 - Instance naming belongs in administrator Settings, persists on the server and applies to all users.
 - Text and image previews are implemented in `web/src/lib/preview.ts`; PDF previews render locally, with page and zoom controls and a download fallback (`docs/pdf-preview.md`).
-- Planned, with no committed release dates: shared folders and public folder links (SYL-110, SYL-111), OIDC sign-in (SYL-114, SYL-115) and WebDAV access (SYL-116). Public single-file links are available now (`docs/sharing.md`). Do not present planned capabilities as available.
+- Optional WebDAV access uses revocable app passwords scoped to the account's private libraries (`docs/webdav.md`).
+- Shared folders, public folder links and OIDC sign-in remain planned.
 - Prototype data and account actions are simulated. The prototype is not deployment or durability evidence.
 
 ## Brand Commitments

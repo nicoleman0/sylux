@@ -17,7 +17,7 @@ Self-hosted multi-user file storage with a Rust server, Svelte interface and SQL
 
 ## Who it is for
 
-Self-hosters and small groups who want a focused place to store and manage files together. Sylux aims to cover everyday [Nextcloud file workflows](https://docs.nextcloud.com/server/stable/user_manual/en/files/access_webgui.html): accounts, folders, uploads, previews, recovery and file sharing, while keeping the service small to operate. Account administration is occasional, and file handling happens in a browser.
+Self-hosters and small groups who want a focused place to store and manage files together. Sylux aims to cover everyday [Nextcloud file workflows](https://docs.nextcloud.com/server/stable/user_manual/en/files/access_webgui.html): accounts, folders, uploads, previews, recovery and file sharing, while keeping the service small to operate. Account administration is occasional, and most file handling happens in a browser.
 
 ## Current source capabilities
 
@@ -33,7 +33,9 @@ This inventory describes the current source tree. A merged capability is not nec
 - [Text and image previews](web/src/lib/preview.ts) are available in the browser; [PDF previews](docs/pdf-preview.md) have browser requirements and a download fallback.
 - Administrator-set [instance name and appearance](docs/instance-appearance.md).
 
-Planned, with no committed release dates: shared folders and public folder links (SYL-110, SYL-111), OIDC sign-in (SYL-114, SYL-115) and WebDAV access (SYL-116). Public single-file links are available now; see [sharing](docs/sharing.md).
+Optional [WebDAV access](docs/webdav.md) lets desktop clients work with private libraries using revocable app passwords. See the guide for setup and method limits.
+
+Shared folders, public folder links and OIDC sign-in remain planned. For public single-file links, see [sharing](docs/sharing.md).
 
 ## Operating footprint
 

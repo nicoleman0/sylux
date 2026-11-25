@@ -863,3 +863,91 @@ test('navigation keeps the draft and retry finishes the same staged edit', {
   await page.getByRole('button', { name: `Preview ${name}`, exact: true }).click();
   await expect(page.getByRole('dialog').locator('pre')).toHaveText('# Confirmed by status');
 });
+
+test('WebDAV changes appear in Files and Trash and the app password can be revoked', { annotation: { type: 'harness_case', description: 'storage_webdav_changes' } }, async () => {
+  await signIn();
+  await page.getByRole('button', { name: 'Account', exact: true }).press('Enter');
+  const manage = page.getByRole('button', { name: 'Manage app passwords', exact: true });
+  await manage.press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'WebDAV app passwords' });
+  const name = dialog.getByRole('textbox', { name: 'App name' });
+  await name.fill('Desktop fixture');
+  await dialog.getByRole('button', { name: 'Create app password' }).press('Enter');
+  const passwordField = dialog.getByRole('textbox', { name: 'App password' });
+  await expect(passwordField).toBeFocused();
+  const appPassword = await passwordField.inputValue();
+  if (!appPassword) throw new Error('Missing disposable app password');
+  await dialog.getByRole('button', { name: 'Done' }).press('Enter');
+  await expect(passwordField).toHaveCount(0);
+  await expect(name).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(manage).toBeFocused();
+
+  async function dav(method: string, target: string, body = Buffer.alloc(0), headers: Record<string, string> = {}) {
+    const fixtureOrigin = new URL(origin);
+    return new Promise<{ status: number; bytes: Buffer }>((resolve, reject) => {
+      const request = https.request({
+        hostname: '127.0.0.1',
+        servername: fixtureOrigin.hostname,
+        port: Number(fixtureOrigin.port),
+        path: target,
+        method,
+        ca: fs.readFileSync(process.env.S1_CA_CERT!),
+        headers: {
+          authorization: `Basic ${Buffer.from(`${fixtures.handle}:${appPassword}`).toString('base64')}`,
+          'content-length': String(body.length),
+          ...headers,
+        },
+      }, response => {
+        const parts: Buffer[] = [];
+        response.on('data', part => parts.push(part));
+        response.once('error', reject);
+        response.once('end', () => resolve({ status: response.statusCode ?? 0, bytes: Buffer.concat(parts) }));
+      });
+      request.setTimeout(10_000, () => request.destroy(new Error('fixture DAV request timed out')));
+      request.once('error', reject);
+      request.end(body);
+    });
+  }
+
+  await page.getByRole('button', { name: 'Files', exact: true }).press('Enter');
+  const upload = `dav-new-${phase}.txt`;
+  const renamed = `dav-moved-${phase}.txt`;
+  const folder = `DAV delivery ${phase}`;
+  const destination = `/dav/Files/${encodeURIComponent(folder)}/${renamed}`;
+  const preview = (file: string) => page.getByRole('button', { name: `Preview ${file}`, exact: true });
+  const bytes = Buffer.from('WebDAV fixture bytes\n');
+  await expect(preview(upload)).toHaveCount(0);
+  expect((await dav('PUT', `/dav/Files/${upload}`, bytes)).status).toBe(201);
+  await page.getByRole('button', { name: 'Refresh folder' }).press('Enter');
+  await expect(preview(upload)).toBeVisible();
+
+  expect((await dav('MKCOL', `/dav/Files/${encodeURIComponent(folder)}/`)).status).toBe(201);
+  expect((await dav('MOVE', `/dav/Files/${upload}`, Buffer.alloc(0), { Destination: origin + destination })).status).toBe(201);
+  await page.getByRole('button', { name: 'Refresh folder' }).press('Enter');
+  await expect(preview(upload)).toHaveCount(0);
+  await page.getByRole('button', { name: `Open ${folder}`, exact: true }).press('Enter');
+  await expect(preview(renamed)).toBeVisible();
+  const downloaded = await dav('GET', destination);
+  expect(downloaded.status).toBe(200);
+  expect(createHash('sha256').update(downloaded.bytes).digest('hex'))
+    .toBe(createHash('sha256').update(bytes).digest('hex'));
+
+  expect((await dav('DELETE', destination)).status).toBe(204);
+  await page.getByRole('button', { name: 'Refresh folder' }).press('Enter');
+  await expect(preview(renamed)).toHaveCount(0);
+  await page.getByRole('button', { name: 'Trash', exact: true }).press('Enter');
+  await expect(page.getByText(renamed, { exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Account', exact: true }).press('Enter');
+  await page.getByRole('button', { name: 'Switch to dark mode' }).press('Enter');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await manage.press('Enter');
+  await expect(dialog).toBeInViewport();
+  await dialog.getByRole('button', { name: 'Revoke Desktop fixture', exact: true }).press('Enter');
+  await expect(dialog.getByRole('status')).toHaveText('App password revoked.');
+  await expect(name).toBeFocused();
+  expect((await dav('PROPFIND', '/dav/', Buffer.alloc(0), { Depth: '1' })).status).toBe(401);
+  await page.keyboard.press('Escape');
+  await expect(manage).toBeFocused();
+});
