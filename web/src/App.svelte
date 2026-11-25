@@ -4,6 +4,9 @@
   import AppSidebar from '$lib/components/app-sidebar.svelte';
   import AppearanceSettings from '$lib/AppearanceSettings.svelte';
   import LibraryHome from '$lib/LibraryHome.svelte';
+  import DirectShareDialog from '$lib/DirectShareDialog.svelte';
+  import SharedWorkspace from '$lib/SharedWorkspace.svelte';
+  import FolderOpenIcon from '@lucide/svelte/icons/folder-open';
   import WebDavPasswords from '$lib/WebDavPasswords.svelte';
   import BrandLogo from '$lib/BrandLogo.svelte';
   import { appearanceStyle, defaultAppearanceSurfaces, defaultAppearance, readAppearance, type Appearance } from '$lib/appearance';
@@ -37,6 +40,7 @@
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import XIcon from '@lucide/svelte/icons/x';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
+  import { sharingConfirmation, type SharingConfirmation } from './lib/direct-grants';
   import { modifiedTime } from './lib/modified-time';
   import { actionTargets, listIntent, moveIndex, shortcutHelp, shortcutsBlocked } from './lib/list-keys';
   import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort, type ResultSort, type RemovalPreview, type RemovalResult } from './lib/listing';
@@ -101,6 +105,8 @@
   let accountView = $state(false);
   let settingsView = $state(false);
   let librariesView = $state(false);
+  let sharedView = $state(false);
+  let sharedLocation = $state({ folder: '', file: undefined as string | undefined });
   let libraries = $state<Folder[]>([]);
   let librariesError = $state('');
   let settingsTab = $state<'accounts' | 'instance' | 'appearance'>('accounts');
@@ -154,7 +160,7 @@
   let deferredShareOperation = $state(false);
 
   $effect(() => {
-    if (deferredNavigation && !bulkBusy && !accountBusy && !instanceBusy && (!deferredShareOperation || !share) &&
+    if (deferredNavigation && !bulkBusy && !accountBusy && !instanceBusy && (!deferredShareOperation || (!share && !directShare)) &&
       (!deferredAccountOperation || (!changePasswordOpen && !createAccountOpen && !disableTarget && !authorityTarget && !resetId)) && (!deferredInstanceOperation || (!instanceError && !appearanceError))) {
       deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false; deferredShareOperation = false;
       void untrack(restoreNavigation);
@@ -169,8 +175,9 @@
 
   function browsingSnapshot(): BrowsingContext {
     return { version: 1, owner: user?.id ?? '',
-      destination: settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : librariesView ? 'libraries' : 'files',
-      folder: librariesView ? '' : currentFolder.id, query: searchQuery, sort: folderSort, searchSort, trashSort, accountSort,
+      destination: settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : librariesView ? 'libraries' : sharedView ? 'shared' : 'files',
+      folder: sharedView ? sharedLocation.folder : librariesView ? '' : currentFolder.id,
+      file: sharedView ? sharedLocation.file : undefined, query: searchQuery, sort: folderSort, searchSort, trashSort, accountSort,
       cursors: [...pageCursors], page: pageIndex, searchCursors: [...searchPageCursors], searchPage: searchPageIndex, scroll: window.scrollY };
   }
 
@@ -235,16 +242,18 @@
     settingsView = destination === 'settings';
     showTrash = destination === 'trash';
     librariesView = destination === 'libraries';
+    sharedView = destination === 'shared';
   }
 
-  function navigate(destination: Destination, path?: Folder[]): Promise<boolean> {
-    if (!user || bulkBusy || accountBusy || instanceBusy || shareBusy) return Promise.resolve(false);
-    const next: Location = { ...browsingSnapshot(), destination, folder: path?.at(-1)?.id ?? '', query: '' };
+  function navigate(destination: Destination, path?: Folder[], shared?: { folder: string; file?: string }): Promise<boolean> {
+    if (!user || bulkBusy || accountBusy || instanceBusy || shareBusy || directShareBusy) return Promise.resolve(false);
+    const next: Location = { ...browsingSnapshot(), destination, folder: shared?.folder ?? path?.at(-1)?.id ?? '', file: shared?.file, query: '' };
     const hash = locationHash(next);
     if (pendingRoute === hash) return Promise.resolve(false);
     const previous = parseLocation(window.location.hash);
     saveNavigation();
-    if (previous.destination !== destination || (destination === 'files' && (previous.folder !== next.folder || previous.query))) {
+    if (previous.destination !== destination || ((destination === 'files' || destination === 'shared') &&
+        (previous.folder !== next.folder || previous.file !== next.file || previous.query))) {
       window.history.pushState({ sylux: {
         ...next, version: 1, owner: user.id, cursors: [null], page: 0, searchCursors: [null], searchPage: 0, scroll: 0,
       } }, '', hash);
@@ -252,11 +261,15 @@
     return presentRoute(next, null, path);
   }
 
+  function navigateShared(folder = '', file?: string): void {
+    void navigate('shared', undefined, { folder, file });
+  }
+
   async function restoreNavigation(): Promise<void> {
     if (!user) return;
-    if (bulkBusy || accountBusy || instanceBusy || shareBusy || (deferredShareOperation && share)) {
+    if (bulkBusy || accountBusy || instanceBusy || shareBusy || directShareBusy || (deferredShareOperation && (share || directShare))) {
       historyReady = false; deferredNavigation = true;
-      deferredAccountOperation = accountBusy; deferredInstanceOperation = instanceBusy; deferredShareOperation = deferredShareOperation || shareBusy;
+      deferredAccountOperation = accountBusy; deferredInstanceOperation = instanceBusy; deferredShareOperation = deferredShareOperation || shareBusy || !!directShareBusy;
       return;
     }
     const state = window.history.state?.sylux;
@@ -322,7 +335,7 @@
     endDrag();
     if (!moveNeedsRefresh) dropError = '';
     clearSelection(); clearCompletedFeedback(); closeBulk();
-    previewEntry = null; previewTrigger = null; share = null;
+    previewEntry = null; previewTrigger = null; share = null; directShare = null; settleTreeSharing(false);
     if (!folderBusy) createOpen = false;
     if (!renameBusy) renameId = '';
     if (!trashBusy) trashTarget = null;
@@ -386,6 +399,9 @@
         }
         listingError = '';
         if (restarted) notice = query ? 'Files changed. Search results have been restarted.' : 'This folder changed. The listing has been restarted.';
+      } else if (destination === 'shared') {
+        clearSearch();
+        sharedLocation = { folder: location.folder, file: location.file };
       } else if (destination === 'libraries') {
         clearSearch();
         librariesError = '';
@@ -445,7 +461,7 @@
           const leavingSheet = trigger?.closest('[data-mobile=true]') && active?.matches('[data-sidebar=trigger]');
           const restoreScroll = !pendingMove && (!active?.closest('.account-content, .files-content, .libraries-content, .trash-content, .settings-content') || watched.mayFocus());
           if (restoreScroll) window.scrollTo(0, scroll);
-          const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : librariesView ? 'libraries-title' : 'folder-title');
+          const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : librariesView ? 'libraries-title' : sharedView ? 'shared-title' : 'folder-title');
           if ((pendingMove && active === heading) || watched.mayFocus() || active === document.body || leavingSheet) {
             const retry = document.getElementById(restorationFailed && !restorationUnavailable ? 'folder-page-retry' : destination === 'trash' && trashError ? 'trash-page-retry' : '');
             const items = pendingMove && active === heading ? listItems() : [];
@@ -586,7 +602,7 @@
     selectionAnchor = anchor;
   }
   function listKeydown(event: KeyboardEvent): void {
-    if (!user || accountView || settingsView || showTrash || librariesView || shortcutsBlocked(event.target, document)) return;
+    if (!user || !filesView || shortcutsBlocked(event.target, document)) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (restorationPending && target?.id !== 'folder-title') return;
     const row = target?.matches(itemSelector) ? target.closest<HTMLElement>('.file-row') : null;
@@ -739,7 +755,7 @@
   let deletedItems = $state<DeletedEntry[]>([]);
   let trashRequest = 0;
   let showTrash = $state(false);
-  const filesView = $derived(!showTrash && !accountView && !settingsView && !librariesView);
+  const filesView = $derived(!showTrash && !accountView && !settingsView && !librariesView && !sharedView);
   const namedLibrary = $derived(folderPath[0]?.id && folderPath[0].id !== folders[0]?.id ? folderPath[0] : undefined);
   const librariesCurrent = $derived(librariesView ? 'page' : filesView && namedLibrary ? 'location' : undefined);
   const filesCurrent = $derived(filesView && !namedLibrary);
@@ -1595,7 +1611,8 @@
       if (!preserveTextEdit || !draft || draft.wire === draft.original) textEdit = null;
       else if (!operation?.inProgress) textEdit.state.operation = null;
     }
-    share = null; shareBusy = false;
+    share = null; shareBusy = false; directShare = null; directShareBusy = ''; settleTreeSharing(false);
+    sharedView = false; sharedLocation = { folder: '', file: undefined };
     webdavAvailable = false; webdavOpen = false; webdavTrigger = null;
     clearSearch();
     archiveBusy = false; archiveTargets = [];
@@ -1802,6 +1819,45 @@
     if (root) await loadMoveFolder([root]);
     else moveError = 'Your storage is unavailable. Close this dialog and refresh your files.';
   }
+
+  type TreeSharingPrompt = {
+    action: 'move' | 'restore'; name: string; destination?: string; audience: SharingConfirmation; changed: boolean;
+  };
+  let treeSharingPrompt = $state<TreeSharingPrompt | null>(null);
+  let treeSharingAnswer: ((answer: boolean) => void) | undefined;
+  let treeSharingFocus: HTMLElement | null = null;
+
+  function settleTreeSharing(answer: boolean): void {
+    treeSharingPrompt = null;
+    const resolve = treeSharingAnswer;
+    treeSharingAnswer = undefined;
+    resolve?.(answer);
+  }
+
+  async function withTreeSharingConfirmation(
+    item: Entry, action: 'move' | 'restore', submit: (token?: string) => Promise<unknown>, destination?: string,
+  ): Promise<boolean> {
+    const generation = sessionGeneration;
+    const navigation = navigationRequest;
+    let token: string | undefined;
+    while (generation === sessionGeneration && navigation === navigationRequest) {
+      try {
+        await submit(token);
+        return true;
+      } catch (error) {
+        const audience = sharingConfirmation(error);
+        if (!audience) throw error;
+        if (generation !== sessionGeneration || navigation !== navigationRequest) return false;
+        treeSharingFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        treeSharingPrompt = { action, name: item.name, destination, audience, changed: token !== undefined };
+        const approved = await new Promise<boolean>(resolve => { treeSharingAnswer = resolve; });
+        if (!approved) return false;
+        token = audience.token;
+      }
+    }
+    return false;
+  }
+
   async function moveEntry(): Promise<void> {
     const target = moveTarget;
     const destination = movePath.at(-1);
@@ -1810,7 +1866,10 @@
     const generation = sessionGeneration;
     moveBusy = true; moveError = '';
     try {
-      await listing.move(target.id, destination.id, target.etag);
+      if (!await withTreeSharingConfirmation(target, 'move', token => listing.move(target.id, destination.id, target.etag, token), destination.name)) {
+        if (generation === sessionGeneration) moveBusy = false;
+        return;
+      }
       if (generation === sessionGeneration) knownParents.set(target.id, destination.id);
     } catch (error) {
       if (generation !== sessionGeneration) return;
@@ -1996,8 +2055,19 @@
       const result = bulkReport!.results.find((item) => item.entry.id === target.id)!;
       result.status = 'pending'; result.message = action === 'move' ? 'Moving…' : 'Moving to trash…';
       try {
-        if (action === 'move') await listing.move(target.id, destination!.id, target.etag);
-        else await listing.trash(target.id, target.etag);
+        if (action === 'move') {
+          const folder = destination!;
+          if (!await withTreeSharingConfirmation(target, action, token => listing.move(target.id, folder.id, target.etag, token), folder.name)) {
+            if (generation !== sessionGeneration) return;
+            for (const remaining of bulkReport!.results) {
+              if (remaining.status === 'pending') {
+                remaining.status = 'failed';
+                remaining.message = 'Kept in place.';
+              }
+            }
+            break;
+          }
+        } else await listing.trash(target.id, target.etag);
         if (generation !== sessionGeneration) return;
         result.status = 'succeeded'; result.message = action === 'move' ? `Moved to ${destination!.name}.` : 'Moved to trash.';
       } catch (error) {
@@ -2095,6 +2165,7 @@
       if (error.code === 'name_conflict') return 'An item with this name is already there. Choose another folder, or rename your item.';
       if (error.code === 'invalid_destination') return 'Choose a different folder. A folder cannot be moved into itself or its children.';
       if (error.code === 'depth_limit') return 'This destination would nest folders too deeply. Choose a folder closer to Files.';
+      if (error.code === 'sharing_audience_changed') return 'Sharing changed. Review the destination and try again.';
       if (error.status === 404) return 'The item or destination is no longer available. Refresh your files.';
       if (error.status === 412) return 'This item changed. Refresh your files and try again.';
     }
@@ -2149,7 +2220,7 @@
     const generation = sessionGeneration;
     dropPending = { entry: target, destination }; dropError = ''; notice = '';
     try {
-      await listing.move(target.id, destination.id, target.etag);
+      if (!await withTreeSharingConfirmation(target, 'move', token => listing.move(target.id, destination.id, target.etag, token), destination.name)) return;
       if (generation === sessionGeneration) knownParents.set(target.id, destination.id);
       if (generation !== sessionGeneration) return;
       clearCompletedFeedback(); actionNotice = `Moved to ${destination.name}`;
@@ -2165,8 +2236,8 @@
   }
 
   function canUploadDrop(): boolean {
-    return !!user && !showTrash && !accountView && !settingsView && !librariesView && !searchQuery && !!currentFolder.id &&
-      !fileMutationBusy && !unresolvedUploadId && !replacementPrompt && !createOpen && !renameId && !moveTarget && !trashTarget && !share;
+    return !!user && filesView && !searchQuery && !!currentFolder.id && !fileMutationBusy && !unresolvedUploadId &&
+      !replacementPrompt && !createOpen && !renameId && !moveTarget && !trashTarget && !share && !directShare;
   }
 
   function acceptDesktopDrop(event: DragEvent, destination: Folder): void {
@@ -2334,6 +2405,8 @@
     } else if (generation === sessionGeneration && feedback === feedbackRevision) actionNotice = 'Changes saved.';
   }
   let share = $state<{ entry: Entry | null; trigger: HTMLElement } | null>(null);
+  let directShare = $state<{ folder: Folder; trigger: HTMLElement } | null>(null);
+  let directShareBusy = $state('');
   let webdavAvailable = $state(false);
   let webdavOpen = $state(false);
   let webdavTrigger: HTMLElement | null = null;
@@ -2351,10 +2424,25 @@
     });
   }
 
+  function closeDirectShare(): void {
+    const trigger = directShare?.trigger ?? null;
+    const generation = sessionGeneration;
+    const navigation = navigationRequest;
+    directShare = null;
+    void tick().then(() => {
+      if (generation === sessionGeneration && navigation === navigationRequest) {
+        restoreFocus(trigger, librariesView ? 'libraries-title' : 'folder-title');
+      }
+    });
+  }
+
   function entryAction(action: 'download' | 'share' | 'rename' | 'move' | 'copy' | 'delete', entry: Entry, trigger: HTMLElement): void {
     if (bulkBusy || ((bulkNeedsRefresh || namespaceUnknown) && action !== 'download')) return;
     if (action === 'download') void (entry.kind === 'folder' ? downloadArchive([entry]) : download(entry));
-    else if (action === 'share') share = { entry, trigger };
+    else if (action === 'share') {
+      if (entry.kind === 'folder') directShare = { folder: entry, trigger };
+      else share = { entry, trigger };
+    }
     else if (action === 'rename') beginRename(entry, trigger);
     else if (action === 'move' || action === 'copy') void beginDestination(entry, trigger, action);
     else { trashError = ''; trashTarget = entry; trashTrigger = trigger; }
@@ -2530,7 +2618,10 @@
     const sessionVersion = sessionGeneration;
     let failed = false;
     try {
-      await listing.restore(item.id, item.etag);
+      if (!await withTreeSharingConfirmation(item, 'restore', token => listing.restore(item.id, item.etag, token))) {
+        failed = true;
+        return;
+      }
       if (sessionVersion !== sessionGeneration) return;
       clearCompletedFeedback(); actionNotice = 'Restored';
       if (showTrash && navigation === navigationRequest) {
@@ -2542,6 +2633,7 @@
       if (sessionVersion !== sessionGeneration) return;
       failed = true;
       if (moveOutcomeUncertain(error)) rememberNamespaceUnknown(item, 'restore');
+      else if (error instanceof HttpError && error.code === 'sharing_audience_changed') trashError = 'Sharing changed. Review the original folder and try again.';
       else trashError = error instanceof HttpError && error.status === 409 ? 'Restore its parent folder first, or rename the item occupying its original name.' : 'Could not restore this item. Refresh trash before trying again.';
     } finally {
       if (sessionVersion === sessionGeneration) {
@@ -3039,6 +3131,7 @@
         {#snippet navigation(close)}
           <nav aria-label="Files"><Sidebar.Menu>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="My libraries" aria-label="My libraries" aria-busy={routeName === 'libraries'} isActive={!!librariesCurrent} aria-current={librariesCurrent} onclick={() => { close(); void navigate('libraries'); }}><LibraryIcon /><span>My libraries</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Shared with me" aria-label="Shared with me" isActive={sharedView} aria-current={sharedView ? 'page' : undefined} onclick={() => { close(); navigateShared(); }}><FolderOpenIcon /><span>Shared with me</span></Sidebar.MenuButton></Sidebar.MenuItem>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" aria-busy={routeName === 'files'} isActive={filesCurrent} aria-current={filesCurrent ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={() => { close(); void navigate('files', folders[0] ? [folders[0]] : undefined); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Trash" aria-label="Trash" aria-busy={routeName === 'trash'} isActive={showTrash} aria-current={showTrash ? 'page' : undefined} onclick={() => { close(); void openTrash(); }}><TrashIcon /><span>Trash</span></Sidebar.MenuButton></Sidebar.MenuItem>
 
@@ -3059,7 +3152,7 @@
       </AppSidebar>
       <Sidebar.Inset class="min-w-0">
         <header class="app-header workspace-header">
-          <div class="workspace-location"><Sidebar.Trigger /><span class="header-divider shrink-0"></span><span class="truncate" title={filesView ? namedLibrary?.name : undefined}>{settingsView ? 'Settings' : accountView ? 'Account' : showTrash ? 'Trash' : librariesView ? 'My libraries' : (namedLibrary?.name ?? 'Files')}</span></div>
+          <div class="workspace-location"><Sidebar.Trigger /><span class="header-divider shrink-0"></span><span class="truncate" title={filesView ? namedLibrary?.name : undefined}>{settingsView ? 'Settings' : accountView ? 'Account' : showTrash ? 'Trash' : librariesView ? 'My libraries' : sharedView ? 'Shared with me' : (namedLibrary?.name ?? 'Files')}</span></div>
           <div class="header-actions">
             <HeaderIconButton label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} pressed={darkMode} onclick={toggleTheme}>{#if darkMode}<SunIcon />{:else}<MoonIcon />{/if}</HeaderIconButton>
             <HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>
@@ -3248,9 +3341,12 @@
           <section class="libraries-content grid gap-4" aria-labelledby="libraries-title" inert={retainingRoute} aria-busy={restorationPending}>
             <LibraryHome items={libraries} pending={restorationPending} error={librariesError}
               onopen={(folder) => void navigate('files', [folder])}
-              onretry={() => void navigate('libraries')} oncreate={createLibrary} />
+              onretry={() => void navigate('libraries')} oncreate={createLibrary}
+              onshare={(folder, trigger) => directShare = { folder, trigger }} />
             {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{/if}
           </section>
+        {:else if sharedView}
+          <SharedWorkspace {client} location={sharedLocation} onnavigate={navigateShared} />
         {:else if showTrash}
             {@const trashEmpty = !restorationPending && !trashLoading && !trashError && deletedItems.length === 0}
             <section class="trash-content grid gap-4" aria-labelledby="trash-heading" inert={retainingRoute} aria-busy={trashLoading || restorationPending}>
@@ -3390,7 +3486,7 @@
           </section>
         {/if}
         </div>
-        {@render betaNotice(!accountView && !settingsView && !showTrash)}
+        {@render betaNotice(!accountView && !settingsView && !showTrash && !sharedView)}
       </Sidebar.Inset>
     </Sidebar.Provider>
     <Dialog.Root open={createOpen} onOpenChange={(open) => { if (!folderBusy) createOpen = open; }}>
@@ -3405,6 +3501,7 @@
         onrestorefocus={() => restoreFocus(webdavTrigger, 'account-title')} />
     {/key}
     {#if share}<ShareLinks {client} entry={share.entry} bind:busy={shareBusy} onclose={closeShare} />{/if}
+    {#if directShare}<DirectShareDialog {client} folder={directShare.folder} bind:busy={directShareBusy} onclose={closeDirectShare} />{/if}
 
     <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !destinationBusy) closeMove(); }}>
       <Dialog.Content
@@ -3465,9 +3562,46 @@
         </Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
+    <Dialog.Root open={!!treeSharingPrompt} onOpenChange={(open) => { if (!open) settleTreeSharing(false); }}>
+      <Dialog.Content
+        class="max-h-[85dvh] overflow-y-auto"
+        onOpenAutoFocus={(event) => { event.preventDefault(); document.getElementById('cancel-tree-sharing')?.focus(); }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const trigger = treeSharingFocus;
+          treeSharingFocus = null;
+          if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus();
+        }}>
+        <Dialog.Header>
+          <Dialog.Title class="[overflow-wrap:anywhere]">{treeSharingPrompt?.action === 'restore' ? 'Restore' : 'Move'} {treeSharingPrompt?.name}?</Dialog.Title>
+          <Dialog.Description>
+            {#if treeSharingPrompt?.changed}Sharing changed. Check who will have access.{:else if treeSharingPrompt?.destination}Move to {treeSharingPrompt.destination}.{:else}This item will return to its original folder.{/if}
+          </Dialog.Description>
+        </Dialog.Header>
+        {#if treeSharingPrompt?.audience.new_recipients.length}
+          <div class="grid gap-1"><p>New access</p><ul class="list-disc pl-5 [overflow-wrap:anywhere]">
+            {#each treeSharingPrompt.audience.new_recipients as handle (handle)}<li>{handle}</li>{/each}
+          </ul></div>
+        {/if}
+        {#if treeSharingPrompt?.audience.carried_recipients.length}
+          <div class="grid gap-1"><p>Access that moves with this item</p><ul class="list-disc pl-5 [overflow-wrap:anywhere]">
+            {#each treeSharingPrompt.audience.carried_recipients as handle (handle)}<li>{handle}</li>{/each}
+          </ul></div>
+        {/if}
+        {#if treeSharingPrompt?.audience.lost_recipients.length}
+          <div class="grid gap-1"><p>Access from the original folder ends</p><ul class="list-disc pl-5 [overflow-wrap:anywhere]">
+            {#each treeSharingPrompt.audience.lost_recipients as handle (handle)}<li>{handle}</li>{/each}
+          </ul></div>
+        {/if}
+        <Dialog.Footer>
+          <Button id="cancel-tree-sharing" variant="outline" onclick={() => settleTreeSharing(false)}>Cancel</Button>
+          <Button onclick={() => settleTreeSharing(true)}>{treeSharingPrompt?.action === 'restore' ? 'Restore and share' : 'Confirm move'}</Button>
+        </Dialog.Footer>
+      </Dialog.Content>
+    </Dialog.Root>
     <Dialog.Root open={bulkAction === 'trash'} onOpenChange={(open) => { if (!open) closeBulk(); }}>
       <Dialog.Content showCloseButton={!bulkBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger); bulkTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Move {bulkTargets.length} selected items to trash?</Dialog.Title><Dialog.Description>Folders include their contents. You can restore these items later. Each selected item is handled separately; some items may stay in place.</Dialog.Description></Dialog.Header>
+        <Dialog.Header><Dialog.Title>Move {bulkTargets.length} selected items to trash?</Dialog.Title><Dialog.Description>Folders include their contents. You can restore these items later. Direct shares rooted in selected folders or their contents are revoked permanently. Each selected item is handled separately; some items may stay in place.</Dialog.Description></Dialog.Header>
         <ul class="bulk-confirm-items">{#each bulkTargets as entry (entry.id)}<li>{entry.name}</li>{/each}</ul>
         <Dialog.Footer><Button variant="outline" disabled={bulkBusy} onclick={closeBulk}>Cancel</Button><Button disabled={bulkBusy} onclick={runBulk}>{bulkBusy ? 'Moving to trash…' : 'Move to trash'}</Button></Dialog.Footer>
       </Dialog.Content>
@@ -3486,7 +3620,7 @@
     </Dialog.Root>
     <Dialog.Root open={!!trashTarget} onOpenChange={(open) => { if (!open && !trashBusy) trashTarget = null; }}>
       <Dialog.Content showCloseButton={!trashBusy} aria-busy={trashBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(trashTrigger); trashTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Delete {trashTarget?.name}?</Dialog.Title><Dialog.Description>{trashTarget?.kind === 'folder' ? 'Move this folder and its contents to trash. You can restore the folder later.' : 'Move this file to trash. You can restore it later.'}</Dialog.Description></Dialog.Header>
+        <Dialog.Header><Dialog.Title>Delete {trashTarget?.name}?</Dialog.Title><Dialog.Description>{trashTarget?.kind === 'folder' ? 'Move this folder and its contents to trash. You can restore the folder later. Direct shares rooted here or in its contents are revoked.' : 'Move this file to trash. You can restore it later.'}</Dialog.Description></Dialog.Header>
         {#if trashError}<p role="alert">{trashError}</p>{/if}
         <Dialog.Footer><Button variant="outline" disabled={trashBusy} onclick={() => trashTarget = null}>Cancel</Button><Button disabled={trashBusy} aria-busy={trashBusy} onclick={deleteEntry}>{trashBusy ? 'Moving to trash…' : 'Move to trash'}</Button></Dialog.Footer>
       </Dialog.Content>
@@ -3528,7 +3662,7 @@
         <Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => authorityTarget = null}>Cancel</Button><Button disabled={accountBusy} aria-busy={accountBusy} onclick={changeAccountAuthority}>{accountBusy ? 'Updating…' : authorityTarget?.action === 'enable' ? 'Enable account' : authorityTarget?.account.role === 'user' ? 'Make administrator' : 'Make user'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
-    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. An administrator can enable the account again.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} aria-busy={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
+    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. Direct shares to and from this account end permanently. Enabling the account again does not restore them.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} aria-busy={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
   {/if}
   {#if !user || loggingOut}{@render betaNotice(false)}{/if}
 </div>

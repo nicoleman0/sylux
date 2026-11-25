@@ -92,7 +92,9 @@ pub(super) fn namespace_error(error: NamespaceError) -> StatusCode {
         NamespaceError::Stale => StatusCode::PRECONDITION_FAILED,
         NamespaceError::Conflict | NamespaceError::InvalidDestination => StatusCode::CONFLICT,
         NamespaceError::InvalidName => StatusCode::BAD_REQUEST,
-        NamespaceError::DepthLimit => StatusCode::FORBIDDEN,
+        NamespaceError::DepthLimit | NamespaceError::SharingConfirmationRequired => {
+            StatusCode::FORBIDDEN
+        }
         _ => StatusCode::SERVICE_UNAVAILABLE,
     }
 }

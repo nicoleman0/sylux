@@ -10,10 +10,11 @@
   import XIcon from '@lucide/svelte/icons/x';
   import DownloadIcon from '@lucide/svelte/icons/download';
 
-  let { entry, url, client, edit = $bindable(), editSignal, onclose, ondownload, onresume, onsaved }: {
+  let { entry, url, client, readOnly = false, edit = $bindable(), editSignal, onclose, ondownload, onresume, onsaved }: {
     entry: Entry | null;
     url: string;
     client: ApiClient;
+    readOnly?: boolean;
     edit: TextEditState;
     editSignal: AbortSignal;
     onclose: () => void;
@@ -55,7 +56,7 @@
 
   async function beginEdit() {
     const signal = editSignal;
-    if (signal.aborted || draft || entry?.kind !== 'file' || preview?.kind !== 'text' || !preview.edit) return;
+    if (readOnly || signal.aborted || draft || entry?.kind !== 'file' || preview?.kind !== 'text' || !preview.edit) return;
     edit.draft = { entry, source: preview.edit, original: preview.text, text: editorText(preview.text), wire: preview.text };
     await tick();
     if (!signal.aborted) textarea?.focus();
@@ -336,8 +337,8 @@
     {:else if !isPdf}
       <Dialog.Footer class={mediaKind ? 'shrink-0 flex-row flex-wrap justify-end' : 'shrink-0'}>
         <Button variant="outline" onclick={close}>Close preview</Button>
-        <Button bind:ref={downloadButton} variant={preview?.kind === 'text' && preview.edit && !draft ? 'outline' : 'default'} onclick={ondownload}>Download file</Button>
-        {#if preview?.kind === 'text' && preview.edit && !draft}
+        <Button bind:ref={downloadButton} variant={!readOnly && preview?.kind === 'text' && preview.edit && !draft ? 'outline' : 'default'} onclick={ondownload}>Download file</Button>
+        {#if !readOnly && preview?.kind === 'text' && preview.edit && !draft}
           <Button bind:ref={editButton} onclick={beginEdit}>Edit</Button>
         {/if}
       </Dialog.Footer>

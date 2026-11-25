@@ -791,6 +791,7 @@ fn upgrade_binding_step(
         2 => schema::migrate_v2,
         3 => schema::migrate_v3,
         4 => schema::migrate_v4,
+        5 => schema::migrate_direct_grants,
         _ => return Err(BindingError::UnsupportedVersion("schema_version")),
     };
     if row.schema_version == previous && version == previous {

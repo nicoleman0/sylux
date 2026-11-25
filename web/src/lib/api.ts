@@ -1,4 +1,6 @@
-export type ApiError = { code: string; message: string; request_id: string; existing?: { id: string; name: string; kind: string; etag: string }; limit?: number };
+import type { SharingConfirmation } from './direct-grants';
+
+export type ApiError = { code: string; message: string; request_id: string; existing?: { id: string; name: string; kind: string; etag: string }; limit?: number; confirmation?: SharingConfirmation };
 export class HttpError extends Error {
   constructor(readonly status: number, readonly details?: ApiError) { super(`Request failed (${status})`); this.name = 'HttpError'; }
   get code(): string | undefined { return this.details?.code; }

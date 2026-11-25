@@ -883,3 +883,179 @@ async fn webdav_settles_a_committed_put_when_the_sqlite_result_is_lost() {
     assert_eq!(downloaded["etag"], committed["etag"]);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn webdav_respects_direct_grant_boundaries_on_reads_moves_and_trash() {
+    let fixture = Fixture::with_webdav(true).await;
+    let (_, owner) = fixture.credential(0, "Owner desktop", false).await;
+    let (_, recipient) = fixture.credential(1, "Recipient desktop", false).await;
+    let (_, unrelated) = fixture
+        .credential(2, "Unrelated administrator", false)
+        .await;
+    let headers = fixture.mutation_headers(CSRF);
+    let folder = "00000000000000000000000000000301";
+    let file = "00000000000000000000000000000302";
+    let original_folder = "/dav/Files/private-name/";
+    let original_child = "/dav/Files/private-name/shared.bin";
+    let renamed_folder = "/dav/Files/renamed/";
+    let renamed_child = "/dav/Files/renamed/shared.bin";
+    let staging = "/dav/Files/staging/";
+    let moved_child = "/dav/Files/staging/moved.bin";
+    let new_upload = "/dav/Files/renamed/upload.bin";
+    let folder_bookmark = format!("/shared/folders/{folder}/path");
+    let shared_content = format!("/shared/entries/{file}/content");
+    let owned_content = format!("/entries/{file}/content");
+    let dav = async |method, path, body| {
+        fixture
+            .request(method, path, None, std::slice::from_ref(&owner), body)
+            .await
+    };
+    let move_to = async |source, target: &str, overwrite: &str| {
+        fixture
+            .request(
+                "MOVE",
+                source,
+                None,
+                &[
+                    owner.clone(),
+                    ("Destination", target.into()),
+                    ("Overwrite", overwrite.into()),
+                ],
+                "",
+            )
+            .await
+            .0
+    };
+    let browser_get =
+        async |path, actor| fixture.request("GET", path, cookie(actor), &[], "").await;
+
+    assert_eq!(
+        move_to("/dav/Files/private-file.bin", original_child, "F").await,
+        201
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "POST",
+                &format!("/entries/{folder}/direct-grants"),
+                cookie(0),
+                &headers,
+                r#"{"handle":"other"}"#
+            )
+            .await
+            .0,
+        200
+    );
+
+    for (actor, auth) in [&owner, &recipient, &unrelated].into_iter().enumerate() {
+        for (method, path, owner_status) in [
+            ("GET", original_child, 200),
+            ("HEAD", original_child, 200),
+            ("PROPFIND", original_folder, 207),
+        ] {
+            assert_eq!(
+                fixture
+                    .request(
+                        method,
+                        path,
+                        None,
+                        &[auth.clone(), ("Depth", "0".into())],
+                        ""
+                    )
+                    .await
+                    .0,
+                if actor == 0 { owner_status } else { 404 },
+                "{method}, account {actor}"
+            );
+        }
+        assert_eq!(
+            browser_get(&owned_content, actor).await.0,
+            if actor == 0 { 200 } else { 404 }
+        );
+        assert_eq!(
+            browser_get(&shared_content, actor).await.0,
+            if actor == 1 { 200 } else { 404 }
+        );
+    }
+
+    assert_eq!(move_to(original_folder, renamed_folder, "F").await, 201);
+    assert_eq!(move_to(renamed_folder, renamed_folder, "T").await, 204);
+    assert_eq!(browser_get(&folder_bookmark, 1).await.0, 200);
+    assert_eq!(dav("MKCOL", staging, "").await.0, 201);
+    assert_eq!(
+        dav("MKCOL", "/dav/Files/renamed/subfolder/", "").await.0,
+        201
+    );
+    assert_eq!(dav("PUT", new_upload, "new bytes").await.0, 201);
+    assert_eq!(move_to(renamed_child, moved_child, "F").await, 201);
+    assert_eq!(browser_get(&shared_content, 1).await.0, 404);
+
+    for overwrite in ["F", "T"] {
+        for (source, destination, status) in [
+            (moved_child, renamed_child, 403),
+            (renamed_folder, "/dav/Files/staging/renamed/", 403),
+            (moved_child, new_upload, 412),
+        ] {
+            assert_eq!(
+                move_to(source, destination, overwrite).await,
+                status,
+                "{source} -> {destination}, Overwrite: {overwrite}"
+            );
+        }
+    }
+    assert_eq!(dav("GET", renamed_child, "").await.0, 404);
+    assert_eq!(
+        fixture
+            .request(
+                "PROPFIND",
+                "/dav/Files/staging/renamed/",
+                None,
+                &[owner.clone(), ("Depth", "0".into())],
+                ""
+            )
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        dav("GET", moved_child, "").await.2,
+        b"synthetic isolation payload"
+    );
+    assert_eq!(dav("GET", new_upload, "").await.2, b"new bytes");
+    assert_eq!(browser_get(&folder_bookmark, 1).await.0, 200);
+    assert_eq!(browser_get(&shared_content, 1).await.0, 404);
+
+    assert_eq!(dav("DELETE", renamed_folder, "").await.0, 204);
+    assert_eq!(browser_get(&folder_bookmark, 1).await.0, 404);
+    let (status, _, trash) = browser_get("/trash", 0).await;
+    assert_eq!(status, 200);
+    let trash: serde_json::Value = serde_json::from_slice(&trash).unwrap();
+    let row = trash["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == folder)
+        .unwrap();
+    let mut restore_headers = headers.to_vec();
+    restore_headers.push(("If-Match", row["etag"].as_str().unwrap().into()));
+    assert_eq!(
+        fixture
+            .request(
+                "POST",
+                &format!("/trash/{folder}/restore"),
+                cookie(0),
+                &restore_headers,
+                ""
+            )
+            .await
+            .0,
+        204
+    );
+    assert_eq!(dav("GET", new_upload, "").await.2, b"new bytes");
+    assert_eq!(browser_get(&folder_bookmark, 1).await.0, 404);
+    let (status, _, incoming) = browser_get("/shared", 1).await;
+    assert_eq!(status, 200);
+    let incoming: serde_json::Value = serde_json::from_slice(&incoming).unwrap();
+    assert_eq!(incoming, serde_json::json!({"items":[]}));
+    fixture.close().await;
+}

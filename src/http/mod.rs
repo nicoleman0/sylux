@@ -6,6 +6,7 @@ pub mod content;
 mod copies;
 mod dav;
 mod dav_credentials;
+mod direct_grants;
 pub mod entries;
 pub mod instance;
 pub mod middleware;
@@ -141,6 +142,26 @@ impl AuthState {
 
 pub fn router(state: AuthState) -> Router {
     let app = Router::new()
+        .route("/shared", get(direct_grants::incoming))
+        .route("/shared/folders/{id}/path", get(direct_grants::path))
+        .route(
+            "/shared/folders/{id}/children",
+            get(entries::shared_listing_folder),
+        )
+        .route("/shared/search", get(entries::shared_search))
+        .route("/shared/entries/{id}", get(direct_grants::file))
+        .route(
+            "/shared/entries/{id}/content",
+            get(content::shared_get).head(content::shared_head),
+        )
+        .route(
+            "/entries/{id}/direct-grants",
+            get(direct_grants::manage).post(direct_grants::grant),
+        )
+        .route(
+            "/direct-grants/{id}",
+            axum::routing::delete(direct_grants::revoke),
+        )
         .route("/folders/{folder_id}/path", get(entries::folder_path))
         .route(
             "/libraries",

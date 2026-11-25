@@ -6,7 +6,7 @@ use super::{root::InstallationIdentity, sqlite};
 
 /// Versions this build understands and serves. A bound database reporting
 /// anything else refuses startup instead of migrating guesses.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 5;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 6;
 
 pub fn is_older_schema(version: i64) -> bool {
     (1..SUPPORTED_SCHEMA_VERSION).contains(&version)
@@ -146,6 +146,7 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
             migrate_v2(connection, None)?;
             migrate_v3(connection, None)?;
             migrate_v4(connection, None)?;
+            migrate_direct_grants(connection, None)?;
             Ok(MigrationOutcome::Applied)
         }
         _ => Err(SchemaError::Inconsistent("unsupported user_version")),
@@ -194,6 +195,27 @@ pub(super) fn verify_schema_at(connection: &Connection, version: i64) -> Result<
                     "share_link_disable",
                     "share_link_replace",
                     "share_link_trash",
+                ]
+            } else {
+                &[]
+            },
+        ),
+        ("table", if version >= 6 { &["direct_grant"] } else { &[] }),
+        (
+            "index",
+            if version >= 6 {
+                &["direct_grant_recipient", "direct_grant_owner"]
+            } else {
+                &[]
+            },
+        ),
+        (
+            "trigger",
+            if version >= 6 {
+                &[
+                    "direct_grant_identity",
+                    "direct_grant_disable",
+                    "direct_grant_trash",
                 ]
             } else {
                 &[]
@@ -312,6 +334,19 @@ pub fn migrate_v4(
         connection,
         5,
         include_str!("../../migrations/sqlite/0005_dav_credentials.sql"),
+        manifest_hash,
+    )
+}
+
+pub fn migrate_direct_grants(
+    connection: &Connection,
+    manifest_hash: Option<&[u8]>,
+) -> Result<(), SchemaError> {
+    verify_schema_at(connection, 5)?;
+    migrate(
+        connection,
+        6,
+        include_str!("../../migrations/sqlite/0006_direct_grants.sql"),
         manifest_hash,
     )
 }
