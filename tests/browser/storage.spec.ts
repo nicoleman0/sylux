@@ -592,20 +592,28 @@ test('uploaded PDF renders and changes pages over real TLS', { annotation: { typ
 test('direct shares show only the live subtree and reconcile a lost restore response', { annotation: { type: 'harness_case', description: 'storage_direct_sharing' } }, async () => {
   test.setTimeout(65_000);
   await signIn();
+  const ownerHandle = `share-owner-${phase}`;
   const handle = `share-recipient-${phase}`;
-  const recipientPassword = 'Direct sharing fixture password';
+  const sharingPassword = 'Direct sharing fixture password';
   const pdfName = `Shared plan ${phase}.pdf`;
   const pdfBytes = fs.readFileSync(path.resolve(__dirname, '../../web/tests/fixtures/three-pages.pdf'));
   const button = (tab: Page, name: string) => tab.getByRole('button', { name, exact: true });
 
   await button(page, 'Settings').click();
-  await button(page, 'Create account').click();
-  const account = page.getByRole('dialog', { name: 'Create account', exact: true });
-  await account.getByLabel('Account name').fill(handle);
-  await account.getByLabel('Password', { exact: true }).fill(recipientPassword);
-  await account.getByLabel('Confirm password', { exact: true }).fill(recipientPassword);
-  await button(page, 'Create account').last().click();
-  await expect(account).toBeHidden();
+  for (const accountHandle of [ownerHandle, handle]) {
+    await button(page, 'Create account').click();
+    const account = page.getByRole('dialog', { name: 'Create account', exact: true });
+    await account.getByLabel('Account name').fill(accountHandle);
+    await account.getByLabel('Password', { exact: true }).fill(sharingPassword);
+    await account.getByLabel('Confirm password', { exact: true }).fill(sharingPassword);
+    await account.getByRole('button', { name: 'Create account', exact: true }).click();
+    await expect(account).toBeHidden();
+  }
+  // The seeded administrator is reused after restart.
+  await button(page, 'Log out').click();
+  await page.getByLabel('Account name').fill(ownerHandle);
+  await page.getByLabel('Password', { exact: true }).fill(sharingPassword);
+  await button(page, 'Sign in').click();
 
   await button(page, 'My libraries').click();
   await button(page, 'New library').click();
@@ -653,7 +661,7 @@ test('direct shares show only the live subtree and reconcile a lost restore resp
     const tab = await recipient.newPage();
     await tab.goto(origin);
     await tab.getByLabel('Account name').fill(handle);
-    await tab.getByLabel('Password', { exact: true }).fill(recipientPassword);
+    await tab.getByLabel('Password', { exact: true }).fill(sharingPassword);
     await button(tab, 'Sign in').click();
     await button(tab, 'Shared with me').press('Enter');
     const roots = tab.getByRole('list', { name: 'Folders shared with me' });
@@ -723,7 +731,7 @@ test('direct shares show only the live subtree and reconcile a lost restore resp
     expect(committed).toBe(1);
     await tab.reload();
     await tab.getByLabel('Account name').fill(handle);
-    await tab.getByLabel('Password', { exact: true }).fill(recipientPassword);
+    await tab.getByLabel('Password', { exact: true }).fill(sharingPassword);
     await button(tab, 'Sign in').click();
     await expect(preview.locator('.page[data-page-number="1"] canvas').first()).toBeVisible({ timeout: 15_000 });
     await page.goto(ownerParent);

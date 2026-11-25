@@ -119,20 +119,22 @@ test('file list is operable from the keyboard with visible focus', { annotation:
   await page.route('**/folders/*/children**', async route => { arrived(); await held; await route.continue(); }, { times: 1 });
   await signIn();
   await requestArrived;
+  const firstItem = page.getByRole('table', { name: 'Files in current folder' })
+    .getByRole('button', { name: /^(Open|Preview) / }).first();
   const folder = page.getByRole('button', { name: `Open ${fixture.folder}`, exact: true });
   await page.getByRole('heading', { name: 'Files', level: 1 }).focus();
   await page.keyboard.press('ArrowDown');
   release();
-  await expect(folder).toBeFocused();
+  await expect(firstItem).toBeFocused();
   await page.unrouteAll({ behavior: 'ignoreErrors' });
-  const outline = await folder.evaluate(element => { const style = getComputedStyle(element); return style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0; });
+  const outline = await firstItem.evaluate(element => { const style = getComputedStyle(element); return style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0; });
   expect(outline).toBe(true);
   await page.keyboard.press('?');
   const help = page.getByRole('dialog', { name: 'Keyboard shortcuts', exact: true });
   await expect(help).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(help).toBeHidden();
-  await expect(folder).toBeFocused();
+  await expect(firstItem).toBeFocused();
   await page.keyboard.press('/');
   const search = page.getByLabel('Search files and folders');
   await expect(search).toBeFocused();
