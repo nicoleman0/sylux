@@ -52,7 +52,7 @@ unset DEBUG PWDEBUG
 
 evidence() {
   printf '%s\n' "$*" >&3
-  printf '- %s\n' "$*" >>"${GITHUB_STEP_SUMMARY:?}"
+  printf -- '- %s\n' "$*" >>"${GITHUB_STEP_SUMMARY:?}"
 }
 
 existing=$(docker_local ps -aq --filter "label=com.docker.compose.project=$project")
