@@ -224,6 +224,211 @@ fn cookie(actor: usize) -> Option<(&'static str, &'static [u8; 32])> {
 }
 
 #[tokio::test]
+async fn private_library_identity_and_file_access_are_owner_scoped() {
+    use serde_json::{Value, json};
+
+    let fixture = Fixture::new().await;
+    let headers = [
+        ("Origin", "https://127.0.0.1".into()),
+        ("X-CSRF-Token", URL_SAFE_NO_PAD.encode(CSRF)),
+    ];
+    let parse = |body: &[u8]| serde_json::from_slice::<Value>(body).unwrap();
+    let (status, _, body) = fixture
+        .request("GET", "/libraries", cookie(0), &[], "")
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(parse(&body)["items"][0]["id"], ROOT);
+    assert_eq!(parse(&body)["items"][0]["name"], "Files");
+    assert_eq!(
+        fixture
+            .request(
+                "POST",
+                "/libraries",
+                cookie(0),
+                &headers,
+                r#"{"name":"   "}"#
+            )
+            .await
+            .0,
+        422,
+    );
+    let one = fixture.request(
+        "POST",
+        "/libraries",
+        cookie(0),
+        &headers,
+        r#"{"name":"Café"}"#,
+    );
+    let duplicate = fixture.request(
+        "POST",
+        "/libraries",
+        cookie(0),
+        &headers,
+        r#"{"name":"Cafe\u0301"}"#,
+    );
+    let (one, duplicate) = tokio::join!(one, duplicate);
+    let (created, refused) = if one.0 == 201 {
+        (one, duplicate)
+    } else {
+        (duplicate, one)
+    };
+    assert_eq!(created.0, 201);
+    assert_eq!(refused.0, 409);
+    assert_eq!(parse(&refused.2)["code"], "name_conflict");
+    let first = parse(&created.2);
+    let (status, _, second) = fixture
+        .request(
+            "POST",
+            "/libraries",
+            cookie(0),
+            &headers,
+            r#"{"name":"Studio"}"#,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let second = parse(&second);
+    let mut folders = Vec::new();
+    for library in [&first, &second] {
+        let id = library["id"].as_str().unwrap();
+        let path = format!("/folders/{id}/children");
+        let (status, _, body) = fixture
+            .request("POST", &path, cookie(0), &headers, r#"{"name":"Projects"}"#)
+            .await;
+        assert_eq!(status, 201);
+        let folder = parse(&body);
+        assert_eq!(folder["parent_id"], id);
+        assert_eq!(
+            parse(&fixture.request("GET", &path, cookie(0), &[], "").await.2)["items"][0]["id"],
+            folder["id"]
+        );
+        folders.push(folder["id"].as_str().unwrap().to_owned());
+    }
+    assert_ne!(folders[0], folders[1]);
+
+    let file = "00000000000000000000000000000302";
+    let file_url = format!("/entries/{file}/content");
+    let mut move_headers = headers.to_vec();
+    move_headers.push(("If-Match", format!("\"{file}:1\"")));
+    assert_eq!(
+        fixture
+            .request(
+                "POST",
+                &format!("/entries/{file}/move"),
+                cookie(0),
+                &move_headers,
+                &json!({"parent_id": folders[0]}).to_string()
+            )
+            .await
+            .0,
+        200,
+    );
+    let first_root = first["id"].as_str().unwrap();
+    let second_root = second["id"].as_str().unwrap();
+    let search = fixture
+        .request("GET", "/entries/search?q=private-file", cookie(0), &[], "")
+        .await;
+    assert_eq!(search.0, 200);
+    assert_eq!(
+        parse(&search.2)["items"][0]["location"][0]["id"],
+        first_root
+    );
+    for (library, count) in [(first_root, 1), (second_root, 0)] {
+        let scoped = format!("/entries/search?q=private-file&folder_id={library}");
+        let (status, _, body) = fixture.request("GET", &scoped, cookie(0), &[], "").await;
+        assert_eq!(status, 200);
+        assert_eq!(parse(&body)["items"].as_array().unwrap().len(), count);
+    }
+    let (status, _, body) = fixture.request("GET", &file_url, cookie(0), &[], "").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, b"synthetic isolation payload");
+    let mut trash_headers = headers.to_vec();
+    trash_headers.push(("If-Match", format!("\"{file}:2\"")));
+    assert_eq!(
+        fixture
+            .request(
+                "DELETE",
+                &format!("/entries/{file}"),
+                cookie(0),
+                &trash_headers,
+                ""
+            )
+            .await
+            .0,
+        204
+    );
+    let (status, _, body) = fixture
+        .request("GET", "/trash?sort=location_asc", cookie(0), &[], "")
+        .await;
+    assert_eq!(status, 200);
+    let deleted = &parse(&body)["items"][0];
+    assert_eq!(deleted["library_name"], first["name"]);
+    assert_eq!(deleted["original_path"], json!(["Projects"]));
+    let mut restore_headers = headers.to_vec();
+    restore_headers.push(("If-Match", deleted["etag"].as_str().unwrap().to_owned()));
+    assert_eq!(
+        fixture
+            .request(
+                "POST",
+                &format!("/trash/{file}/restore"),
+                cookie(0),
+                &restore_headers,
+                ""
+            )
+            .await
+            .0,
+        204
+    );
+    let (status, _, body) = fixture.request("GET", &file_url, cookie(0), &[], "").await;
+    assert_eq!(
+        (status, body.as_slice()),
+        (200, b"synthetic isolation payload".as_slice())
+    );
+    assert_eq!(
+        fixture.request("GET", "/libraries", None, &[], "").await.0,
+        401
+    );
+    for actor in [1, 2] {
+        let (status, _, body) = fixture
+            .request("GET", "/libraries", cookie(actor), &[], "")
+            .await;
+        assert_eq!(status, 200);
+        let items = parse(&body);
+        let items = items["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["name"], "Files");
+        assert_ne!(items[0]["id"], ROOT);
+        let (status, _, body) = fixture
+            .request("GET", "/entries/search?q=Projects", cookie(actor), &[], "")
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(parse(&body)["items"], json!([]));
+        for id in [first_root, second_root, &folders[0], &folders[1]] {
+            for path in [
+                format!("/folders/{id}/path"),
+                format!("/folders/{id}/children"),
+                format!("/entries/search?q=private&folder_id={id}"),
+            ] {
+                assert_eq!(
+                    fixture
+                        .request("GET", &path, cookie(actor), &[], "")
+                        .await
+                        .0,
+                    404
+                );
+            }
+        }
+        assert_eq!(
+            fixture
+                .request("GET", &file_url, cookie(actor), &[], "")
+                .await
+                .0,
+            404
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn a03_unrelated_and_admin_route_matrix_denies_owner_private_state() {
     let f = Fixture::new().await;
     // Keep unsupported methods distinct from authenticated namespace mutations.

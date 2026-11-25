@@ -6,7 +6,7 @@ Account shows the signed-in user's Files and Trash totals. Settings > Accounts s
 
 Figures are logical sizes: the sum of stored revision lengths. They exclude SQLite metadata, filesystem block overhead, upload staging and payloads still waiting for removal cleanup. They are not disk use.
 
-- **Files**: revisions of files reachable from the account root through active folders.
+- **Files**: revisions of files reachable from any of the account's library roots through active folders.
 - **Trash**: revisions of every other file that has not been permanently removed. This includes the contents of trashed folders and files replaced by uploads.
 
 Every retained revision falls in exactly one category. A replacement upload keeps the previous file as a deleted entry, so its bytes move from Files to Trash. Sylux records no provenance for that entry, so replaced files are not reported separately. Permanent removal takes bytes out of Trash when it commits, before payload cleanup finishes.

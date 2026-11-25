@@ -91,6 +91,98 @@ async fn csrf(
     let _ = account;
     Err((StatusCode::FORBIDDEN, "forbidden"))
 }
+
+pub async fn libraries(State(s): State<AuthState>, headers: HeaderMap) -> Response {
+    let Some(cookie) = session_cookie(&headers) else {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let result = s
+        .workers
+        .read(move |db| {
+            let snapshot = db.unchecked_transaction()?;
+            let Some((owner, _, _)) = authz::validate_session(
+                &snapshot,
+                &cookie.session_id,
+                &cookie.secret,
+                crate::http::auth::now(),
+            ) else {
+                return Ok(None);
+            };
+            let items = namespace::libraries(&snapshot, &owner)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            snapshot.commit()?;
+            Ok(Some(items))
+        })
+        .await;
+    match result {
+        Ok(Some(items)) => Json(serde_json::json!({ "items": items })).into_response(),
+        Ok(None) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateLibrary {
+    name: String,
+}
+
+pub async fn create_library(
+    State(s): State<AuthState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateLibrary>,
+) -> Response {
+    let Ok(guard) = s.coordinator.serialize() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "mutation_unavailable");
+    };
+    drop(guard);
+    if !origin_matches(&headers, &s.origin) {
+        return error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    let Some(cookie) = session_cookie(&headers) else {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let Some(csrf_token) = headers
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .and_then(decode_secret)
+    else {
+        return error(StatusCode::FORBIDDEN, "forbidden");
+    };
+    let result = s
+        .workers
+        .transact(move |tx| {
+            let Some((owner, _, _)) = authz::validate_session(
+                tx,
+                &cookie.session_id,
+                &cookie.secret,
+                crate::http::auth::now(),
+            ) else {
+                return Ok(Err(WriteFailure::Unauthorized));
+            };
+            if !authz::csrf_matches(tx, &cookie.session_id, &csrf_token) {
+                return Ok(Err(WriteFailure::Forbidden));
+            }
+            match namespace::create_library(tx, &owner, &input.name) {
+                Ok(entry) => Ok(Ok(entry)),
+                Err(NamespaceError::Sql) => Err(rusqlite::Error::InvalidQuery),
+                Err(error) => Ok(Err(WriteFailure::Namespace(error))),
+            }
+        })
+        .await;
+    match result {
+        Ok(Ok(entry)) => entry_response(StatusCode::CREATED, entry),
+        Ok(Err(WriteFailure::Unauthorized)) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
+        Ok(Err(WriteFailure::Forbidden)) => error(StatusCode::FORBIDDEN, "forbidden"),
+        Ok(Err(WriteFailure::Namespace(NamespaceError::InvalidName))) => {
+            error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_name")
+        }
+        Ok(Err(WriteFailure::Namespace(NamespaceError::Conflict))) => {
+            error(StatusCode::CONFLICT, "name_conflict")
+        }
+        _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateFolder {
@@ -553,15 +645,15 @@ fn build_listing(
     limit: usize,
     key: [u8; 32],
 ) -> Result<ListingReply, Response> {
-    let root = namespace::root_entry(db, account)
-        .map_err(|_| error(StatusCode::NOT_FOUND, "not_found"))?;
-    let root_id = root.id.clone();
-    let is_root = folder_id.is_none();
-    let folder = folder_id.unwrap_or_else(|| root_id.clone());
-    let path = namespace::folder_path(db, account, &folder).map_err(|failure| match failure {
-        NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
-        _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-    })?;
+    let root = folder_id
+        .is_none()
+        .then(|| namespace::root_entry(db, account))
+        .transpose()
+        .map_err(folder_read_error)?;
+    let folder =
+        folder_id.unwrap_or_else(|| root.as_ref().expect("default root resolved").id.clone());
+    let path = namespace::folder_path(db, account, &folder).map_err(folder_read_error)?;
+    let root_id = path.first().expect("validated folder path").id.clone();
     let generation = path.last().expect("validated folder path").generation;
     let after = if let Some(value) = cursor {
         let Some(decoded) = decode_cursor(&key, &value) else {
@@ -649,10 +741,17 @@ fn build_listing(
                 entry: row.entry,
             })
             .collect(),
-        root: is_root.then_some(root),
+        root,
         next_cursor,
         has_more: more,
     })
+}
+
+fn folder_read_error(failure: NamespaceError) -> Response {
+    match failure {
+        NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
+        _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    }
 }
 pub async fn rename(
     State(s): State<AuthState>,

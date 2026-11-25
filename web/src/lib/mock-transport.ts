@@ -70,6 +70,7 @@ export class MockTransport implements ApiTransport {
   private appearance: Appearance = { ...defaultAppearance };
   private accounts: Account[] = [{ account_id: 'mock-user', handle: 'owner', role: 'administrator', enabled: true }];
   private root = { ...root };
+  private libraries: Folder[] = [];
   private entries = seed.map((entry) => ({ ...entry }));
   private deletedEntries: Entry[] = [];
   private sequence = 0;
@@ -111,11 +112,13 @@ export class MockTransport implements ApiTransport {
     let current: string | null = id;
     while (current && items.length <= 128 && !seen.has(current)) {
       seen.add(current);
-      const folder: Folder | undefined = current === this.root.id ? this.root : this.entries.find((entry): entry is Folder => entry.kind === 'folder' && entry.id === current);
+      const folder: Folder | undefined = current === this.root.id ? this.root :
+        this.libraries.find(entry => entry.id === current) ??
+        this.entries.find((entry): entry is Folder => entry.kind === 'folder' && entry.id === current);
       if (!folder) throw new HttpError(404);
       items.unshift(folder); current = folder.parent_id;
     }
-    if (current || items[0]?.id !== this.root.id) throw new HttpError(404);
+    if (current || items[0]?.parent_id !== null) throw new HttpError(404);
     return items;
   }
 
@@ -129,6 +132,7 @@ export class MockTransport implements ApiTransport {
   private bump(id: string): void {
     const etag = `"mock-${++this.sequence}"`;
     if (id === this.root.id) this.root = { ...this.root, etag };
+    else if (this.libraries.some(entry => entry.id === id)) this.libraries = this.libraries.map(entry => entry.id === id ? { ...entry, etag } : entry);
     else this.entries = this.entries.map((entry) => entry.id === id ? { ...entry, etag } : entry);
   }
 
@@ -155,6 +159,20 @@ export class MockTransport implements ApiTransport {
     const method = options.method ?? 'GET';
     const route = path.split('?')[0]!;
     if (options.signal?.aborted) throw new DOMException('Canceled', 'AbortError');
+    if (route === '/libraries') {
+      if (!this.user) throw new HttpError(401);
+      if (method === 'GET') return { items: [root, ...this.libraries] } as T;
+      const name = (options.body as { name: string }).name.trim();
+      if (!name || name === '.' || name === '..' || /[\/\\\p{Cc}]/u.test(name) ||
+        new TextEncoder().encode(name).length > 255) throw this.removalError(422, 'invalid_name');
+      if ([root, ...this.libraries].some(folder => folder.name.normalize('NFC') === name.normalize('NFC'))) {
+        throw this.removalError(409, 'name_conflict');
+      }
+      const id = `library-${++this.sequence}`;
+      const library: Folder = { id, name, parent_id: null, kind: 'folder', etag: `"${id}:1"` };
+      this.libraries.push(library);
+      return library as T;
+    }
     if (route === '/instance/appearance' && method === 'GET') return { ...this.appearance } as T;
     if (route === '/instance/appearance' && method === 'PUT') {
       if (this.user?.role !== 'administrator') throw new HttpError(403);
@@ -242,27 +260,20 @@ export class MockTransport implements ApiTransport {
       const folder = params.get('folder_id') ?? root.id;
       const scopePath = this.folderPath(folder);
       const locationFor = (entry: Entry): Folder[] | null => {
-        const path: Folder[] = [];
-        let parentId: string | null = entry.parent_id;
-        const seen = new Set<string>();
-        while (parentId) {
-          if (seen.has(parentId)) return null;
-          seen.add(parentId);
-          const parent: Folder | undefined = parentId === root.id ? root : this.entries.find((item): item is Folder => item.kind === 'folder' && item.id === parentId);
-          if (!parent) return null;
-          path.unshift(parent); parentId = parent.parent_id;
-        }
-        return path[0]?.id === root.id ? path : null;
+        if (!entry.parent_id) return null;
+        try { return this.folderPath(entry.parent_id); } catch { return null; }
       };
       const candidates = this.entries.flatMap((entry) => {
         const location = locationFor(entry);
-        return location?.some((part) => part.id === folder) ? [{ entry, location }] : [];
+        return location && (folder === root.id || location.some(part => part.id === folder)) ? [{ entry, location }] : [];
       });
       const needle = fold(query);
       const hits: SearchHit[] = candidates
         .filter(({ entry }) => fold(entry.name).includes(needle))
         .map(({ entry, location }) => ({ entry: resultMetadata(entry), location }))
-        .sort((a, b) => compareResults(a.entry, b.entry, sort, a.location.slice(1).map(part => part.name), b.location.slice(1).map(part => part.name), true));
+        .sort((a, b) => compareResults(a.entry, b.entry, sort,
+          a.location.filter(part => part.id !== root.id).map(part => part.name),
+          b.location.filter(part => part.id !== root.id).map(part => part.name), true));
       const fingerprint = fingerprintOf([scopePath, candidates.map(({ entry }) => entry)]);
       let offset = 0;
       if (params.has('cursor')) {
@@ -401,10 +412,11 @@ export class MockTransport implements ApiTransport {
         while (parentId && parentId !== root.id) {
           if (seen.has(parentId)) throw new Error('Folder cycle');
           seen.add(parentId);
-          const parent = [...this.entries, ...this.deletedEntries, ...this.removedEntries].find(item => item.id === parentId);
+          const parent = [...this.libraries, ...this.entries, ...this.deletedEntries, ...this.removedEntries].find(item => item.id === parentId);
           if (!parent) throw new Error('Missing parent');
           parts.unshift(parent.name); parentId = parent.parent_id;
         }
+        if (parentId === root.id) parts.unshift(root.name);
         return parts;
       };
       const sorted = [...this.deletedEntries].sort((a, b) => compareResults(a, b, sort,
@@ -421,9 +433,10 @@ export class MockTransport implements ApiTransport {
         offset = cursor.offset;
       }
       const items = sorted.slice(offset, offset + limit).map(entry => {
-        const original_path = originalPath(entry);
-        const needs_reference = sorted.some(other => other.id !== entry.id && other.name === entry.name && JSON.stringify(originalPath(other)) === JSON.stringify(original_path));
-        return { ...resultMetadata(entry), original_path, ...(needs_reference ? { needs_reference: true } : {}) };
+        const location = originalPath(entry);
+        const [library, ...original_path] = location;
+        const needs_reference = sorted.some(other => other.id !== entry.id && other.name === entry.name && JSON.stringify(originalPath(other)) === JSON.stringify(location));
+        return { ...resultMetadata(entry), original_path, ...(library !== root.name ? { library_name: library } : {}), ...(needs_reference ? { needs_reference: true } : {}) };
       });
       const end = offset + items.length;
       const has_more = end < sorted.length;

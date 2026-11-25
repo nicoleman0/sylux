@@ -2,6 +2,91 @@ import { chooseFolderSort, folderSortHeader } from './fixtures/folder-sort';
 import { expect, test, type Page } from '@playwright/test';
 import type { Entry, Folder } from '../src/lib/listing';
 import { parseLocation, savedContext } from '../src/lib/browsing-context';
+import { mockPrivateLibraries, signInLibraryOwner } from './fixtures/private-libraries';
+
+test('saved folder URLs and browser history keep identically named folders in their own libraries', async ({ page }) => {
+  await mockPrivateLibraries(page);
+  await page.goto('/#libraries');
+  await signInLibraryOwner(page);
+  const libraryNav = page.getByRole('button', { name: 'My libraries', exact: true });
+  const filesNav = page.getByRole('button', { name: 'Files', exact: true });
+  const location = page.locator('.workspace-location > span:last-child');
+  const search = page.getByRole('searchbox', { name: 'Search files and folders' });
+  await page.route('**/entries/search?**', route => route.fulfill({ json: { items: [], next_cursor: null, has_more: false } }));
+  const expectLibraryLocation = async (name: string) => {
+    await expect(location).toHaveText(name);
+    await expect(libraryNav).toHaveAttribute('data-active', 'true');
+    await expect(libraryNav).toHaveAttribute('aria-current', 'location');
+    await expect(filesNav).not.toHaveAttribute('data-active', 'true');
+    await expect(filesNav).not.toHaveAttribute('aria-current');
+  };
+  await expect(libraryNav).toHaveAttribute('aria-current', 'page');
+  const open = async (library: string, file: string) => {
+    await page.getByRole('link', { name: library, exact: true }).press('Enter');
+    await expect(page.getByRole('heading', { name: library, exact: true })).toBeFocused();
+    await expectLibraryLocation(library);
+    await expect(search).toHaveAttribute('placeholder', 'Search this library by name');
+    await page.getByRole('button', { name: 'Open Projects', exact: true }).press('Enter');
+    await expect(page.getByRole('button', { name: `Preview ${file}`, exact: true })).toBeVisible();
+    await expectLibraryLocation(library);
+    await expect(search).toHaveAttribute('placeholder', 'Search this folder by name');
+    return page.url();
+  };
+  const first = await open('Field work', 'survey.txt');
+  await libraryNav.click();
+  const second = await open('Studio', 'sketch.txt');
+  expect(second).not.toBe(first);
+  const requested = page.waitForRequest(request => new URL(request.url()).pathname === '/entries/search');
+  await search.fill('missing');
+  expect(new URL((await requested).url()).searchParams.get('folder_id')).toBe('studio-projects');
+  await expect(page.getByRole('region', { name: 'Search results' })).toBeVisible();
+  await expectLibraryLocation('Studio');
+  await search.clear();
+  await page.reload();
+  await signInLibraryOwner(page);
+  await expect(page.getByRole('button', { name: 'Preview sketch.txt' })).toBeVisible();
+  await expectLibraryLocation('Studio');
+  await expect(page.getByRole('button', { name: 'Preview survey.txt' })).toHaveCount(0);
+  await page.goto(first);
+  await expect(page.getByRole('button', { name: 'Preview survey.txt' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview sketch.txt' })).toHaveCount(0);
+  await expectLibraryLocation('Field work');
+  await filesNav.click();
+  await expect(location).toHaveText('Files');
+  await expect(filesNav).toHaveAttribute('aria-current', 'page');
+  await expect(filesNav).toHaveAttribute('data-active', 'true');
+  await expect(libraryNav).not.toHaveAttribute('aria-current');
+  await expect(search).toHaveAttribute('placeholder', 'Search all libraries by name');
+  await page.goBack();
+  await expect(page.getByRole('button', { name: 'Preview survey.txt' })).toBeVisible();
+  await expectLibraryLocation('Field work');
+});
+
+test('the destination library list can be retried from a named library', async ({ page }) => {
+  await mockPrivateLibraries(page);
+  await page.goto('/#files/studio-projects');
+  await signInLibraryOwner(page);
+  await expect(page.getByRole('button', { name: 'Preview sketch.txt', exact: true })).toBeVisible();
+  let attempts = 0;
+  await page.route('**/libraries', route => ++attempts === 1
+    ? route.fulfill({ status: 503, json: { code: 'mutation_unavailable' } })
+    : route.fallback());
+  await page.getByRole('button', { name: 'Options for sketch.txt', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Move', exact: true }).click();
+  const picker = page.getByRole('dialog', { name: 'Move sketch.txt' });
+  await expect(picker.getByRole('navigation', { name: 'Move destination path' })).toHaveText('Studio');
+  await picker.getByRole('button', { name: 'Choose a library' }).click();
+  await expect(picker.getByRole('alert')).toHaveText('Could not load your libraries. Try again.');
+  await expect(picker.getByRole('button', { name: 'Move here' })).toBeDisabled();
+  await picker.getByRole('button', { name: 'Refresh destinations' }).click();
+  await expect(picker.getByRole('alert')).toHaveCount(0);
+  await picker.getByRole('group', { name: 'Destination libraries' }).getByRole('button', { name: 'Field work' }).click();
+  await expect(picker.getByRole('navigation', { name: 'Move destination path' })).toHaveText('Field work');
+  await expect(picker.getByRole('button', { name: 'Projects' })).toBeVisible();
+  await picker.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('button', { name: 'Preview sketch.txt', exact: true })).toBeVisible();
+  expect(attempts).toBe(2);
+});
 
 const root: Folder = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
 const child: Folder = { id: 'projects', parent_id: 'root', name: 'Projects', kind: 'folder', etag: '"projects:1"' };

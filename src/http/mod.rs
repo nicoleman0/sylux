@@ -134,6 +134,10 @@ pub fn router(state: AuthState) -> Router {
     Router::new()
         .route("/folders/{folder_id}/path", get(entries::folder_path))
         .route(
+            "/libraries",
+            get(entries::libraries).post(entries::create_library),
+        )
+        .route(
             "/folders/{folder_id}/children",
             get(entries::listing_folder).post(entries::create_in_folder),
         )

@@ -1,4 +1,28 @@
 import { expect, test, type Page } from '@playwright/test';
+import { mockPrivateLibraries, signInLibraryOwner } from './fixtures/private-libraries';
+
+test('library creation returns focus and a library opens from its keyboard-reachable link', async ({ page }) => {
+  await mockPrivateLibraries(page);
+  await page.goto('/#libraries');
+  await signInLibraryOwner(page);
+  const create = page.getByRole('button', { name: 'New library', exact: true });
+  await create.press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'New library', exact: true });
+  await dialog.getByLabel('Library name').fill('Studio');
+  await dialog.getByRole('button', { name: 'Create library' }).press('Enter');
+  await expect(dialog.getByRole('alert')).toHaveText('You already have a library with this name.');
+  await dialog.getByLabel('Library name').fill('Reading');
+  await dialog.getByLabel('Library name').press('Enter');
+  await expect(dialog).toBeHidden();
+  await expect(create).toBeFocused();
+  await expect(page.getByRole('status').filter({ hasText: 'Created Reading.' })).toBeVisible();
+  const link = page.getByRole('link', { name: 'Reading', exact: true });
+  await link.focus();
+  await expect(link).toHaveCSS('outline-style', 'solid');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { name: 'Reading', exact: true })).toBeFocused();
+  await expect(page.getByText('This folder is empty')).toBeVisible();
+});
 
 const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
 const names = ['alpha', 'beta', 'gamma', 'delta'];

@@ -1,4 +1,4 @@
-//! Owner-scoped search of the active private tree.
+//! Owner-scoped search within a folder or across private libraries.
 use std::collections::HashMap;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -62,8 +62,11 @@ pub fn fold(value: &str) -> String {
 
 // Keep live outermost so each child lookup uses owner, parent and state.
 const LIVE_SQL: &str = "WITH RECURSIVE live(entry_id,parent_id,original_name,kind,generation,depth) AS (\
-         SELECT entry_id,parent_id,original_name,kind,generation,0 FROM entry \
+         SELECT entry_id,parent_id,coalesce(library_name,original_name),kind,generation,0 FROM entry \
          WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder' AND state='active' \
+         UNION ALL \
+         SELECT entry_id,parent_id,coalesce(library_name,original_name),kind,generation,0 FROM entry \
+         WHERE ?1 IS NULL AND owner_account_id=?2 AND parent_id IS NULL AND kind='folder' AND state='active' \
          UNION ALL \
          SELECT child.entry_id,child.parent_id,child.original_name,child.kind,child.generation,live.depth+1 \
          FROM live CROSS JOIN entry child ON child.parent_id=live.entry_id \
@@ -105,9 +108,10 @@ pub fn find_sorted(
     query: &str,
     sort: ResultSort,
 ) -> Result<SearchResults, NamespaceError> {
-    let root = namespace::private_root(db, owner)?;
-    let folder_id = folder_id.filter(|id| *id != root);
-    let anchor = folder_id.unwrap_or(&root);
+    let folder_id = match folder_id {
+        Some(id) if id == namespace::root_entry(db, owner)?.id => None,
+        scope => scope,
+    };
     let mut ancestors = Vec::new();
     if let Some(folder_id) = folder_id {
         ancestors = namespace::folder_path(db, owner, folder_id)?;
@@ -116,7 +120,7 @@ pub fn find_sorted(
     let remaining_depth = MAX_ENTRY_DEPTH - ancestors.len() as i64;
     let mut stmt = db.prepare(LIVE_SQL).map_err(|_| NamespaceError::Sql)?;
     let rows: Vec<(Entry, Option<i64>, Option<i64>)> = stmt
-        .query_map(params![anchor, owner, remaining_depth], |r| {
+        .query_map(params![folder_id, owner, remaining_depth], |r| {
             let id: String = r.get(0)?;
             let generation: i64 = r.get(4)?;
             Ok((
@@ -147,7 +151,10 @@ pub fn find_sorted(
     let mut matches = Vec::new();
     for (entry, size, modified_at) in &rows {
         fingerprint_entry(&mut digest, entry, *size, *modified_at);
-        if entry.id == anchor || !fold(&entry.name).contains(&needle) {
+        if entry.parent_id.is_none()
+            || folder_id == Some(entry.id.as_str())
+            || !fold(&entry.name).contains(&needle)
+        {
             continue;
         }
         let mut location = Vec::new();
@@ -158,20 +165,27 @@ pub fn find_sorted(
                 return Err(NamespaceError::Sql);
             }
             location.push((*folder).clone());
-            if id == anchor {
+            if folder_id == Some(id) {
                 break;
             }
             parent = folder.parent_id.as_deref();
         }
-        if location.last().map(|folder| folder.id.as_str()) != Some(anchor) {
+        if location.last().is_none_or(|last| {
+            folder_id.map_or(last.parent_id.is_some(), |anchor| last.id != anchor)
+        }) {
             return Err(NamespaceError::Sql);
         }
         location.extend(ancestors.iter().rev().cloned());
         location.reverse();
         let location_key = location
             .iter()
-            .skip(1)
-            .map(|part| fold(&part.name))
+            .map(|part| {
+                fold(if part.name.is_empty() {
+                    "Files"
+                } else {
+                    &part.name
+                })
+            })
             .collect::<Vec<_>>()
             .join("\0");
         matches.push((
@@ -244,6 +258,8 @@ mod tests {
         db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
         db.execute_batch(MIGRATION_0001_S1).unwrap();
         crate::persistence::schema::migrate_v1(&db, None).unwrap();
+        crate::persistence::schema::migrate_v2(&db, None).unwrap();
+        crate::persistence::schema::migrate_v3(&db, None).unwrap();
         for (owner, root) in [(OWNER, ROOT), (OTHER, OTHER_ROOT)] {
             db.execute("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES(?1,?1,'user',1,0)", [owner]).unwrap();
             db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,NULL,'folder','',x'',1)", params![root,owner]).unwrap();
@@ -256,6 +272,45 @@ mod tests {
         let name = EntryName::parse(name).unwrap();
         db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id,owner,parent,name.display,name.key]).unwrap();
         id
+    }
+
+    #[test]
+    fn location_sort_uses_the_default_library_display_name() {
+        let mut db = database();
+        let tx = db.transaction().unwrap();
+        let studio = namespace::create_library(&tx, OWNER, "Studio").unwrap();
+        let alpha = insert(&tx, 0x10, OWNER, ROOT, "Alpha");
+        let zeta = insert(&tx, 0x11, OWNER, ROOT, "Zeta");
+        let projects = insert(&tx, 0x12, OWNER, &studio.id, "Projects");
+        for (index, parent) in [&alpha, &zeta, &projects].into_iter().enumerate() {
+            insert(&tx, 0x20 + index, OWNER, parent, "Match");
+        }
+        tx.commit().unwrap();
+
+        for (sort, expected) in [
+            (ResultSort::LocationAsc, [&alpha, &zeta, &projects]),
+            (ResultSort::LocationDesc, [&projects, &zeta, &alpha]),
+        ] {
+            for scope in [None, Some(ROOT)] {
+                let found = find_sorted(&db, OWNER, scope, "Match", sort).unwrap();
+                let parents: Vec<_> = found
+                    .hits
+                    .iter()
+                    .map(|hit| &hit.location.last().unwrap().id)
+                    .collect();
+                assert_eq!(parents, expected);
+            }
+        }
+        let named = find_sorted(
+            &db,
+            OWNER,
+            Some(&studio.id),
+            "Match",
+            ResultSort::LocationAsc,
+        )
+        .unwrap();
+        assert_eq!(named.hits.len(), 1);
+        assert_eq!(named.hits[0].location.last().unwrap().id, projects);
     }
 
     #[test]

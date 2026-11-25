@@ -18,8 +18,10 @@ mode `0600`. Use a private destination and parent, with enough free space for
 both the exported files and a temporary copy of metadata (including any WAL).
 Existing directory permissions are retained.
 
-Only the selected account's active tree is exported. Empty folders and current
-file contents are included. Trash, old revisions and other accounts are excluded.
+Only the selected account's active libraries are exported. If the account has
+one library, its contents go directly into the destination. For multiple
+libraries, each library gets a directory named for it. Empty folders and
+current file contents are included. Trash, old revisions and other accounts are excluded.
 This is a plain-file exit path, not an installation backup: accounts, passwords,
 permissions, history and application metadata are not exported. File timestamps
 are those of export, not upload times.

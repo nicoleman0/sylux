@@ -1,4 +1,5 @@
 //! Offline account export. Source ownership is retained until every reader closes.
+use crate::domain::namespace;
 use crate::persistence::{
     ownership,
     payload::{ExportCopyError, PayloadVerifier},
@@ -107,16 +108,20 @@ pub fn export_account(source: &Path, handle: &str, target: &Path) -> Result<u64,
         .optional()
         .map_err(|_| "export_account_invalid")?
         .ok_or("export_account_not_found")?;
-    let entry: String = db.query_row("SELECT entry_id FROM entry WHERE owner_account_id=?1 AND parent_id IS NULL AND kind='folder' AND state='active'", [&owner], |r| r.get(0))
-        .map_err(|_| "export_account_root_invalid")?;
+    let libraries = namespace::libraries(db, &owner).map_err(|_| "export_account_root_invalid")?;
+    let (parent, depth) = match libraries.as_slice() {
+        [] => return Err("export_account_root_invalid".into()),
+        [library] => (Some(library.id.as_str()), 0),
+        _ => (None, -1),
+    };
     let scratch_name = scratch.0.file_name().ok_or("export_destination_invalid")?;
     let count = walk(
         db,
         &source,
         &owner,
-        &entry,
+        parent,
         &out,
-        0,
+        depth,
         Some(scratch_name.as_bytes()),
     )?;
     drop(bound);
@@ -166,18 +171,18 @@ fn walk(
     db: &Connection,
     source: &Path,
     owner: &str,
-    parent: &str,
+    parent: Option<&str>,
     out: &File,
-    depth: u32,
+    depth: i32,
     scratch: Option<&[u8]>,
 ) -> Result<u64, String> {
     if depth > 128 {
         return Err("export_namespace_depth_invalid".into());
     }
-    let mut stmt = db.prepare("SELECT e.entry_id,e.original_name,e.kind,r.blob_id,r.length,r.sha256,b.length,b.sha256,b.lifecycle
+    let mut stmt = db.prepare("SELECT e.entry_id,coalesce(e.library_display_name,e.original_name),e.kind,r.blob_id,r.length,r.sha256,b.length,b.sha256,b.lifecycle
         FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id
         LEFT JOIN blob b ON b.blob_id=r.blob_id
-        WHERE e.owner_account_id=?1 AND e.parent_id=?2 AND e.state='active' ORDER BY e.entry_id")
+        WHERE e.owner_account_id=?1 AND e.parent_id IS ?2 AND e.state='active' ORDER BY e.entry_id")
         .map_err(|_| "export_metadata_unreadable")?;
     let mut rows = stmt
         .query(params![owner, parent])
@@ -204,7 +209,15 @@ fn walk(
                 Mode::empty(),
             )
             .map_err(|_| "export_folder_open_failed")?;
-            count += walk(db, source, owner, &id, &File::from(child), depth + 1, None)?;
+            count += walk(
+                db,
+                source,
+                owner,
+                Some(&id),
+                &File::from(child),
+                depth + 1,
+                None,
+            )?;
         } else if kind == "file" {
             let blob: String = row.get(3).map_err(|_| "export_revision_missing")?;
             let length: i64 = row.get(4).map_err(|_| "export_metadata_invalid")?;

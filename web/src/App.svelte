@@ -3,6 +3,7 @@
   import * as Sidebar from '$lib/components/ui/sidebar/index.js';
   import AppSidebar from '$lib/components/app-sidebar.svelte';
   import AppearanceSettings from '$lib/AppearanceSettings.svelte';
+  import LibraryHome from '$lib/LibraryHome.svelte';
   import BrandLogo from '$lib/BrandLogo.svelte';
   import { appearanceStyle, defaultAppearanceSurfaces, defaultAppearance, readAppearance, type Appearance } from '$lib/appearance';
   import { onMount, tick, untrack } from 'svelte';
@@ -21,6 +22,7 @@
   import type { TextEditState } from './lib/text-edit';
   import FileIcon from '@lucide/svelte/icons/file';
   import FolderIcon from '@lucide/svelte/icons/folder';
+  import LibraryIcon from '@lucide/svelte/icons/library';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import CheckIcon from '@lucide/svelte/icons/check';
@@ -97,6 +99,9 @@
   let textEditSession = $state.raw<AbortController | null>(null);
   let accountView = $state(false);
   let settingsView = $state(false);
+  let librariesView = $state(false);
+  let libraries = $state<Folder[]>([]);
+  let librariesError = $state('');
   let settingsTab = $state<'accounts' | 'instance' | 'appearance'>('accounts');
   let appearance = $state<Appearance>({ ...defaultAppearance });
   let appearanceLoadError = $state('');
@@ -163,8 +168,8 @@
 
   function browsingSnapshot(): BrowsingContext {
     return { version: 1, owner: user?.id ?? '',
-      destination: settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : 'files',
-      folder: currentFolder.id, query: searchQuery, sort: folderSort, searchSort, trashSort, accountSort,
+      destination: settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : librariesView ? 'libraries' : 'files',
+      folder: librariesView ? '' : currentFolder.id, query: searchQuery, sort: folderSort, searchSort, trashSort, accountSort,
       cursors: [...pageCursors], page: pageIndex, searchCursors: [...searchPageCursors], searchPage: searchPageIndex, scroll: window.scrollY };
   }
 
@@ -228,6 +233,7 @@
     accountView = destination === 'account';
     settingsView = destination === 'settings';
     showTrash = destination === 'trash';
+    librariesView = destination === 'libraries';
   }
 
   function navigate(destination: Destination, path?: Folder[]): Promise<boolean> {
@@ -331,8 +337,8 @@
         if (!path && location.folder && location.folder !== root.id) {
           const result = await listing.path(location.folder, controller.signal);
           if (!isCurrent()) return false;
-          if (result.items[0]?.id !== root.id || result.items.at(-1)?.id !== location.folder) throw new Error('Invalid folder path');
-          path = [root, ...result.items.slice(1)];
+          if (result.items[0]?.parent_id !== null || result.items.at(-1)?.id !== location.folder) throw new Error('Invalid folder path');
+          path = [result.items[0].id === root.id ? root : result.items[0], ...result.items.slice(1)];
         }
         path ??= [root];
         readablePath = path;
@@ -379,6 +385,18 @@
         }
         listingError = '';
         if (restarted) notice = query ? 'Files changed. Search results have been restarted.' : 'This folder changed. The listing has been restarted.';
+      } else if (destination === 'libraries') {
+        clearSearch();
+        librariesError = '';
+        try {
+          const result = await listing.libraries(controller.signal);
+          if (!isCurrent()) return false;
+          libraries = result.items;
+        } catch {
+          if (!isCurrent()) return false;
+          libraries = [];
+          librariesError = 'Could not load your libraries.';
+        }
       } else if (destination === 'trash') {
         try {
           const result = await listing.deleted(null, location.trashSort, controller.signal);
@@ -424,9 +442,9 @@
         if (isCurrent()) {
           const active = document.activeElement;
           const leavingSheet = trigger?.closest('[data-mobile=true]') && active?.matches('[data-sidebar=trigger]');
-          const restoreScroll = !pendingMove && (!active?.closest('.account-content, .files-content, .trash-content, .settings-content') || watched.mayFocus());
+          const restoreScroll = !pendingMove && (!active?.closest('.account-content, .files-content, .libraries-content, .trash-content, .settings-content') || watched.mayFocus());
           if (restoreScroll) window.scrollTo(0, scroll);
-          const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : 'folder-title');
+          const heading = document.getElementById(accountView ? 'account-title' : settingsView ? 'settings-title' : showTrash ? 'trash-heading' : librariesView ? 'libraries-title' : 'folder-title');
           if ((pendingMove && active === heading) || watched.mayFocus() || active === document.body || leavingSheet) {
             const retry = document.getElementById(restorationFailed && !restorationUnavailable ? 'folder-page-retry' : destination === 'trash' && trashError ? 'trash-page-retry' : '');
             const items = pendingMove && active === heading ? listItems() : [];
@@ -451,6 +469,15 @@
     event.preventDefault();
     if (!user) { view = 'login'; return; }
     await navigate('files', folders[0] ? [folders[0]] : undefined);
+  }
+
+  async function createLibrary(name: string): Promise<Folder> {
+    const generation = sessionGeneration;
+    const created = await listing.createLibrary(name);
+    if (generation === sessionGeneration && librariesView && !libraries.some((folder) => folder.id === created.id)) {
+      libraries = [...libraries, created];
+    }
+    return created;
   }
 
   function formatSize(bytes: number): string {
@@ -558,7 +585,7 @@
     selectionAnchor = anchor;
   }
   function listKeydown(event: KeyboardEvent): void {
-    if (!user || accountView || settingsView || showTrash || shortcutsBlocked(event.target, document)) return;
+    if (!user || accountView || settingsView || showTrash || librariesView || shortcutsBlocked(event.target, document)) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (restorationPending && target?.id !== 'folder-title') return;
     const row = target?.matches(itemSelector) ? target.closest<HTMLElement>('.file-row') : null;
@@ -611,7 +638,7 @@
     }
   }
   function searchLocation(hit: SearchHit): string {
-    return ['Files', ...hit.location.slice(1).map((folder) => folder.name)].join(' / ');
+    return [hit.location[0]?.name || 'Files', ...hit.location.slice(1).map((folder) => folder.name)].join(' / ');
   }
   type BulkAction = 'move' | 'trash';
   type BulkResult = { entry: Entry; location: string; status: 'pending' | 'succeeded' | 'failed' | 'uncertain' | 'changed'; message: string };
@@ -711,6 +738,10 @@
   let deletedItems = $state<DeletedEntry[]>([]);
   let trashRequest = 0;
   let showTrash = $state(false);
+  const filesView = $derived(!showTrash && !accountView && !settingsView && !librariesView);
+  const namedLibrary = $derived(folderPath[0]?.id && folderPath[0].id !== folders[0]?.id ? folderPath[0] : undefined);
+  const librariesCurrent = $derived(librariesView ? 'page' : filesView && namedLibrary ? 'location' : undefined);
+  const filesCurrent = $derived(filesView && !namedLibrary);
   let trashError = $state('');
   let trashBusy = $state(false);
   const resultSortBlocked = $derived(bulkBusy || bulkNeedsRefresh || restorationPending || trashBusy);
@@ -1311,7 +1342,7 @@
   async function openSearchFolder(hit: SearchHit, containing = false): Promise<void> {
     const path = containing ? hit.location : [...hit.location, hit.entry as Folder];
     if (!path.length) return;
-    await navigate('files', path.map((item, index) => index === 0 ? { ...item, name: 'Files' } : item));
+    await navigate('files', path.map((item, index) => index === 0 && !item.name ? { ...item, name: 'Files' } : item));
   }
 
   async function loadMore(): Promise<void> {
@@ -1582,6 +1613,7 @@
     uploadId = ''; unresolvedUploadId = ''; unresolvedUploadName = ''; unresolvedCancel = false; cancelPending = false; notice = '';
     folderSort = 'name_asc'; searchSort = 'name_asc'; trashSort = 'name_asc'; accountSort = 'name_asc';
     listingRequest++; currentFolder = emptyRoot; folders = []; entries = []; folderPath = [emptyRoot];
+    librariesView = false; libraries = []; librariesError = '';
     pageCursors = [null]; pageIndex = 0; nextCursor = null; hasMore = false; loading = false; listingError = '';
     folderName = ''; folderBusy = false; createOpen = false; folderError = ''; previewEntry = null; previewTrigger = null;
     draggedEntry = null; dropTarget = ''; dropPending = null; dropError = ''; moveNeedsRefresh = false; knownParents.clear();
@@ -1744,11 +1776,27 @@
     }
     await loading;
   }
+  async function loadMoveLibraries(): Promise<void> {
+    const request = ++moveRequest;
+    const generation = sessionGeneration;
+    moveLoading = true; moveDestinationReady = false; moveError = '';
+    movePath = []; moveFolders = []; moveCursor = null;
+    try {
+      const { items } = await listing.libraries();
+      if (request !== moveRequest || generation !== sessionGeneration) return;
+      moveFolders = items;
+      for (const folder of items) knownParents.set(folder.id, null);
+    } catch {
+      if (request === moveRequest && generation === sessionGeneration) moveError = 'Could not load your libraries. Try again.';
+    } finally {
+      if (request === moveRequest) moveLoading = false;
+    }
+  }
   async function beginDestination(entry: Entry, trigger: HTMLElement, action: 'move' | 'copy'): Promise<void> {
     if (bulkBusy || bulkNeedsRefresh || dropPending || moveNeedsRefresh || namespaceUnknown) return;
     if (action === 'copy' && pendingCopy) return;
     closeMove(); moveTarget = entry; moveTrigger = trigger; destinationAction = action;
-    const root = folders[0];
+    const root = folderPath[0];
     if (root) await loadMoveFolder([root]);
     else moveError = 'Your storage is unavailable. Close this dialog and refresh your files.';
   }
@@ -1915,7 +1963,7 @@
     bulkTargets = (action === 'trash' ? trashRoots(targets) : targets).map((entry) => ({ ...entry }));
     bulkAction = action; bulkRetry = retry; bulkTrigger = trigger; bulkError = '';
     if (action === 'move') {
-      const root = folders[0];
+      const root = folderPath[0];
       if (root) await loadMoveFolder([root]);
       else moveError = 'Your storage is unavailable. Close this dialog and refresh your files.';
     }
@@ -2115,7 +2163,7 @@
   }
 
   function canUploadDrop(): boolean {
-    return !!user && !showTrash && !accountView && !settingsView && !searchQuery && !!currentFolder.id &&
+    return !!user && !showTrash && !accountView && !settingsView && !librariesView && !searchQuery && !!currentFolder.id &&
       !fileMutationBusy && !unresolvedUploadId && !replacementPrompt && !createOpen && !renameId && !moveTarget && !trashTarget && !share;
   }
 
@@ -2462,8 +2510,12 @@
   }
   function needsDeletedReference(item: DeletedEntry): boolean {
     return !!item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name &&
+      other.library_name === item.library_name &&
       other.original_path.length === item.original_path.length &&
       other.original_path.every((part, index) => part === item.original_path[index]));
+  }
+  function trashLocation(item: DeletedEntry): string {
+    return [item.library_name ?? 'Files', ...item.original_path].join(' / ');
   }
   async function restoreEntry(item: Entry, trigger: HTMLElement): Promise<void> {
     if (trashBusy || trashLoading || namespaceUnknown || removalSubmitting || (removalPending && !removalPending.result) || removalPreparing) return;
@@ -2981,7 +3033,8 @@
       <AppSidebar {instanceName} logoUrl={appearance.logoUrl} onhome={home}>
         {#snippet navigation(close)}
           <nav aria-label="Files"><Sidebar.Menu>
-          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" aria-busy={routeName === 'files'} isActive={!showTrash && !accountView && !settingsView} aria-current={!showTrash && !accountView && !settingsView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={() => { close(); void navigate('files', folders[0] ? [folders[0]] : undefined); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="My libraries" aria-label="My libraries" aria-busy={routeName === 'libraries'} isActive={!!librariesCurrent} aria-current={librariesCurrent} onclick={() => { close(); void navigate('libraries'); }}><LibraryIcon /><span>My libraries</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" aria-busy={routeName === 'files'} isActive={filesCurrent} aria-current={filesCurrent ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={() => { close(); void navigate('files', folders[0] ? [folders[0]] : undefined); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Trash" aria-label="Trash" aria-busy={routeName === 'trash'} isActive={showTrash} aria-current={showTrash ? 'page' : undefined} onclick={() => { close(); void openTrash(); }}><TrashIcon /><span>Trash</span></Sidebar.MenuButton></Sidebar.MenuItem>
 
           </Sidebar.Menu></nav>
@@ -3001,7 +3054,7 @@
       </AppSidebar>
       <Sidebar.Inset class="min-w-0">
         <header class="app-header workspace-header">
-          <div class="workspace-location"><Sidebar.Trigger /><span class="header-divider"></span><span>{settingsView ? 'Settings' : accountView ? 'Account' : showTrash ? 'Trash' : 'Files'}</span></div>
+          <div class="workspace-location"><Sidebar.Trigger /><span class="header-divider shrink-0"></span><span class="truncate" title={filesView ? namedLibrary?.name : undefined}>{settingsView ? 'Settings' : accountView ? 'Account' : showTrash ? 'Trash' : librariesView ? 'My libraries' : (namedLibrary?.name ?? 'Files')}</span></div>
           <div class="header-actions">
             <HeaderIconButton label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} pressed={darkMode} onclick={toggleTheme}>{#if darkMode}<SunIcon />{:else}<MoonIcon />{/if}</HeaderIconButton>
             <HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>
@@ -3137,7 +3190,7 @@
         {/each}
         {#if routeFeedback}
           <p id="route-status" class="workspace-feedback" role="status" tabindex="-1">
-            {routeName === 'trash' ? 'Opening Trash…' : routeName === 'account' ? 'Loading storage use…' : routeName === 'settings' ? 'Opening Settings…' : 'Opening files…'}
+            {routeName === 'trash' ? 'Opening Trash…' : routeName === 'account' ? 'Loading storage use…' : routeName === 'settings' ? 'Opening Settings…' : routeName === 'libraries' ? 'Opening My libraries…' : 'Opening files…'}
           </p>
         {/if}
         {#if accountView}
@@ -3180,6 +3233,13 @@
               <section class="settings-section"><h2>Instance</h2><p class="section-description">The instance name appears for everyone, including on sign in.</p><form class="settings-form grid gap-3" onsubmit={saveInstance}><Label for="instance-name">Instance name</Label><Input id="instance-name" bind:value={instanceDraft} maxlength={40} disabled={instanceBusy || instanceLoading} required /><Button type="submit" class="justify-self-start mt-2" disabled={instanceBusy || instanceLoading || !instanceDraft.trim()}>{instanceBusy ? 'Saving…' : 'Save changes'}</Button></form>{#if instanceError}<p class="form-notice" role="alert">{instanceError}</p>{/if}{#if instanceError || instanceLoading}<RefreshButton variant="link" label="Reload instance name" busyLabel="Reloading…" busy={instanceLoading} class="mt-2" aria-label="Reload instance name" onclick={() => { if (instanceLoading) return; clearCompletedFeedback(); void loadInstance(); }} />{/if}{#if instanceLoading}<p role="status">Reloading instance name…</p>{/if}{#if instanceNotice}<p class="form-notice" role="status">{instanceNotice}</p>{/if}</section>
             {/if}
           </section>
+        {:else if librariesView}
+          <section class="libraries-content grid gap-4" aria-labelledby="libraries-title" inert={retainingRoute} aria-busy={restorationPending}>
+            <LibraryHome items={libraries} pending={restorationPending} error={librariesError}
+              onopen={(folder) => void navigate('files', [folder])}
+              onretry={() => void navigate('libraries')} oncreate={createLibrary} />
+            {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{/if}
+          </section>
         {:else if showTrash}
             {@const trashEmpty = !restorationPending && !trashLoading && !trashError && deletedItems.length === 0}
             <section class="trash-content grid gap-4" aria-labelledby="trash-heading" inert={retainingRoute} aria-busy={trashLoading || restorationPending}>
@@ -3208,11 +3268,11 @@
                           <span class="trash-name"><span class="trash-kind" class:folder-icon={item.kind === 'folder'} role="img" aria-label={item.kind}>{#if item.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span>{item.name}</span></span>
                           <span class="trash-metadata" aria-hidden="true">{@render modifiedDateLabel(item)} · {typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
                         </span>
-                        <span role="cell" class="trash-location">Files{item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span>
+                        <span role="cell" class="trash-location">{trashLocation(item)}{#if needsDeletedReference(item)}<span class="trash-location">Item reference: {item.id}</span>{/if}</span>
                         <span role="cell" class="file-modified">{@render modifiedDateLabel(item)}</span>
                         <span role="cell" class="file-size">{typeof item.size === 'number' ? formatSize(item.size) : 'Size unknown'}</span>
                         <span role="cell" class="trash-selection"><label><input type="checkbox" aria-label={`Select ${item.name}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}`} disabled={removalBlocked} checked={removalSelection.includes(item.id)} onchange={(event) => removalSelection = event.currentTarget.checked ? [...removalSelection, item.id] : removalSelection.filter(id => id !== item.id)} /></label></span>
-                        <div role="cell" class="trash-actions"><Button variant="outline" size="sm" disabled={removalBlocked} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from Files${item.original_path.length ? ` / ${item.original_path.join(' / ')}` : ''}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button></div>
+                        <div role="cell" class="trash-actions"><Button variant="outline" size="sm" disabled={removalBlocked} aria-busy={trashBusy && restoringId === item.id} aria-label={item.needs_reference || deletedItems.some((other) => other.id !== item.id && other.name === item.name) ? `Restore ${item.name} from ${trashLocation(item)}${needsDeletedReference(item) ? `, item reference ${item.id}` : ''}` : `Restore ${item.name}`} onclick={(event) => restoreEntry(item, event.currentTarget)}>{trashBusy && restoringId === item.id ? 'Restoring…' : 'Restore'}</Button></div>
                       </li>
                     {/each}
                   </ul>
@@ -3238,7 +3298,7 @@
               {/if}
             </div>
             <div class="search-toolbar">
-              <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || (restorationPending && !searchDuringRoute) || restorationFailed} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : 'Search by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
+              <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || (restorationPending && !searchDuringRoute) || restorationFailed} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : namedLibrary ? 'Search this library by name' : 'Search all libraries by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
                   oncompositionstart={searchCompositionStarted} oncompositionend={(event) => { searchComposing = false; searchInput = event.currentTarget.value; searchChanged(); }} />
                 {#if searchQuery}<Button variant="outline" type="button" disabled={bulkBusy || restorationPending || restorationFailed} onclick={clearSearchFromButton}>Clear search</Button>{/if}
               </div>
@@ -3259,7 +3319,7 @@
                     <div role="row" aria-label={hit.entry.name} data-entry-id={hit.entry.id} class={`file-row search-row selectable-row modified-row ${selectedIds.includes(hit.entry.id) ? 'selected-row' : ''}`}>
                       <div role="cell" class="entry-selection"><label><input type="checkbox" aria-label={`Select ${hit.entry.name} in ${searchLocation(hit)}`} checked={selectedIds.includes(hit.entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(hit.entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, hit.entry.id)} /></label></div>
                       <div role="cell" class="search-item-main name-cell"><button type="button" class="item-name" disabled={bulkBusy} title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{hit.entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : 'Size unknown'} · {@render modifiedDateLabel(hit.entry)}</span></span></button></div>
-                        <div role="cell" class="search-location file-location"><span>Files{#each hit.location.slice(1) as folder (folder.id)}{' / '}{folder.name}{/each}</span><Button variant="link" size="sm" disabled={bulkBusy} onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
+                        <div role="cell" class="search-location file-location"><span>{searchLocation(hit)}</span><Button variant="link" size="sm" disabled={bulkBusy} onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
                       <span role="cell" class="file-modified">{@render modifiedDateLabel(hit.entry)}</span><span role="cell" class="file-size">{hit.entry.kind === 'folder' ? '—' : typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : '—'}</span>
                       <div role="cell" class="options-cell"><EntryOptions entry={hit.entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} copyDisabled={moveNeedsRefresh || !!pendingCopy} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(hit.entry.id)} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} /></div>
                     </div>
@@ -3296,7 +3356,7 @@
               </div>
             {/if}
             {#if selectedEntries.length}<div role="row"><div role="cell" aria-colspan="5">{@render selectionToolbar()}</div></div>{/if}
-            {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}{#if restorationUnavailable}<Button variant="outline" class="mt-2" onclick={async () => { if (folders[0]) await openFolder(folders[0]); else await navigate('files'); }}>Open Files</Button>{:else}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy || (restorationPending && !restorationFailed)} class="mt-2" onclick={retryFolder} />{/if}{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
+            {#if listingError || currentFolderRetryBusy}<Alert.Root variant="destructive" role={currentFolderRetryBusy ? undefined : 'alert'}><Alert.Title>Could not open this folder</Alert.Title><Alert.Description>{#if listingError}<p>{listingError}</p>{/if}{#if restorationUnavailable}<Button variant="outline" class="mt-2" onclick={() => navigate('files', folders[0] ? [folders[0]] : undefined)}>Open Files</Button>{:else}<RefreshButton id="folder-page-retry" label="Try again" busyLabel="Trying again…" busy={currentFolderRetryBusy || (restorationPending && !restorationFailed)} class="mt-2" onclick={retryFolder} />{/if}{#if currentFolderRetryBusy}<p role="status">Loading files…</p>{/if}</Alert.Description></Alert.Root>
             {:else if restorationPending && (!presentedRoute || searchDuringRoute)}{@render routePlaceholder()}
             {:else if loading && !restorationPending && !(workspaceRefreshing && refreshSourceFolder === currentFolder.id && entriesFolderId === currentFolder.id && entries.length)}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center" role="status"><strong class="font-medium">Loading files…</strong></div>
             {:else if entries.length === 0}<div class="flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-10 text-center"><strong class="font-medium">This folder is empty</strong><p class="text-muted-foreground text-sm">Upload a file or create a folder.</p></div>
@@ -3346,6 +3406,7 @@
             <Dialog.Description>Current folder: {folderPath.map((folder) => folder.name).join(' / ')}. Choose a destination in your private storage.</Dialog.Description>
           {/if}
         </Dialog.Header>
+        {#if movePath.length}<Button variant="link" class="justify-self-start p-0" disabled={destinationBusy || moveLoading} onclick={loadMoveLibraries}>Choose a library</Button>{/if}
         {#if movePath.length}
           <nav aria-label={destinationAction === 'copy' ? 'Copy destination path' : 'Move destination path'} class="flex flex-wrap items-center gap-x-2 gap-y-1">
             {#each movePath as folder, index (folder.id)}
@@ -3358,7 +3419,7 @@
             {/each}
           </nav>
         {/if}
-        <div class="grid gap-1 rounded-lg border p-2" role="group" aria-label="Destination folders" aria-busy={moveLoading}>
+        <div class="grid gap-1 rounded-lg border p-2" role="group" aria-label={movePath.length ? 'Destination folders' : 'Destination libraries'} aria-busy={moveLoading}>
           {#if moveLoading}
             <p role="status" class="px-2 py-1">Loading destinations…</p>
           {:else if moveDestinationReady && !destinationFolders.length && !moveCursor}
@@ -3377,7 +3438,7 @@
         {:else if moveDestinationReady && moveAlreadyHere && (destinationFolders.length || moveCursor)}
           <p class="text-muted-foreground">{bulkAction === 'move' ? 'The selected items are already here.' : 'This item is already here.'}</p>
         {/if}
-        {#if moveError}<p role="alert">{moveError}</p>{/if}{#if moveNeedsRefresh || moveCloseRefreshBusy}<RefreshButton label="Close and refresh files" busyLabel="Refreshing files…" busy={moveCloseRefreshBusy} disabled={moveBusy || moveLoading} onclick={closeMoveAndRefresh} />{:else if moveError || moveLoading}<RefreshButton label="Refresh destinations" busyLabel="Refreshing destinations…" busy={moveLoading} disabled={moveBusy} onclick={() => loadMoveFolder(movePath.length ? movePath : folders.slice(0, 1))} />{/if}
+        {#if moveError}<p role="alert">{moveError}</p>{/if}{#if moveNeedsRefresh || moveCloseRefreshBusy}<RefreshButton label="Close and refresh files" busyLabel="Refreshing files…" busy={moveCloseRefreshBusy} disabled={moveBusy || moveLoading} onclick={closeMoveAndRefresh} />{:else if moveError || moveLoading}<RefreshButton label="Refresh destinations" busyLabel="Refreshing destinations…" busy={moveLoading} disabled={moveBusy} onclick={() => movePath.length ? loadMoveFolder(movePath) : loadMoveLibraries()} />{/if}
         <Dialog.Footer>
           <Button variant="outline" disabled={destinationBusy} onclick={closeMove}>Cancel</Button>
           <Button disabled={!canConfirmMove} aria-disabled={destinationBusy || undefined} aria-busy={destinationBusy} class="aria-disabled:cursor-default" onclick={() => {
@@ -3459,7 +3520,7 @@
 <style>
   #route-status { position: sticky; top: 8px; z-index: 1; width: fit-content; padding: 4px 8px; background: var(--background); }
   .route-placeholder { display: grid; gap: 14px; padding: 16px 0; }
-  :is(#folder-title, #trash-heading, #account-title, #route-status):focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+  :is(#folder-title, #trash-heading, #account-title, #route-status, :global(#libraries-title)):focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
   .route-placeholder span { height: var(--control-height); background: var(--muted); border-radius: var(--radius); }
   .upload-batch-report { display: grid; gap: 12px; padding-block: 12px; }
   .upload-pending { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--muted-foreground); }

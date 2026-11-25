@@ -789,6 +789,7 @@ fn upgrade_binding_step(
     let migrate = match previous {
         1 => schema::migrate_v1,
         2 => schema::migrate_v2,
+        3 => schema::migrate_v3,
         _ => return Err(BindingError::UnsupportedVersion("schema_version")),
     };
     if row.schema_version == previous && version == previous {

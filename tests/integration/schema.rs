@@ -825,67 +825,151 @@ fn valid_seed_passes_product_recovery_checks() {
 
 #[test]
 fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication() {
+    use sylux::domain::namespace;
     use sylux::persistence::root;
-    for (version, interrupted) in [(1, false), (1, true), (2, false), (2, true)] {
-        let (owner, path) = fixture(&format!("legacy-v{version}-{interrupted}"));
-        fs::remove_file(&path).unwrap();
-        fs::remove_dir(path.parent().unwrap()).unwrap();
-        let product = owner.path().join("product");
-        fs::DirBuilder::new().mode(0o700).create(&product).unwrap();
-        let path = product.join("metadata/sylux.sqlite3");
-        let initialized = root::initialize_empty_root(&product, BUSY).unwrap();
-        let mut legacy = initialized.identity;
-        legacy.schema_version = version;
-        fs::write(
-            product.join(root::MANIFEST_NAME),
-            serde_json::to_vec(&legacy).unwrap(),
-        )
-        .unwrap();
-        fs::remove_file(&path).unwrap();
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
+    for version in [1, 2, 3] {
+        for interrupted in [false, true] {
+            let (owner, path) = fixture(&format!("legacy-v{version}-{interrupted}"));
+            fs::remove_file(&path).unwrap();
+            fs::remove_dir(path.parent().unwrap()).unwrap();
+            let product = owner.path().join("product");
+            fs::DirBuilder::new().mode(0o700).create(&product).unwrap();
+            let path = product.join("metadata/sylux.sqlite3");
+            let initialized = root::initialize_empty_root(&product, BUSY).unwrap();
+            let mut legacy = initialized.identity;
+            legacy.schema_version = version;
+            fs::write(
+                product.join(root::MANIFEST_NAME),
+                serde_json::to_vec(&legacy).unwrap(),
+            )
             .unwrap();
-        let db = sqlite::open_writer(&path, BUSY).unwrap();
-        db.execute_batch(schema::MIGRATION_0001_S1).unwrap();
-        schema::insert_installation_row(&db, &legacy, digest()).unwrap();
-        insert_account(&db, &id(10), "owner-a", "user");
-        insert_root(&db, &id(20), &id(10));
-        if version == 2 {
-            schema::migrate_v1(&db, None).unwrap();
+            fs::remove_file(&path).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            let db = sqlite::open_writer(&path, BUSY).unwrap();
+            db.execute_batch(schema::MIGRATION_0001_S1).unwrap();
+            schema::insert_installation_row(&db, &legacy, digest()).unwrap();
+            insert_account(&db, &id(10), "owner-a", "user");
+            insert_root(&db, &id(20), &id(10));
+            insert_account(&db, &id(11), "owner-b", "administrator");
+            insert_root(&db, &id(21), &id(11));
+            for (account, library, folder) in [(10, 20, 30), (11, 21, 31)] {
+                insert_child(
+                    &db,
+                    &id(folder),
+                    &id(account),
+                    &id(library),
+                    "folder",
+                    "Projects",
+                    b"Projects",
+                )
+                .unwrap();
+            }
+            if version >= 2 {
+                schema::migrate_v1(&db, None).unwrap();
+            }
+            if version == 3 {
+                schema::migrate_v2(&db, None).unwrap();
+            }
+            if interrupted {
+                use sha2::{Digest, Sha256};
+                let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
+                let migrate = match version {
+                    1 => schema::migrate_v1,
+                    2 => schema::migrate_v2,
+                    3 => schema::migrate_v3,
+                    _ => unreachable!(),
+                };
+                migrate(&db, Some(hash.as_slice())).unwrap();
+            }
+            drop(db);
+            let bound = root::open_bound_database(&product, BUSY).unwrap();
+            let upgraded = root::upgrade_binding(&bound, &product, &legacy).unwrap();
+            assert_eq!(upgraded.schema_version, schema::SUPPORTED_SCHEMA_VERSION);
+            assert_eq!(root::read_manifest(&product).unwrap(), upgraded);
+            root::verify_binding(&bound, &product, &upgraded).unwrap();
+            assert_eq!(
+                bound
+                    .connection
+                    .query_row("SELECT count(*) FROM account", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                root::upgrade_binding(&bound, &product, &upgraded).unwrap(),
+                upgraded
+            );
+            for (account, library, folder, foreign) in [(10, 20, 30, 31), (11, 21, 31, 30)] {
+                let libraries = namespace::libraries(&bound.connection, &id(account)).unwrap();
+                assert_eq!(libraries.len(), 1);
+                assert_eq!(libraries[0].id, id(library));
+                assert_eq!(libraries[0].name, "Files");
+                let ancestry =
+                    namespace::folder_path(&bound.connection, &id(account), &id(folder)).unwrap();
+                assert_eq!(
+                    ancestry
+                        .iter()
+                        .map(|entry| entry.id.as_str())
+                        .collect::<Vec<_>>(),
+                    [id(library), id(folder)]
+                );
+                assert!(matches!(
+                    namespace::folder_path(&bound.connection, &id(account), &id(foreign)),
+                    Err(namespace::NamespaceError::NotFound)
+                ));
+            }
+            drop(bound);
+            cleanup(owner);
         }
-        if interrupted {
-            use sha2::{Digest, Sha256};
-            let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
-            let migrate = if version == 1 {
-                schema::migrate_v1
-            } else {
-                schema::migrate_v2
-            };
-            migrate(&db, Some(hash.as_slice())).unwrap();
-        }
-        drop(db);
-        let bound = root::open_bound_database(&product, BUSY).unwrap();
-        let upgraded = root::upgrade_binding(&bound, &product, &legacy).unwrap();
-        assert_eq!(upgraded.schema_version, schema::SUPPORTED_SCHEMA_VERSION);
-        assert_eq!(root::read_manifest(&product).unwrap(), upgraded);
-        root::verify_binding(&bound, &product, &upgraded).unwrap();
-        assert_eq!(
-            bound
-                .connection
-                .query_row("SELECT count(*) FROM account", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            root::upgrade_binding(&bound, &product, &upgraded).unwrap(),
-            upgraded
-        );
-        drop(bound);
-        cleanup(owner);
     }
+}
+
+#[test]
+fn library_migration_rolls_back_schema_and_version_on_failure() {
+    let (owner, path) = fixture("library-migration-rollback");
+    let db = sqlite::open_writer(&path, BUSY).unwrap();
+    db.execute_batch(schema::MIGRATION_0001_S1).unwrap();
+    schema::migrate_v1(&db, None).unwrap();
+    schema::migrate_v2(&db, None).unwrap();
+    insert_account(&db, &id(10), "owner-a", "user");
+    insert_root(&db, &id(20), &id(10));
+    db.execute_batch("CREATE INDEX entry_library_name ON entry(generation)")
+        .unwrap();
+    assert!(schema::migrate_v3(&db, None).is_err());
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert!(
+        db.prepare("SELECT library_display_name FROM entry")
+            .is_err()
+    );
+    assert!(
+        !db.query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='entry_one_root'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap()
+        .contains("library_name")
+    );
+    db.execute_batch("DROP INDEX entry_library_name").unwrap();
+    schema::migrate_v3(&db, None).unwrap();
+    assert_eq!(
+        schema::apply_migrations(&db).unwrap(),
+        schema::MigrationOutcome::AlreadyCurrent
+    );
+    assert_eq!(
+        sylux::domain::namespace::libraries(&db, &id(10)).unwrap()[0].id,
+        id(20)
+    );
+    drop(db);
+    cleanup(owner);
 }
 
 #[test]

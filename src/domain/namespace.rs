@@ -1,4 +1,4 @@
-//! Private-root metadata operations. Callers must authenticate the owner.
+//! Private library and entry metadata. Callers must authenticate the owner.
 use super::names::{EntryName, NAME_KEY_VERSION};
 use super::upload::folder_etag;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -37,36 +37,67 @@ fn id() -> Result<String, NamespaceError> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-pub fn private_root(db: &Connection, owner: &str) -> Result<String, NamespaceError> {
-    db.query_row("SELECT entry_id FROM entry WHERE owner_account_id=?1 AND parent_id IS NULL AND state='active'", [owner], |r| r.get(0)).optional().map_err(|_| NamespaceError::Sql)?.ok_or(NamespaceError::NotFound)
+fn library_root(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
+    let id: String = row.get(0)?;
+    let generation: i64 = row.get(2)?;
+    Ok(Entry {
+        etag: folder_etag(&id, generation as u64),
+        id,
+        parent_id: None,
+        name: row.get(1)?,
+        kind: "folder".into(),
+        generation,
+    })
 }
 
-/// Full private-root descriptor (id, name, kind, generation, etag) so an
-/// authenticated client can seed folder creation and upload admission without
-/// a separate discovery route. etag uses the `"{id}:{generation}"` form
-/// (consistent with `domain::upload::folder_etag`).
+/// An unqualified listing keeps resolving to the original account root.
 pub fn root_entry(db: &Connection, owner: &str) -> Result<Entry, NamespaceError> {
     db.query_row(
-        "SELECT entry_id, original_name, generation FROM entry WHERE owner_account_id=?1 AND parent_id IS NULL AND state='active'",
+        "SELECT entry_id, original_name, generation FROM entry WHERE owner_account_id=?1
+         AND parent_id IS NULL AND library_name IS NULL AND kind='folder' AND state='active'",
         [owner],
-        |r| {
-            let id: String = r.get(0)?;
-            let name: String = r.get(1)?;
-            let generation: i64 = r.get(2)?;
-            let etag = folder_etag(&id, generation as u64);
-            Ok(Entry {
-                id,
-                parent_id: None,
-                name,
-                kind: "folder".into(),
-                generation,
-                etag,
-            })
-        },
+        library_root,
     )
     .optional()
     .map_err(|_| NamespaceError::Sql)?
     .ok_or(NamespaceError::NotFound)
+}
+
+pub fn libraries(db: &Connection, owner: &str) -> Result<Vec<Entry>, NamespaceError> {
+    let mut statement = db.prepare(
+        "SELECT entry_id, library_display_name, generation FROM entry
+         WHERE owner_account_id=?1 AND parent_id IS NULL AND kind='folder' AND state='active'
+         ORDER BY library_name IS NOT NULL, coalesce(library_name_key, CAST(library_display_name AS BLOB))",
+    ).map_err(|_| NamespaceError::Sql)?;
+    statement
+        .query_map([owner], library_root)
+        .map_err(|_| NamespaceError::Sql)?
+        .collect::<Result<_, _>>()
+        .map_err(|_| NamespaceError::Sql)
+}
+
+pub fn create_library(
+    db: &Transaction<'_>,
+    owner: &str,
+    name: &str,
+) -> Result<Entry, NamespaceError> {
+    if name.trim().is_empty() {
+        return Err(NamespaceError::InvalidName);
+    }
+    let name = EntryName::parse(name).map_err(|_| NamespaceError::InvalidName)?;
+    let id = id()?;
+    db.query_row(
+        "INSERT INTO entry(entry_id, owner_account_id, kind, original_name, name_key,
+                           name_key_version, library_name, library_name_key)
+         VALUES(?1, ?2, 'folder', '', x'', ?3, ?4, ?5)
+         ON CONFLICT DO NOTHING
+         RETURNING entry_id, library_display_name, generation",
+        params![id, owner, NAME_KEY_VERSION, name.display, name.key],
+        library_root,
+    )
+    .optional()
+    .map_err(|_| NamespaceError::Sql)?
+    .ok_or(NamespaceError::Conflict)
 }
 
 /// Resolve active ancestry in one SQL snapshot without exposing foreign names.
@@ -78,10 +109,10 @@ pub fn folder_path(
     let mut statement = db
         .prepare(
             "WITH RECURSIVE ancestry(entry_id,parent_id,original_name,generation,depth) AS (
-            SELECT entry_id,parent_id,original_name,generation,0 FROM entry
+            SELECT entry_id,parent_id,coalesce(library_name,original_name),generation,0 FROM entry
             WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder' AND state='active'
             UNION ALL
-            SELECT e.entry_id,e.parent_id,e.original_name,e.generation,a.depth+1
+            SELECT e.entry_id,e.parent_id,coalesce(e.library_name,e.original_name),e.generation,a.depth+1
             FROM entry e JOIN ancestry a ON e.entry_id=a.parent_id
             WHERE e.owner_account_id=?2 AND e.kind='folder' AND e.state='active' AND a.depth<?3
         ) SELECT entry_id,parent_id,original_name,generation FROM ancestry ORDER BY depth DESC",
@@ -631,6 +662,8 @@ pub struct DeletedEntry {
     #[serde(flatten)]
     pub entry: Entry,
     pub original_path: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_name: Option<String>,
     pub size: Option<i64>,
     pub modified_at: Option<i64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -769,7 +802,8 @@ pub fn trashed_page_sorted(
     };
     let paths = if location {
         format!("paths(entry_id,location_key,child_key,depth) AS (
-            SELECT entry_id,'','',0 FROM entry WHERE owner_account_id=?1 AND parent_id IS NULL
+            SELECT entry_id,'',coalesce(CAST(library_name_key AS TEXT),library_display_name) || char(0),0
+            FROM entry WHERE owner_account_id=?1 AND parent_id IS NULL
             UNION ALL
             SELECT e.entry_id,p.child_key,p.child_key || CAST(e.name_key AS TEXT) || char(0),p.depth+1
             FROM paths p CROSS JOIN entry e ON e.parent_id=p.entry_id
@@ -880,17 +914,17 @@ fn deleted_path(
     owner: &str,
     parent_id: Option<&str>,
     ancestors: &mut DeletedAncestors,
-) -> Result<Vec<String>, NamespaceError> {
+) -> Result<(Option<String>, Vec<String>), NamespaceError> {
     let mut path = Vec::new();
     let mut current = parent_id.ok_or(NamespaceError::Sql)?.to_owned();
     let mut seen = std::collections::HashSet::new();
-    loop {
+    let library = loop {
         if !seen.insert(current.clone()) || seen.len() > (MAX_ENTRY_DEPTH + 1) as usize {
             return Err(NamespaceError::Sql);
         }
         if !ancestors.contains_key(&current) {
             let ancestor: (Option<String>, String) = db.query_row(
-                "SELECT parent_id,original_name FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder'",
+                "SELECT parent_id,coalesce(library_name,original_name) FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND kind='folder'",
                 params![current, owner], |r| Ok((r.get(0)?, r.get(1)?)),
             ).map_err(|_| NamespaceError::Sql)?;
             ancestors.insert(current.clone(), ancestor);
@@ -901,11 +935,11 @@ fn deleted_path(
                 path.push(name.clone());
                 current = parent.clone();
             }
-            None => break,
+            None => break (!name.is_empty()).then(|| name.clone()),
         }
-    }
+    };
     path.reverse();
-    Ok(path)
+    Ok((library, path))
 }
 
 fn deleted_paths(
@@ -917,20 +951,30 @@ fn deleted_paths(
     let mut result = Vec::with_capacity(rows.len());
     let mut counts = std::collections::HashMap::new();
     for (entry, size, modified_at) in rows {
-        let original_path = deleted_path(db, owner, entry.parent_id.as_deref(), &mut ancestors)?;
+        let (library_name, original_path) =
+            deleted_path(db, owner, entry.parent_id.as_deref(), &mut ancestors)?;
         *counts
-            .entry((entry.name.clone(), original_path.clone()))
+            .entry((
+                entry.name.clone(),
+                library_name.clone(),
+                original_path.clone(),
+            ))
             .or_insert(0) += 1;
         result.push(DeletedEntry {
             entry,
             original_path,
+            library_name,
             size,
             modified_at,
             needs_reference: false,
         });
     }
     for item in &mut result {
-        item.needs_reference = counts[&(item.entry.name.clone(), item.original_path.clone())] > 1;
+        item.needs_reference = counts[&(
+            item.entry.name.clone(),
+            item.library_name.clone(),
+            item.original_path.clone(),
+        )] > 1;
     }
     Ok(result)
 }
@@ -971,9 +1015,14 @@ fn mark_deleted_references(
             continue;
         }
         // Historical parent IDs can differ while the displayed paths coincide.
-        let path = deleted_path(db, owner, parent.as_deref(), &mut DeletedAncestors::new())?;
+        let (library, path) =
+            deleted_path(db, owner, parent.as_deref(), &mut DeletedAncestors::new())?;
         for item in items.iter_mut() {
-            if item.entry.id != id && item.entry.name == name && item.original_path == path {
+            if item.entry.id != id
+                && item.entry.name == name
+                && item.library_name == library
+                && item.original_path == path
+            {
                 item.needs_reference = true;
             }
         }
@@ -1076,6 +1125,8 @@ mod tests {
         db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
         db.execute_batch(MIGRATION_0001_S1).unwrap();
         crate::persistence::schema::migrate_v1(&db, None).unwrap();
+        crate::persistence::schema::migrate_v2(&db, None).unwrap();
+        crate::persistence::schema::migrate_v3(&db, None).unwrap();
         db.execute("INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES(?1,?1,'user',1,0)", [OWNER]).unwrap();
         db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,NULL,'folder','',x'',1)", params![ROOT,OWNER]).unwrap();
         let folder = |id: &str, parent: &str, name: &str| {
