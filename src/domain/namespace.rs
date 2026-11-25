@@ -19,6 +19,7 @@ pub enum NamespaceError {
     InvalidDestination,
     DepthLimit,
     CopyTooLarge,
+    SharingConfirmationRequired,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -31,7 +32,7 @@ pub struct Entry {
     pub etag: String,
 }
 
-fn id() -> Result<String, NamespaceError> {
+pub(super) fn id() -> Result<String, NamespaceError> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| NamespaceError::Sql)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
@@ -431,6 +432,24 @@ pub fn move_entry(
     destination: &str,
     if_match: &str,
 ) -> Result<Entry, NamespaceError> {
+    move_with_sharing_check(
+        db,
+        owner,
+        entry,
+        destination,
+        if_match,
+        |source, destination| require_private_tree_change(db, owner, entry, source, destination),
+    )
+}
+
+pub(crate) fn move_with_sharing_check(
+    db: &Transaction<'_>,
+    owner: &str,
+    entry: &str,
+    destination: &str,
+    if_match: &str,
+    check: impl FnOnce(&[Entry], &[Entry]) -> Result<(), NamespaceError>,
+) -> Result<Entry, NamespaceError> {
     let row: Option<(Option<String>, String, String, i64)> = db.query_row(
         "SELECT parent_id,original_name,kind,generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='active'",
         params![entry, owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
@@ -438,7 +457,7 @@ pub fn move_entry(
     let Some((Some(parent), name, kind, generation)) = row else {
         return Err(NamespaceError::NotFound);
     };
-    folder_path(db, owner, &parent)?;
+    let source_path = folder_path(db, owner, &parent)?;
     if if_match != folder_etag(entry, generation as u64) {
         return Err(NamespaceError::Stale);
     }
@@ -470,6 +489,8 @@ pub fn move_entry(
     if destination_depth + 1 + subtree_depth > MAX_ENTRY_DEPTH {
         return Err(NamespaceError::DepthLimit);
     }
+    let destination_path = folder_path(db, owner, destination)?;
+    check(&source_path, &destination_path)?;
     let changed = db.execute(
         "UPDATE entry SET parent_id=?1,generation=generation+1 WHERE entry_id=?2 AND owner_account_id=?3 AND generation=?4",
         params![destination, entry, owner, generation]
@@ -1039,6 +1060,18 @@ pub fn restore(
     entry: &str,
     if_match: &str,
 ) -> Result<(), NamespaceError> {
+    restore_with_sharing_check(db, owner, entry, if_match, |destination| {
+        require_private_tree_change(db, owner, entry, &[], destination)
+    })
+}
+
+pub(crate) fn restore_with_sharing_check(
+    db: &Transaction<'_>,
+    owner: &str,
+    entry: &str,
+    if_match: &str,
+    check: impl FnOnce(&[Entry]) -> Result<(), NamespaceError>,
+) -> Result<(), NamespaceError> {
     let row: Option<(String, i64)> = db.query_row("SELECT parent_id,generation FROM entry WHERE entry_id=?1 AND owner_account_id=?2 AND state='deleted' AND NOT EXISTS(SELECT 1 FROM removal_member rm WHERE rm.entry_id=entry.entry_id)", params![entry,owner], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_| NamespaceError::Sql)?;
     let Some((parent, generation)) = row else {
         return Err(NamespaceError::NotFound);
@@ -1046,16 +1079,31 @@ pub fn restore(
     if if_match != folder_etag(entry, generation as u64) {
         return Err(NamespaceError::Stale);
     }
-    folder_path(db, owner, &parent).map_err(|failure| match failure {
+    let destination = folder_path(db, owner, &parent).map_err(|failure| match failure {
         NamespaceError::NotFound => NamespaceError::ParentUnavailable,
         other => other,
     })?;
+    check(&destination)?;
     db.execute("UPDATE entry SET state='active',generation=generation+1 WHERE entry_id=?1", [entry]).map_err(|e| if matches!(e,rusqlite::Error::SqliteFailure(ref x,_) if x.code==rusqlite::ErrorCode::ConstraintViolation) { NamespaceError::Conflict } else { NamespaceError::Sql })?;
     db.execute(
         "UPDATE entry SET generation=generation+1 WHERE entry_id=?1",
         [parent],
     )
     .map_err(|_| NamespaceError::Sql)?;
+    Ok(())
+}
+
+fn require_private_tree_change(
+    db: &Transaction<'_>,
+    owner: &str,
+    entry: &str,
+    source: &[Entry],
+    destination: &[Entry],
+) -> Result<(), NamespaceError> {
+    let impact = super::direct_grants::tree_impact(db, owner, entry, source, destination)?;
+    if impact.requires_confirmation() {
+        return Err(NamespaceError::SharingConfirmationRequired);
+    }
     Ok(())
 }
 

@@ -437,11 +437,11 @@ test('cancel aborts the in-flight upload without claiming a saved file', { annot
   await expect(page.locator('.file-row').filter({ hasText: fileName })).toHaveCount(0);
 });
 
-async function forwardFixtureCommit(request: Request): Promise<number> {
+async function forwardFixtureMutation(request: Request, expected: RegExp): Promise<number> {
   const fixtureOrigin = new URL(origin);
   const target = new URL(request.url());
-  if (target.origin !== fixtureOrigin.origin || target.search || !/^\/uploads\/[A-Za-z0-9-]+\/commit$/.test(target.pathname) || request.method() !== 'POST') {
-    throw new Error('unexpected fixture commit route');
+  if (target.origin !== fixtureOrigin.origin || target.search || !expected.test(target.pathname) || request.method() !== 'POST') {
+    throw new Error('unexpected fixture mutation route');
   }
   const headers = await request.allHeaders();
   const ca = fs.readFileSync(process.env.S1_CA_CERT!);
@@ -460,7 +460,7 @@ async function forwardFixtureCommit(request: Request): Promise<number> {
       response.once('end', () => resolve(response.statusCode ?? 0));
       response.resume();
     });
-    forwarded.setTimeout(10_000, () => forwarded.destroy(new Error('fixture commit forward timed out')));
+    forwarded.setTimeout(10_000, () => forwarded.destroy(new Error('fixture mutation forward timed out')));
     forwarded.once('error', reject);
     forwarded.end(request.postDataBuffer() ?? undefined);
   });
@@ -486,7 +486,7 @@ test('lost commit response is resolved through the original upload status', { an
     await route.continue();
   });
   await page.route('**/uploads/*/commit', async route => {
-    expect(await forwardFixtureCommit(route.request())).toBe(201);
+    expect(await forwardFixtureMutation(route.request(), /^\/uploads\/[A-Za-z0-9-]+\/commit$/)).toBe(201);
     dropped = true;
     await route.abort('connectionreset');
   });
@@ -587,6 +587,159 @@ test('uploaded PDF renders and changes pages over real TLS', { annotation: { typ
   await preview.getByRole('button', { name: 'Close preview', exact: true }).click();
   await expect(preview).toHaveCount(0);
   await expect(trigger).toBeFocused();
+});
+
+test('direct shares show only the live subtree and reconcile a lost restore response', { annotation: { type: 'harness_case', description: 'storage_direct_sharing' } }, async () => {
+  test.setTimeout(65_000);
+  await signIn();
+  const handle = `share-recipient-${phase}`;
+  const recipientPassword = 'Direct sharing fixture password';
+  const pdfName = `Shared plan ${phase}.pdf`;
+  const pdfBytes = fs.readFileSync(path.resolve(__dirname, '../../web/tests/fixtures/three-pages.pdf'));
+  const button = (tab: Page, name: string) => tab.getByRole('button', { name, exact: true });
+
+  await button(page, 'Settings').click();
+  await button(page, 'Create account').click();
+  const account = page.getByRole('dialog', { name: 'Create account', exact: true });
+  await account.getByLabel('Account name').fill(handle);
+  await account.getByLabel('Password', { exact: true }).fill(recipientPassword);
+  await account.getByLabel('Confirm password', { exact: true }).fill(recipientPassword);
+  await button(page, 'Create account').last().click();
+  await expect(account).toBeHidden();
+
+  await button(page, 'My libraries').click();
+  await button(page, 'New library').click();
+  const libraryName = `Archive ${phase}`;
+  await page.getByLabel('Library name').fill(libraryName);
+  await button(page, 'Create library').click();
+  await button(page, `Share ${libraryName}`).press('Enter');
+
+  async function grant(name: string) {
+    const dialog = page.getByRole('dialog', { name: `Share ${name}`, exact: true });
+    await dialog.getByLabel('Account name').fill(handle);
+    await dialog.getByRole('button', { name: 'Share', exact: true }).click();
+    await expect(dialog.getByRole('status')).toHaveText(`Shared with ${handle}.`);
+    await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
+    await expect(dialog).toBeHidden();
+  }
+
+  await grant(libraryName);
+  await button(page, 'Files').click();
+  async function createFolder(name: string) {
+    await button(page, 'New folder').click();
+    await page.getByLabel('Folder name').fill(name);
+    await button(page, 'Create folder').click();
+    await expect(button(page, `Open ${name}`)).toBeVisible();
+  }
+  const privateName = `Private parent ${phase}`;
+  const sharedName = `Shared project ${phase}`;
+  await createFolder(privateName);
+  await button(page, `Open ${privateName}`).click();
+  const ownerParent = page.url();
+  await createFolder(sharedName);
+  await createFolder(`Private sibling ${phase}`);
+  const options = button(page, `Options for ${sharedName}`);
+  await options.click();
+  await page.getByRole('menuitem', { name: 'Share', exact: true }).click();
+  await grant(sharedName);
+  await expect(options).toBeFocused();
+  await button(page, `Open ${sharedName}`).click();
+  const ownerFolder = page.url();
+  await chooseUpload({ name: pdfName, mimeType: 'application/pdf', buffer: pdfBytes });
+  await expect(button(page, `Preview ${pdfName}`)).toBeVisible();
+
+  const recipient = await storageContext();
+  try {
+    const tab = await recipient.newPage();
+    await tab.goto(origin);
+    await tab.getByLabel('Account name').fill(handle);
+    await tab.getByLabel('Password', { exact: true }).fill(recipientPassword);
+    await button(tab, 'Sign in').click();
+    await button(tab, 'Shared with me').press('Enter');
+    const roots = tab.getByRole('list', { name: 'Folders shared with me' });
+    await expect(roots.getByRole('link')).toHaveCount(2);
+    await roots.getByRole('link', { name: new RegExp(sharedName) }).press('Enter');
+    const folderBookmark = tab.url();
+    await expect(tab.getByRole('heading', { name: sharedName, exact: true })).toBeVisible();
+    await expect(button(tab, 'New folder')).toHaveCount(0);
+    await expect(tab.getByText(privateName)).toHaveCount(0);
+    for (const width of [1440, 390]) {
+      await tab.setViewportSize({ width, height: 900 });
+      for (const scheme of ['dark', 'light'] as const) {
+        await tab.emulateMedia({ colorScheme: scheme });
+        await expect(tab.locator('html')).toHaveCSS('color-scheme', scheme);
+        await expect(tab.getByRole('link', { name: pdfName, exact: true })).toBeVisible();
+        await expect(button(tab, `Download ${pdfName}`)).toBeVisible();
+        expect(await tab.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      }
+    }
+    await tab.setViewportSize({ width: 1440, height: 900 });
+    await tab.getByRole('searchbox', { name: 'Search shared files' }).fill('Shared plan');
+    await button(tab, 'Search').click();
+    const matches = tab.getByRole('list', { name: 'Shared search results' });
+    await matches.getByRole('link', { name: new RegExp(pdfName) }).press('Enter');
+    const fileBookmark = tab.url();
+    const preview = tab.getByRole('dialog', { name: `Preview ${pdfName}`, exact: true });
+    await expect(preview.locator('.page[data-page-number="1"] canvas').first()).toBeVisible({ timeout: 15_000 });
+    await expect(button(tab, 'Edit')).toHaveCount(0);
+    await button(tab, 'Next page').click();
+    await expect(preview.getByRole('spinbutton', { name: 'Page number' })).toHaveValue('2');
+    const downloaded = tab.waitForEvent('download');
+    await button(tab, 'Download file').click();
+    const download = await downloaded;
+    expect(download.suggestedFilename()).toBe(pdfName);
+    expect(fs.readFileSync((await download.path())!)).toEqual(pdfBytes);
+    await button(tab, 'Close preview').click();
+    await expect(tab).toHaveURL(folderBookmark);
+
+    await button(page, `Options for ${pdfName}`).click();
+    await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Move to trash', exact: true }).click();
+    await expect(button(page, `Preview ${pdfName}`)).toHaveCount(0);
+    await tab.goto(fileBookmark);
+    await expect(tab.getByRole('alert')).toHaveText('This share is unavailable.');
+    await button(page, 'Trash').click();
+    const restore = button(page, `Restore ${pdfName}`);
+    await restore.click();
+    const confirmation = page.getByRole('dialog', { name: `Restore ${pdfName}?`, exact: true });
+    await expect(confirmation.getByText(handle, { exact: true })).toBeVisible();
+    await expect(confirmation.getByRole('button', { name: 'Cancel' })).toBeFocused();
+    await confirmation.getByRole('button', { name: 'Cancel' }).press('Enter');
+    await expect(restore).toBeVisible();
+    await expect(tab.getByRole('alert')).toHaveText('This share is unavailable.');
+
+    let committed = 0;
+    await page.route('**/trash/*/restore', async route => {
+      if (!route.request().headers()['x-share-confirmation']) return route.continue();
+      expect(await forwardFixtureMutation(route.request(), /^\/trash\/[a-f0-9]{32}\/restore$/)).toBe(204);
+      committed++;
+      await route.abort('connectionclosed');
+    });
+    await restore.click();
+    await confirmation.getByRole('button', { name: 'Restore and share' }).click();
+    await expect(page.getByRole('heading', { name: 'Restore unconfirmed' })).toBeVisible();
+    await button(page, 'Check Files and Trash').click();
+    await expect(page.getByRole('heading', { name: 'Restore unconfirmed' })).toHaveCount(0);
+    expect(committed).toBe(1);
+    await tab.reload();
+    await tab.getByLabel('Account name').fill(handle);
+    await tab.getByLabel('Password', { exact: true }).fill(recipientPassword);
+    await button(tab, 'Sign in').click();
+    await expect(preview.locator('.page[data-page-number="1"] canvas').first()).toBeVisible({ timeout: 15_000 });
+    await page.goto(ownerParent);
+    await expect(page).toHaveURL(ownerParent);
+    await options.click();
+    await page.getByRole('menuitem', { name: 'Share', exact: true }).click();
+    await button(page, `Revoke access for ${handle}`).click();
+    await expect(page.getByRole('dialog').getByRole('status')).toHaveText(`Revoked access for ${handle}.`);
+    await button(tab, 'Close preview').click();
+    await expect(tab.getByRole('alert')).toHaveText('This share is unavailable.');
+    await tab.goto(fileBookmark);
+    await expect(tab.getByRole('alert')).toHaveText('This share is unavailable.');
+    expect(ownerFolder).not.toBe(folderBookmark);
+  } finally {
+    await recipient.close();
+  }
 });
 
 test('reload resumes real private chunks after matching file reselect', { annotation: { type: 'harness_case', description: 'storage_upload_resume' } }, async () => {
@@ -852,7 +1005,7 @@ test('navigation keeps the draft and retry finishes the same staged edit', {
   await recovered.getByRole('textbox').fill('# Confirmed by status\n');
   let lostReplies = 0;
   await page.route('**/uploads/*/commit', async route => {
-    expect(await forwardFixtureCommit(route.request())).toBe(201);
+    expect(await forwardFixtureMutation(route.request(), /^\/uploads\/[A-Za-z0-9-]+\/commit$/)).toBe(201);
     lostReplies++;
     await route.abort('failed');
   });

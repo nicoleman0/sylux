@@ -785,11 +785,12 @@ fn upgrade_binding_step(
         serde_json::to_vec(manifest).map_err(|_| BindingError::Io("manifest_encode_failed"))?;
     let hash = Sha256::digest(&bytes);
     let previous = manifest.schema_version;
-    let next = previous + 1;
+    let next = if previous == 4 { 6 } else { previous + 1 };
     let migrate = match previous {
         1 => schema::migrate_v1,
         2 => schema::migrate_v2,
         3 => schema::migrate_v3,
+        4 => schema::migrate_direct_grants,
         _ => return Err(BindingError::UnsupportedVersion("schema_version")),
     };
     if row.schema_version == previous && version == previous {

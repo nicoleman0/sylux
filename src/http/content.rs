@@ -1,8 +1,10 @@
 #![allow(clippy::result_large_err)]
 
-use super::{AuthState, middleware::session_cookie};
+use super::{AuthState, direct_grants::private, middleware::session_cookie};
 use crate::domain::{
     authz::validate_session,
+    direct_grants,
+    namespace::{self, NamespaceError},
     upload::{MAX_TEXT_EDIT_LENGTH, is_editable_text, revision_etag, validate_id},
 };
 use crate::persistence::payload::PayloadError;
@@ -72,6 +74,7 @@ async fn resolve(
     state: &AuthState,
     headers: &HeaderMap,
     entry_id: &str,
+    shared: bool,
 ) -> Result<ContentRef, Response> {
     let cookie = session_cookie(headers)
         .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "authentication_required"))?;
@@ -84,9 +87,10 @@ async fn resolve(
         let Some((account_id, _, _)) = validate_session(db, &session_id, &secret, now()) else {
             return Ok(Err(error(StatusCode::UNAUTHORIZED, "authentication_required")));
         };
+        let owner = (!shared).then_some(account_id.as_str());
         let content = db.query_row(
-            "SELECT entry.original_name,revision.revision_id,blob.blob_id,blob.length,blob.sha256,entry.parent_id FROM entry JOIN revision ON revision.revision_id=entry.current_revision_id JOIN blob ON blob.blob_id=revision.blob_id WHERE entry.entry_id=?1 AND entry.owner_account_id=?2 AND entry.state='active' AND entry.kind='file' AND revision.entry_id=entry.entry_id AND blob.lifecycle='live'",
-            params![entry_id, account_id],
+            "SELECT entry.original_name,revision.revision_id,blob.blob_id,blob.length,blob.sha256,entry.parent_id FROM entry JOIN revision ON revision.revision_id=entry.current_revision_id JOIN blob ON blob.blob_id=revision.blob_id WHERE entry.entry_id=?1 AND (?2 IS NULL OR entry.owner_account_id=?2) AND entry.state='active' AND entry.kind='file' AND revision.entry_id=entry.entry_id AND blob.lifecycle='live'",
+            params![entry_id, owner],
             |row| {
                 let length: i64 = row.get(3)?;
                 let digest: Vec<u8> = row.get(4)?;
@@ -96,12 +100,15 @@ async fn resolve(
             },
         ).map_err(|_| error(StatusCode::NOT_FOUND, "entry_not_found"));
         let content = content.and_then(|(reference, parent)| {
-            crate::domain::namespace::folder_path(db, &account_id, &parent)
-                .map(|_| reference)
-                .map_err(|failure| match failure {
-                    crate::domain::namespace::NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "entry_not_found"),
-                    _ => error(StatusCode::INTERNAL_SERVER_ERROR, "database_unavailable"),
-                })
+            let allowed = if shared {
+                direct_grants::path(db, &account_id, &parent).map(|_| ())
+            } else {
+                namespace::folder_path(db, &account_id, &parent).map(|_| ())
+            };
+            allowed.map(|()| reference).map_err(|failure| match failure {
+                NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "entry_not_found"),
+                _ => error(StatusCode::INTERNAL_SERVER_ERROR, "database_unavailable"),
+            })
         });
         snapshot.commit()?;
         Ok(content)
@@ -116,7 +123,7 @@ pub(super) async fn validate_text_edit_source(
     revision: &str,
     name: &str,
 ) -> Result<(), Response> {
-    let source = resolve(state, headers, entry_id).await?;
+    let source = resolve(state, headers, entry_id, false).await?;
     if source.revision_id != revision || source.name != name {
         return Err(error(
             StatusCode::PRECONDITION_FAILED,
@@ -297,11 +304,17 @@ fn insert_header(
     Ok(())
 }
 
-async fn serve(state: AuthState, entry_id: String, headers: HeaderMap, head: bool) -> Response {
+async fn serve(
+    state: AuthState,
+    entry_id: String,
+    headers: HeaderMap,
+    head: bool,
+    shared: bool,
+) -> Response {
     if validate_id(&entry_id).is_err() {
         return error(StatusCode::NOT_FOUND, "entry_not_found");
     }
-    let reference = match resolve(&state, &headers, &entry_id).await {
+    let reference = match resolve(&state, &headers, &entry_id, shared).await {
         Ok(reference) => reference,
         Err(response) => return response,
     };
@@ -400,7 +413,7 @@ pub async fn get(
     Path(entry_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    serve(state, entry_id, headers, false).await
+    serve(state, entry_id, headers, false, false).await
 }
 
 pub async fn head(
@@ -408,7 +421,25 @@ pub async fn head(
     Path(entry_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let mut response = serve(state, entry_id, headers, true).await;
+    let mut response = serve(state, entry_id, headers, true, false).await;
+    *response.body_mut() = Body::empty();
+    response
+}
+
+pub(super) async fn shared_get(
+    State(state): State<AuthState>,
+    Path(entry_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    private(serve(state, entry_id, headers, false, true).await)
+}
+
+pub(super) async fn shared_head(
+    State(state): State<AuthState>,
+    Path(entry_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let mut response = private(serve(state, entry_id, headers, true, true).await);
     *response.body_mut() = Body::empty();
     response
 }

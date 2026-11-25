@@ -87,6 +87,53 @@ async function trashSelected(page: Page) {
   await page.getByRole('dialog').getByRole('button', { name: 'Move to trash', exact: true }).click();
 }
 
+test('bulk move confirms each current audience and retries without reusing consent', async ({ page }) => {
+  const backend = await installBulkBackend(page);
+  const original = 'a'.repeat(43), changed = 'b'.repeat(43);
+  const beta = 'c'.repeat(43), retry = 'd'.repeat(43);
+  const attempts: { id: string; token?: string }[] = [];
+  let betaPrompts = 0;
+  await page.route('**/entries/*/move', route => {
+    const id = new URL(route.request().url()).pathname.split('/')[2];
+    const token = route.request().headers()['x-share-confirmation'];
+    attempts.push({ id, token });
+    if ((id === 'alpha' && token === changed) || (id === 'beta' && token === retry)) return route.fallback();
+    const challenge = id === 'alpha' ? (token ? changed : original) : (++betaPrompts === 1 ? beta : retry);
+    return route.fulfill({ status: 409, json: {
+      code: 'sharing_confirmation_required',
+      confirmation: { token: challenge, new_recipients: challenge === original ? ['alice'] : ['alice', 'bob'], lost_recipients: [], carried_recipients: [] },
+    } });
+  });
+  await select(page, 'alpha.bin', 'beta.bin');
+  await moveSelected(page);
+  const alpha = page.getByRole('dialog', { name: 'Move alpha.bin?', exact: true });
+  await expect(alpha.getByText('alice', { exact: true })).toBeVisible();
+  await expect(alpha.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await alpha.getByRole('button', { name: 'Confirm move' }).click();
+  await expect(alpha.getByText('Sharing changed.', { exact: false })).toBeVisible();
+  await expect(alpha.getByText('bob', { exact: true })).toBeVisible();
+  expect(backend.mutations).toEqual([]);
+  await alpha.getByRole('button', { name: 'Confirm move' }).click();
+
+  const betaDialog = page.getByRole('dialog', { name: 'Move beta.bin?', exact: true });
+  await expect(betaDialog.getByText('bob', { exact: true })).toBeVisible();
+  await betaDialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('row', { name: 'beta.bin', exact: true })).toBeVisible();
+  await expect(page.getByRole('row', { name: 'alpha.bin', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Retry failed items' }).click();
+  const picker = page.getByRole('dialog', { name: 'Move 1 selected items' });
+  await picker.getByRole('button', { name: 'Destination', exact: true }).click();
+  await picker.getByRole('button', { name: 'Move here', exact: true }).click();
+  await expect(betaDialog.getByText('bob', { exact: true })).toBeVisible();
+  await betaDialog.getByRole('button', { name: 'Confirm move' }).click();
+  await expect(page.getByRole('region', { name: 'Move results' }).getByRole('status')).toHaveText('2 items moved');
+  expect(attempts).toEqual([
+    { id: 'alpha', token: undefined }, { id: 'alpha', token: original }, { id: 'alpha', token: changed },
+    { id: 'beta', token: undefined }, { id: 'beta', token: undefined }, { id: 'beta', token: retry },
+  ]);
+  expect(backend.mutations.map(item => item.id)).toEqual(['alpha', 'beta']);
+});
+
 test('selection works with keyboard and pointer, selects loaded items only, and resets across pages and folders', async ({ page }) => {
   const backend = await installBulkBackend(page, true);
   const header = page.getByRole('columnheader').getByRole('checkbox', { name: 'Select all loaded items', exact: true });

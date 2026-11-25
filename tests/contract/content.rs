@@ -93,7 +93,7 @@ impl Fixture {
             let bound = root::open_bound_database(&product, BUSY).unwrap();
             let identity = legacy_identity.as_ref().unwrap();
             let upgraded = root::upgrade_binding(&bound, &product, identity).unwrap();
-            assert_eq!(upgraded.schema_version, 4);
+            assert_eq!(upgraded.schema_version, schema::SUPPORTED_SCHEMA_VERSION);
             drop(bound);
             let rebound = root::open_bound_database(&product, BUSY).unwrap();
             assert_eq!(
@@ -473,6 +473,809 @@ fn mutation_headers(csrf: &[u8; 32]) -> [(&'static str, String); 3] {
         ("X-CSRF-Token", URL_SAFE_NO_PAD.encode(csrf)),
         ("Content-Type", "application/json".to_owned()),
     ]
+}
+
+const GRANT_ADMIN: &str = "00000000000000000000000000000003";
+const GRANT_ADMIN_SESSION: &str = "00000000000000000000000000000203";
+const GRANT_ADMIN_SECRET: &[u8; 32] = b"direct-grant-admin-session-12345";
+const GRANT_ADMIN_CSRF: &[u8; 32] = b"direct-grant-admin-csrf-12345678";
+const GRANT_OWNER_ACTOR: ShareActor = (SESSION, SECRET, CSRF);
+const GRANT_RECIPIENT_ACTOR: ShareActor = (OTHER_SESSION, OTHER_SECRET, OTHER_CSRF);
+const GRANT_ADMIN_ACTOR: ShareActor = (GRANT_ADMIN_SESSION, GRANT_ADMIN_SECRET, GRANT_ADMIN_CSRF);
+type ShareActor = (&'static str, &'static [u8; 32], &'static [u8; 32]);
+
+impl Fixture {
+    async fn share_request(
+        &self,
+        method: &str,
+        path: &str,
+        actor: ShareActor,
+        body: serde_json::Value,
+        etag: Option<&str>,
+        confirmation: Option<&str>,
+    ) -> (u16, serde_json::Value) {
+        let mut headers = mutation_headers(actor.2).to_vec();
+        if let Some(etag) = etag {
+            headers.push(("If-Match", etag.to_owned()));
+        }
+        if let Some(token) = confirmation {
+            headers.push(("X-Share-Confirmation", token.to_owned()));
+        }
+        let body = (!body.is_null()).then(|| body.to_string());
+        let (status, _, bytes) = self
+            .request_with_body(
+                method,
+                path,
+                Some((actor.0, actor.1)),
+                &headers,
+                body.as_deref().unwrap_or("").as_bytes(),
+            )
+            .await;
+        let reply = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("expected JSON")
+        };
+        (status, reply)
+    }
+
+    async fn share_get(&self, path: &str, actor: ShareActor) -> (u16, serde_json::Value) {
+        self.share_request("GET", path, actor, serde_json::Value::Null, None, None)
+            .await
+    }
+
+    async fn share_folder(&self, parent: &str, name: &str) -> String {
+        let (status, reply) = self
+            .share_request(
+                "POST",
+                &format!("/folders/{parent}/children"),
+                GRANT_OWNER_ACTOR,
+                serde_json::json!({"name": name}),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, 201, "{reply}");
+        reply["id"].as_str().unwrap().to_owned()
+    }
+
+    async fn share_grant(&self, root: &str, handle: &str) -> String {
+        let (status, reply) = self
+            .share_request(
+                "POST",
+                &format!("/entries/{root}/direct-grants"),
+                GRANT_OWNER_ACTOR,
+                serde_json::json!({"handle": handle}),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["handle"], handle);
+        reply["id"].as_str().unwrap().to_owned()
+    }
+
+    async fn share_revoke(&self, id: &str) {
+        let (status, _) = self
+            .share_request(
+                "DELETE",
+                &format!("/direct-grants/{id}"),
+                GRANT_OWNER_ACTOR,
+                serde_json::Value::Null,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, 204);
+    }
+
+    async fn seed_grant_admin(&self) {
+        self.workers
+            .as_ref()
+            .unwrap()
+            .transact(|tx| {
+                tx.execute(
+                    "INSERT INTO account(account_id,handle,role,enabled,credential_epoch)
+                 VALUES(?1,'unrelated-admin','administrator',1,0)",
+                    [GRANT_ADMIN],
+                )?;
+                fresh_grant_session(tx, GRANT_ADMIN, GRANT_ADMIN_ACTOR)
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn change_grant_authority(&self, account: &'static str, action: &str, actor: ShareActor) {
+        let (status, _) = self
+            .share_request(
+                "POST",
+                &format!("/accounts/{account}/{action}"),
+                GRANT_ADMIN_ACTOR,
+                serde_json::Value::Null,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, 204);
+        if action == "enable" {
+            self.workers
+                .as_ref()
+                .unwrap()
+                .transact(move |tx| fresh_grant_session(tx, account, actor))
+                .await
+                .unwrap();
+        }
+    }
+}
+
+fn fresh_grant_session(db: &Connection, account: &str, actor: ShareActor) -> rusqlite::Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    db.execute("DELETE FROM session WHERE session_id=?1", [actor.0])?;
+    db.execute(
+        "INSERT INTO session(session_id,account_id,credential_epoch,verifier,csrf_verifier,
+                             created_at,idle_expires_at,absolute_expires_at,revoked)
+         SELECT ?1,account_id,credential_epoch,?3,?4,?5,?6,?7,0 FROM account WHERE account_id=?2",
+        params![
+            actor.0,
+            account,
+            verifier(actor.1).as_slice(),
+            verifier(actor.2).as_slice(),
+            now,
+            now + 3600,
+            now + 7200
+        ],
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_grant_read_surface_is_live_independent_and_owner_write_only() {
+    use serde_json::{Value, json};
+    let f = Fixture::new("direct-grant-reads").await;
+    f.seed_grant_admin().await;
+    let private = f.share_folder(ROOT, "Private ancestor").await;
+    let shared = f.share_folder(&private, "Shared project").await;
+    let sibling = f.share_folder(&private, "Private sibling").await;
+    let nested = f.share_folder(&shared, "Nested").await;
+    let tag = sylux::domain::upload::folder_etag(SHARE_FILE, 1);
+    let (status, moved) = f
+        .share_request(
+            "POST",
+            &format!("/entries/{SHARE_FILE}/move"),
+            GRANT_OWNER_ACTOR,
+            json!({"parent_id": nested}),
+            Some(&tag),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    let entry_tag = moved["etag"].as_str().unwrap();
+    let library_grant = f.share_grant(ROOT, "other").await;
+    let folder_grant = f.share_grant(&shared, "other").await;
+    assert_eq!(f.share_grant(&shared, "other").await, folder_grant);
+    let (status, discover) = f.share_get("/shared", GRANT_RECIPIENT_ACTOR).await;
+    assert_eq!(status, 200);
+    assert_eq!(discover["items"].as_array().unwrap().len(), 2);
+    assert_eq!(discover["items"][0]["entry"]["parent_id"], Value::Null);
+    assert_eq!(
+        f.share_get("/shared", GRANT_ADMIN_ACTOR).await.1["items"],
+        json!([])
+    );
+    f.share_revoke(&library_grant).await;
+    let folder_url = format!("/shared/folders/{nested}/path");
+    let file_url = format!("/shared/entries/{SHARE_FILE}");
+    let bytes_url = format!("{file_url}/content");
+    let (status, path) = f.share_get(&folder_url, GRANT_RECIPIENT_ACTOR).await;
+    assert_eq!(status, 200);
+    assert_eq!(path["items"].as_array().unwrap().len(), 2);
+    assert_eq!(path["items"][0]["id"], shared);
+    assert_eq!(path["items"][0]["parent_id"], Value::Null);
+    assert_eq!(path["items"][1]["id"], nested);
+    for private_id in [&private, &sibling, &ROOT.to_owned()] {
+        assert_eq!(
+            f.share_get(
+                &format!("/shared/folders/{private_id}/path"),
+                GRANT_RECIPIENT_ACTOR
+            )
+            .await
+            .0,
+            404
+        );
+    }
+    assert_eq!(
+        f.share_get(
+            &format!("/shared/folders/{nested}/children"),
+            GRANT_RECIPIENT_ACTOR
+        )
+        .await
+        .1["items"][0]["id"],
+        SHARE_FILE
+    );
+    let (status, file) = f.share_get(&file_url, GRANT_RECIPIENT_ACTOR).await;
+    assert_eq!(status, 200);
+    assert_eq!(file["location"], path["items"]);
+    let (status, search) = f
+        .share_get("/shared/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(search["items"].as_array().unwrap().len(), 1);
+    assert_eq!(search["items"][0]["location"], path["items"]);
+    assert_eq!(
+        f.share_get("/shared/search?q=Private", GRANT_RECIPIENT_ACTOR)
+            .await
+            .1["items"],
+        json!([])
+    );
+    assert_eq!(f.share_get(&file_url, GRANT_ADMIN_ACTOR).await.0, 404);
+    assert_eq!(f.request("GET", &bytes_url, None, &[]).await.0, 401);
+    let recipient = Some(auth(OTHER_SESSION, OTHER_SECRET));
+    let (status, headers, bytes) = f.request("GET", &bytes_url, recipient, &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    assert_eq!(bytes, b"synthetic\0content\xff\x80");
+    let content_tag = headers["etag"].clone();
+    assert_eq!(f.request("HEAD", &bytes_url, recipient, &[]).await.0, 200);
+    assert_eq!(
+        f.request(
+            "GET",
+            &bytes_url,
+            recipient,
+            &[("Range", "bytes=0-2".into())]
+        )
+        .await
+        .2,
+        b"syn"
+    );
+    assert_eq!(
+        f.request(
+            "GET",
+            &format!("/entries/{SHARE_FILE}/content"),
+            recipient,
+            &[]
+        )
+        .await
+        .0,
+        404
+    );
+    assert_eq!(
+        f.share_get(
+            &format!("/folders/{nested}/children"),
+            GRANT_RECIPIENT_ACTOR
+        )
+        .await
+        .0,
+        404
+    );
+    for (method, path, body) in [
+        (
+            "PATCH",
+            format!("/entries/{SHARE_FILE}"),
+            json!({"name":"changed"}),
+        ),
+        ("DELETE", format!("/entries/{SHARE_FILE}"), Value::Null),
+        (
+            "POST",
+            format!("/entries/{SHARE_FILE}/move"),
+            json!({"parent_id":OTHER_ROOT}),
+        ),
+        (
+            "POST",
+            format!("/entries/{shared}/direct-grants"),
+            json!({"handle":"unrelated-admin"}),
+        ),
+        (
+            "DELETE",
+            format!("/direct-grants/{folder_grant}"),
+            Value::Null,
+        ),
+        (
+            "POST",
+            "/share-links".into(),
+            json!({"entry_id":SHARE_FILE}),
+        ),
+        (
+            "POST",
+            "/archives".into(),
+            json!({"entry_ids":[SHARE_FILE]}),
+        ),
+    ] {
+        assert_eq!(
+            f.share_request(
+                method,
+                &path,
+                GRANT_RECIPIENT_ACTOR,
+                body,
+                Some(entry_tag),
+                None
+            )
+            .await
+            .0,
+            404,
+            "{path}"
+        );
+    }
+    let (status, copy) = f
+        .share_request(
+            "POST",
+            &format!("/entries/{SHARE_FILE}/copy-ticket"),
+            GRANT_RECIPIENT_ACTOR,
+            json!({"parent_id":OTHER_ROOT}),
+            Some(entry_tag),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        f.share_request("POST", "/copies", GRANT_RECIPIENT_ACTOR, copy, None, None)
+            .await
+            .0,
+        404
+    );
+    let (status, ticket) = f
+        .share_request(
+            "POST",
+            "/archives",
+            GRANT_OWNER_ACTOR,
+            json!({"entry_ids":[&shared]}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let zip = ticket["url"].as_str().unwrap();
+    assert_eq!(f.request("GET", zip, recipient, &[]).await.0, 404);
+    let (status, _, archive) = f
+        .request("GET", zip, Some(auth(SESSION, SECRET)), &[])
+        .await;
+    assert_eq!(status, 200);
+    assert!(archive.windows(4).any(|bytes| bytes == b"PK\x03\x04"));
+
+    f.share_revoke(&folder_grant).await;
+    assert_eq!(
+        f.share_get("/shared", GRANT_RECIPIENT_ACTOR).await.1["items"],
+        json!([])
+    );
+    assert_eq!(
+        f.share_get("/shared/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+            .await
+            .1["items"],
+        json!([])
+    );
+    assert_eq!(f.share_get(&folder_url, GRANT_RECIPIENT_ACTOR).await.0, 404);
+    assert_eq!(f.share_get(&file_url, GRANT_RECIPIENT_ACTOR).await.0, 404);
+    assert_eq!(
+        f.request(
+            "GET",
+            &bytes_url,
+            recipient,
+            &[("If-None-Match", content_tag)]
+        )
+        .await
+        .0,
+        404
+    );
+    for (account, actor, disabled_status) in [
+        (OWNER, GRANT_OWNER_ACTOR, 404),
+        (OTHER, GRANT_RECIPIENT_ACTOR, 401),
+    ] {
+        f.share_grant(&shared, "other").await;
+        f.change_grant_authority(account, "disable", actor).await;
+        assert_eq!(
+            f.share_get(&file_url, GRANT_RECIPIENT_ACTOR).await.0,
+            disabled_status
+        );
+        f.change_grant_authority(account, "enable", actor).await;
+        assert_eq!(f.share_get(&file_url, GRANT_RECIPIENT_ACTOR).await.0, 404);
+        assert_eq!(
+            f.share_get("/shared", GRANT_RECIPIENT_ACTOR).await.1["items"],
+            json!([])
+        );
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn direct_grant_tree_changes_recheck_confirmation_and_permanently_revoke_trashed_roots() {
+    use serde_json::{Value, json};
+    let f = Fixture::new("direct-grant-tree").await;
+    f.seed_grant_admin().await;
+    let private = f.share_folder(ROOT, "Private parent").await;
+    let shared = f.share_folder(&private, "Team").await;
+    let carried = f.share_folder(&shared, "Carried folder").await;
+    let carried_child = f.share_folder(&carried, "Inside carried folder").await;
+    let shared_path = format!("/shared/folders/{shared}/path");
+    let shared_listing = format!("/shared/folders/{shared}/children");
+    let carried_path = format!("/shared/folders/{carried}/path");
+    let carried_child_path = format!("/shared/folders/{carried_child}/path");
+    let metadata = format!("/shared/entries/{SHARE_FILE}");
+    let content = format!("{metadata}/content");
+    let move_url = format!("/entries/{SHARE_FILE}/move");
+    let file_tag = sylux::domain::upload::folder_etag(SHARE_FILE, 1);
+    let mut move_body = json!({"parent_id": shared});
+    let other = f.share_grant(&shared, "other").await;
+    let (status, first) = f
+        .share_request(
+            "POST",
+            &move_url,
+            GRANT_OWNER_ACTOR,
+            move_body.clone(),
+            Some(&file_tag),
+            None,
+        )
+        .await;
+    assert_eq!(status, 409);
+    assert_eq!(first["code"], "sharing_confirmation_required");
+    assert_eq!(first["confirmation"]["new_recipients"], json!(["other"]));
+    assert_eq!(f.share_get(&metadata, GRANT_RECIPIENT_ACTOR).await.0, 404);
+
+    let admin = f.share_grant(&shared, "unrelated-admin").await;
+    let (status, expanded) = f
+        .share_request(
+            "POST",
+            &move_url,
+            GRANT_OWNER_ACTOR,
+            move_body.clone(),
+            Some(&file_tag),
+            first["confirmation"]["token"].as_str(),
+        )
+        .await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        expanded["confirmation"]["new_recipients"],
+        json!(["other", "unrelated-admin"])
+    );
+    f.share_revoke(&admin).await;
+    let replacement = f.share_grant(&shared, "unrelated-admin").await;
+    let (status, recreated) = f
+        .share_request(
+            "POST",
+            &move_url,
+            GRANT_OWNER_ACTOR,
+            move_body.clone(),
+            Some(&file_tag),
+            expanded["confirmation"]["token"].as_str(),
+        )
+        .await;
+    assert_eq!(status, 409, "re-created grant needs a fresh confirmation");
+    assert_eq!(
+        recreated["confirmation"]["new_recipients"],
+        expanded["confirmation"]["new_recipients"]
+    );
+    let token = recreated["confirmation"]["token"].as_str();
+    let (status, moved) = f
+        .share_request(
+            "POST",
+            &move_url,
+            GRANT_OWNER_ACTOR,
+            move_body.clone(),
+            Some(&file_tag),
+            token,
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        f.share_request(
+            "POST",
+            &move_url,
+            GRANT_OWNER_ACTOR,
+            move_body.clone(),
+            Some(&file_tag),
+            token
+        )
+        .await
+        .0,
+        412
+    );
+    assert_eq!(f.share_get(&metadata, GRANT_RECIPIENT_ACTOR).await.0, 200);
+    assert_eq!(
+        f.share_get(&shared_listing, GRANT_RECIPIENT_ACTOR).await.1["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let (status, moved_out) = f
+        .share_request(
+            "POST",
+            &move_url,
+            GRANT_OWNER_ACTOR,
+            json!({"parent_id":ROOT}),
+            moved["etag"].as_str(),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(f.share_get(&metadata, GRANT_RECIPIENT_ACTOR).await.0, 404);
+    assert_eq!(
+        f.request(
+            "GET",
+            &content,
+            Some(auth(OTHER_SESSION, OTHER_SECRET)),
+            &[]
+        )
+        .await
+        .0,
+        404
+    );
+    assert_eq!(
+        f.share_get("/shared/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+            .await
+            .1["items"],
+        json!([])
+    );
+
+    let carried_grant = f.share_grant(&carried, "other").await;
+    let (_, owner_path) = f
+        .share_get(&format!("/folders/{carried}/path"), GRANT_OWNER_ACTOR)
+        .await;
+    let (status, renamed) = f
+        .share_request(
+            "PATCH",
+            &format!("/entries/{carried}"),
+            GRANT_OWNER_ACTOR,
+            json!({"name":"Renamed share"}),
+            owner_path["items"][3]["etag"].as_str(),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    let carried_move = format!("/entries/{carried}/move");
+    let (status, carries) = f
+        .share_request(
+            "POST",
+            &carried_move,
+            GRANT_OWNER_ACTOR,
+            json!({"parent_id":ROOT}),
+            renamed["etag"].as_str(),
+            None,
+        )
+        .await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        carries["confirmation"]["carried_recipients"],
+        json!(["other"])
+    );
+    assert_eq!(carries["confirmation"]["new_recipients"], json!([]));
+    assert_eq!(
+        carries["confirmation"]["lost_recipients"],
+        json!(["unrelated-admin"])
+    );
+    let (status, relocated) = f
+        .share_request(
+            "POST",
+            &carried_move,
+            GRANT_OWNER_ACTOR,
+            json!({"parent_id":ROOT}),
+            renamed["etag"].as_str(),
+            carries["confirmation"]["token"].as_str(),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, path) = f.share_get(&carried_path, GRANT_RECIPIENT_ACTOR).await;
+    assert_eq!(status, 200);
+    assert_eq!(path["items"].as_array().unwrap().len(), 1);
+    assert_eq!(path["items"][0]["name"], "Renamed share");
+    assert_eq!(path["items"][0]["parent_id"], Value::Null);
+    assert_eq!(
+        f.share_get(&carried_child_path, GRANT_ADMIN_ACTOR).await.0,
+        404
+    );
+    assert_eq!(
+        f.share_get(&carried_child_path, GRANT_RECIPIENT_ACTOR)
+            .await
+            .0,
+        200
+    );
+    let (status, returning) = f
+        .share_request(
+            "POST",
+            &carried_move,
+            GRANT_OWNER_ACTOR,
+            json!({"parent_id":shared}),
+            relocated["etag"].as_str(),
+            None,
+        )
+        .await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        returning["confirmation"]["new_recipients"],
+        json!(["unrelated-admin"])
+    );
+    assert_eq!(
+        returning["confirmation"]["carried_recipients"],
+        json!(["other"])
+    );
+    assert_eq!(
+        f.share_get(&carried_child_path, GRANT_ADMIN_ACTOR).await.0,
+        404
+    );
+    assert_eq!(
+        f.share_request(
+            "POST",
+            &carried_move,
+            GRANT_OWNER_ACTOR,
+            json!({"parent_id":shared}),
+            relocated["etag"].as_str(),
+            returning["confirmation"]["token"].as_str(),
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        f.share_get(&carried_child_path, GRANT_ADMIN_ACTOR).await.0,
+        200
+    );
+    f.share_revoke(&carried_grant).await;
+
+    let inside = f.share_folder(&shared, "Stays available").await;
+    move_body = json!({"parent_id": shared});
+    let (_, moving_back) = f
+        .share_request(
+            "POST",
+            &move_url,
+            GRANT_OWNER_ACTOR,
+            move_body.clone(),
+            moved_out["etag"].as_str(),
+            None,
+        )
+        .await;
+    let (status, restored_location) = f
+        .share_request(
+            "POST",
+            &move_url,
+            GRANT_OWNER_ACTOR,
+            move_body,
+            moved_out["etag"].as_str(),
+            moving_back["confirmation"]["token"].as_str(),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        f.share_request(
+            "DELETE",
+            &format!("/entries/{SHARE_FILE}"),
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            restored_location["etag"].as_str(),
+            None
+        )
+        .await
+        .0,
+        204
+    );
+    assert_eq!(f.share_get(&metadata, GRANT_RECIPIENT_ACTOR).await.0, 404);
+    assert_eq!(
+        f.share_get(
+            &format!("/shared/folders/{inside}/path"),
+            GRANT_RECIPIENT_ACTOR
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, trash) = f.share_get("/trash", GRANT_OWNER_ACTOR).await;
+    let deleted_tag = trash["items"][0]["etag"].as_str();
+    let restore = format!("/trash/{SHARE_FILE}/restore");
+    let (status, preview) = f
+        .share_request(
+            "POST",
+            &restore,
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            deleted_tag,
+            None,
+        )
+        .await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        preview["confirmation"]["new_recipients"],
+        json!(["other", "unrelated-admin"])
+    );
+    assert_eq!(f.share_get(&metadata, GRANT_RECIPIENT_ACTOR).await.0, 404);
+    f.share_revoke(&other).await;
+    f.share_revoke(&replacement).await;
+    let (status, changed) = f
+        .share_request(
+            "POST",
+            &restore,
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            deleted_tag,
+            preview["confirmation"]["token"].as_str(),
+        )
+        .await;
+    assert_eq!(status, 409);
+    assert_eq!(changed["code"], "sharing_audience_changed");
+    f.share_grant(&shared, "other").await;
+    let (_, fresh) = f
+        .share_request(
+            "POST",
+            &restore,
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            deleted_tag,
+            None,
+        )
+        .await;
+    assert_eq!(fresh["confirmation"]["new_recipients"], json!(["other"]));
+    assert_eq!(
+        f.share_request(
+            "POST",
+            &restore,
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            deleted_tag,
+            fresh["confirmation"]["token"].as_str()
+        )
+        .await
+        .0,
+        204
+    );
+    assert_eq!(f.share_get(&metadata, GRANT_RECIPIENT_ACTOR).await.0, 200);
+
+    for root in [&shared, &private] {
+        let (_, owner_path) = f
+            .share_get(&format!("/folders/{root}/path"), GRANT_OWNER_ACTOR)
+            .await;
+        let tag = owner_path["items"].as_array().unwrap().last().unwrap()["etag"].as_str();
+        assert_eq!(
+            f.share_request(
+                "DELETE",
+                &format!("/entries/{root}"),
+                GRANT_OWNER_ACTOR,
+                Value::Null,
+                tag,
+                None
+            )
+            .await
+            .0,
+            204
+        );
+        assert_eq!(
+            f.share_get(&shared_path, GRANT_RECIPIENT_ACTOR).await.0,
+            404
+        );
+        let (_, trash) = f.share_get("/trash", GRANT_OWNER_ACTOR).await;
+        let tag = trash["items"][0]["etag"].as_str();
+        assert_eq!(
+            f.share_request(
+                "POST",
+                &format!("/trash/{root}/restore"),
+                GRANT_OWNER_ACTOR,
+                Value::Null,
+                tag,
+                None
+            )
+            .await
+            .0,
+            204
+        );
+        assert_eq!(
+            f.share_get(&shared_path, GRANT_RECIPIENT_ACTOR).await.0,
+            404
+        );
+        assert_eq!(
+            f.share_get("/shared", GRANT_RECIPIENT_ACTOR).await.1["items"],
+            json!([])
+        );
+        assert_eq!(
+            f.share_get(
+                &format!("/entries/{shared}/direct-grants"),
+                GRANT_OWNER_ACTOR
+            )
+            .await
+            .1["items"],
+            json!([])
+        );
+        f.share_grant(&shared, "other").await;
+    }
+    f.close().await;
 }
 
 async fn issue_share(f: &Fixture, days: Option<u8>) -> (u16, serde_json::Value) {

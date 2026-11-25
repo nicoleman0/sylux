@@ -1,12 +1,13 @@
 #![allow(clippy::result_large_err)]
 use crate::{
     domain::{
-        authz,
+        authz, direct_grants,
         namespace::{self, NamespaceError},
         search as domain_search,
     },
     http::{
         AuthState,
+        direct_grants::{ConfirmTree, ConfirmationError, private},
         middleware::{decode_secret, origin_matches, session_cookie},
     },
 };
@@ -25,6 +26,7 @@ enum WriteFailure {
     Unauthorized,
     Forbidden,
     Namespace(NamespaceError),
+    Confirmation(ConfirmationError),
 }
 fn error(status: StatusCode, code: &str) -> Response {
     (status, Json(serde_json::json!({"code":code}))).into_response()
@@ -293,6 +295,18 @@ pub async fn search(
     headers: HeaderMap,
     Query(q): Query<SearchQuery>,
 ) -> Response {
+    read_search(s, headers, q, false).await
+}
+
+pub async fn shared_search(
+    State(s): State<AuthState>,
+    headers: HeaderMap,
+    Query(q): Query<SearchQuery>,
+) -> Response {
+    private(read_search(s, headers, q, true).await)
+}
+
+async fn read_search(s: AuthState, headers: HeaderMap, q: SearchQuery, shared: bool) -> Response {
     if q.q.is_empty() || q.q.len() > 255 || q.q.chars().any(char::is_control) {
         return error(StatusCode::BAD_REQUEST, "invalid_query");
     }
@@ -312,7 +326,7 @@ pub async fn search(
         .workers
         .read(move |db| {
             let snapshot = db.unchecked_transaction()?;
-            let reply = build_search(&snapshot, cookie, account, q, limit, key);
+            let reply = build_search(&snapshot, cookie, account, q, limit, key, shared);
             snapshot.commit()?;
             Ok(reply)
         })
@@ -331,6 +345,7 @@ fn build_search(
     q: SearchQuery,
     limit: usize,
     key: [u8; 32],
+    shared: bool,
 ) -> Result<serde_json::Value, Response> {
     let Some((current, _, _)) = authz::validate_session(
         db,
@@ -344,13 +359,26 @@ fn build_search(
         return Err(error(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
     let sort = result_sort(q.sort.as_deref())?;
-    let found = domain_search::find_sorted(db, &account, q.folder_id.as_deref(), &q.q, sort)
-        .map_err(|failure| match failure {
-            NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
-            _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-        })?;
+    let find = if shared {
+        domain_search::find_shared
+    } else {
+        domain_search::find_sorted
+    };
+    let found =
+        find(db, &account, q.folder_id.as_deref(), &q.q, sort).map_err(
+            |failure| match failure {
+                NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
+                _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            },
+        )?;
     // Keep existing root cursors valid and make older servers reject folder cursors.
-    let version = if found.folder_id.is_some() { 3 } else { 2 };
+    let version = if shared {
+        4
+    } else if found.folder_id.is_some() {
+        3
+    } else {
+        2
+    };
     let offset = if let Some(token) = q.cursor {
         let Some(cursor) = search_cursor_decode(&key, &token) else {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
@@ -469,6 +497,16 @@ pub async fn listing_folder(
     query.folder_id = Some(folder_id);
     listing(State(state), headers, Query(query)).await
 }
+
+pub async fn shared_listing_folder(
+    State(state): State<AuthState>,
+    Path(folder_id): Path<String>,
+    headers: HeaderMap,
+    Query(mut query): Query<Listing>,
+) -> Response {
+    query.folder_id = Some(folder_id);
+    private(read_listing(state, headers, query, true).await)
+}
 pub async fn create(
     State(s): State<AuthState>,
     headers: HeaderMap,
@@ -530,6 +568,7 @@ pub async fn create(
         Err(WriteFailure::Unauthorized) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
         Err(WriteFailure::Forbidden) => return error(StatusCode::FORBIDDEN, "forbidden"),
         Err(WriteFailure::Namespace(error)) => Err(error),
+        Err(WriteFailure::Confirmation(error)) => return error.into_response(),
     };
     match result {
         Ok(entry) => entry_response(StatusCode::CREATED, entry),
@@ -587,6 +626,10 @@ pub async fn listing(
     headers: HeaderMap,
     Query(q): Query<Listing>,
 ) -> Response {
+    read_listing(s, headers, q, false).await
+}
+
+async fn read_listing(s: AuthState, headers: HeaderMap, q: Listing, shared: bool) -> Response {
     let (account, _) = match principal(&s, &headers).await {
         Ok(x) => x,
         Err(r) => return error(r.0, r.1),
@@ -623,8 +666,7 @@ pub async fn listing(
             if current != account {
                 return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
             }
-            let result =
-                build_listing(&snapshot, &account, q.folder_id, q.cursor, sort, limit, key);
+            let result = build_listing(&snapshot, &account, q, sort, limit, key, shared);
             snapshot.commit()?;
             Ok(result)
         })
@@ -639,12 +681,15 @@ pub async fn listing(
 fn build_listing(
     db: &rusqlite::Connection,
     account: &str,
-    folder_id: Option<String>,
-    cursor: Option<String>,
+    query: Listing,
     sort: namespace::ListingSort,
     limit: usize,
     key: [u8; 32],
+    shared: bool,
 ) -> Result<ListingReply, Response> {
+    let Listing {
+        folder_id, cursor, ..
+    } = query;
     let root = folder_id
         .is_none()
         .then(|| namespace::root_entry(db, account))
@@ -652,14 +697,20 @@ fn build_listing(
         .map_err(folder_read_error)?;
     let folder =
         folder_id.unwrap_or_else(|| root.as_ref().expect("default root resolved").id.clone());
-    let path = namespace::folder_path(db, account, &folder).map_err(folder_read_error)?;
+    let (owner, path, version) = if shared {
+        let path = direct_grants::path(db, account, &folder).map_err(folder_read_error)?;
+        (path.owner, path.folders, 4)
+    } else {
+        let path = namespace::folder_path(db, account, &folder).map_err(folder_read_error)?;
+        (account.to_owned(), path, 3)
+    };
     let root_id = path.first().expect("validated folder path").id.clone();
     let generation = path.last().expect("validated folder path").generation;
     let after = if let Some(value) = cursor {
         let Some(decoded) = decode_cursor(&key, &value) else {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_cursor"));
         };
-        if decoded.version != 3
+        if decoded.version != version
             || decoded.actor != account
             || decoded.root != root_id
             || decoded.folder != folder
@@ -700,7 +751,7 @@ fn build_listing(
     } else {
         None
     };
-    let mut rows = namespace::list_sorted(db, account, &folder, sort, after.as_ref(), limit)
+    let mut rows = namespace::list_sorted(db, &owner, &folder, sort, after.as_ref(), limit)
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?;
     let more = rows.len() > limit;
     if more {
@@ -712,7 +763,7 @@ fn build_listing(
             encode_cursor(
                 &key,
                 &Cursor {
-                    version: 3,
+                    version,
                     actor: account.to_owned(),
                     root: root_id,
                     folder: folder.clone(),
@@ -818,6 +869,7 @@ pub async fn rename(
         Err(WriteFailure::Unauthorized) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
         Err(WriteFailure::Forbidden) => return error(StatusCode::FORBIDDEN, "forbidden"),
         Err(WriteFailure::Namespace(error)) => Err(error),
+        Err(WriteFailure::Confirmation(error)) => return error.into_response(),
     };
     match result {
         Ok(entry) => entry_response(StatusCode::OK, entry),
@@ -833,6 +885,13 @@ pub async fn rename(
 #[serde(deny_unknown_fields)]
 pub struct MoveEntry {
     parent_id: String,
+}
+
+fn sharing_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-share-confirmation")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 pub async fn move_entry(
@@ -865,6 +924,11 @@ pub async fn move_entry(
     else {
         return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
     };
+    let token = sharing_token(&headers);
+    let key = s
+        .storage
+        .as_ref()
+        .map(|storage| storage.namespace_signing_key());
     let result = s
         .workers
         .transact(move |tx| {
@@ -879,7 +943,32 @@ pub async fn move_entry(
             if !authz::csrf_matches(tx, &cookie.session_id, &csrf_token) {
                 return Ok(Err(WriteFailure::Forbidden));
             }
-            match namespace::move_entry(tx, &account, &id, &input.parent_id, &tag) {
+            let mut confirmation = None;
+            let result = namespace::move_with_sharing_check(
+                tx,
+                &account,
+                &id,
+                &input.parent_id,
+                &tag,
+                |source, destination| {
+                    ConfirmTree {
+                        key: key.as_ref(),
+                        actor: &account,
+                        entry: &id,
+                        tag: &tag,
+                        token: token.as_deref(),
+                    }
+                    .authorize(tx, source, destination)
+                    .map_err(|error| {
+                        confirmation = Some(error);
+                        NamespaceError::SharingConfirmationRequired
+                    })
+                },
+            );
+            if let Some(error) = confirmation {
+                return Ok(Err(WriteFailure::Confirmation(error)));
+            }
+            match result {
                 Ok(entry) => Ok(Ok(entry)),
                 Err(NamespaceError::Sql) => Err(rusqlite::Error::InvalidQuery),
                 Err(error) => Ok(Err(WriteFailure::Namespace(error))),
@@ -890,6 +979,7 @@ pub async fn move_entry(
         Ok(Ok(entry)) => entry_response(StatusCode::OK, entry),
         Ok(Err(WriteFailure::Unauthorized)) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
         Ok(Err(WriteFailure::Forbidden)) => error(StatusCode::FORBIDDEN, "forbidden"),
+        Ok(Err(WriteFailure::Confirmation(error))) => error.into_response(),
         Ok(Err(WriteFailure::Namespace(NamespaceError::NotFound))) => {
             error(StatusCode::NOT_FOUND, "not_found")
         }
@@ -1106,6 +1196,11 @@ async fn change_trash(s: AuthState, id: String, headers: HeaderMap, restore: boo
     else {
         return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
     };
+    let token = sharing_token(&headers);
+    let key = s
+        .storage
+        .as_ref()
+        .map(|storage| storage.namespace_signing_key());
     let result = s
         .workers
         .transact(move |tx| {
@@ -1120,11 +1215,28 @@ async fn change_trash(s: AuthState, id: String, headers: HeaderMap, restore: boo
             if !authz::csrf_matches(tx, &cookie.session_id, &csrf_token) {
                 return Ok(Err(WriteFailure::Forbidden));
             }
+            let mut confirmation = None;
             let result = if restore {
-                namespace::restore(tx, &account, &id, &tag)
+                namespace::restore_with_sharing_check(tx, &account, &id, &tag, |destination| {
+                    ConfirmTree {
+                        key: key.as_ref(),
+                        actor: &account,
+                        entry: &id,
+                        tag: &tag,
+                        token: token.as_deref(),
+                    }
+                    .authorize(tx, &[], destination)
+                    .map_err(|error| {
+                        confirmation = Some(error);
+                        NamespaceError::SharingConfirmationRequired
+                    })
+                })
             } else {
                 namespace::trash(tx, &account, &id, &tag)
             };
+            if let Some(error) = confirmation {
+                return Ok(Err(WriteFailure::Confirmation(error)));
+            }
             match result {
                 Ok(()) => Ok(Ok(())),
                 Err(NamespaceError::Sql) => Err(rusqlite::Error::InvalidQuery),
@@ -1136,6 +1248,7 @@ async fn change_trash(s: AuthState, id: String, headers: HeaderMap, restore: boo
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(WriteFailure::Unauthorized)) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
         Ok(Err(WriteFailure::Forbidden)) => error(StatusCode::FORBIDDEN, "forbidden"),
+        Ok(Err(WriteFailure::Confirmation(error))) => error.into_response(),
         Ok(Err(WriteFailure::Namespace(NamespaceError::NotFound))) => {
             error(StatusCode::NOT_FOUND, "not_found")
         }

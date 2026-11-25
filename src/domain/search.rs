@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use super::{
+    direct_grants,
     namespace::{self, Entry, MAX_ENTRY_DEPTH, NamespaceError, ResultSort},
     upload::folder_etag,
 };
@@ -118,19 +119,86 @@ pub fn find_sorted(
         ancestors.pop();
     }
     let remaining_depth = MAX_ENTRY_DEPTH - ancestors.len() as i64;
+    collect_results(
+        db,
+        folder_id,
+        query,
+        sort,
+        [Scope {
+            owner,
+            folder_id,
+            ancestors,
+            anchor: None,
+            remaining_depth,
+        }],
+    )
+}
+
+pub(crate) fn find_shared(
+    db: &Connection,
+    recipient: &str,
+    folder_id: Option<&str>,
+    query: &str,
+    sort: ResultSort,
+) -> Result<SearchResults, NamespaceError> {
+    let paths = match folder_id {
+        Some(folder) => vec![direct_grants::path(db, recipient, folder)?],
+        None => direct_grants::roots(db, recipient)?,
+    };
+    let scopes = paths.iter().map(|path| {
+        let (anchor, ancestors) = path.folders.split_last().expect("authorized shared path");
+        Scope {
+            owner: &path.owner,
+            folder_id: Some(&anchor.id),
+            ancestors: ancestors.to_vec(),
+            anchor: Some(anchor),
+            remaining_depth: MAX_ENTRY_DEPTH - path.depth,
+        }
+    });
+    collect_results(db, folder_id, query, sort, scopes)
+}
+
+struct Scope<'a> {
+    owner: &'a str,
+    folder_id: Option<&'a str>,
+    ancestors: Vec<Entry>,
+    anchor: Option<&'a Entry>,
+    remaining_depth: i64,
+}
+
+type RankedHit = (String, String, SearchHit);
+
+fn collect_scope(
+    db: &Connection,
+    scope: Scope<'_>,
+    needle: &str,
+    digest: &mut Sha256,
+    matches: &mut Vec<RankedHit>,
+) -> Result<(), NamespaceError> {
+    let Scope {
+        owner,
+        folder_id,
+        ancestors,
+        anchor,
+        remaining_depth,
+    } = scope;
     let mut stmt = db.prepare(LIVE_SQL).map_err(|_| NamespaceError::Sql)?;
     let rows: Vec<(Entry, Option<i64>, Option<i64>)> = stmt
         .query_map(params![folder_id, owner, remaining_depth], |r| {
             let id: String = r.get(0)?;
             let generation: i64 = r.get(4)?;
             Ok((
-                Entry {
-                    etag: folder_etag(&id, generation as u64),
-                    id,
-                    parent_id: r.get(1)?,
-                    name: r.get(2)?,
-                    kind: r.get(3)?,
-                    generation,
+                if let Some(anchor) = anchor.filter(|anchor| anchor.id == id) {
+                    anchor.clone()
+                } else {
+                    Entry {
+                        etag: folder_etag(&id, generation as u64),
+                        id,
+                        parent_id: r.get(1)?,
+                        name: r.get(2)?,
+                        kind: r.get(3)?,
+                        generation,
+                    }
                 },
                 r.get(5)?,
                 r.get(6)?,
@@ -143,17 +211,14 @@ pub fn find_sorted(
         .iter()
         .map(|(entry, _, _)| (entry.id.as_str(), entry))
         .collect();
-    let mut digest = Sha256::new();
     for ancestor in &ancestors {
-        fingerprint_entry(&mut digest, ancestor, None, None);
+        fingerprint_entry(digest, ancestor, None, None);
     }
-    let needle = fold(query);
-    let mut matches = Vec::new();
     for (entry, size, modified_at) in &rows {
-        fingerprint_entry(&mut digest, entry, *size, *modified_at);
+        fingerprint_entry(digest, entry, *size, *modified_at);
         if entry.parent_id.is_none()
             || folder_id == Some(entry.id.as_str())
-            || !fold(&entry.name).contains(&needle)
+            || !fold(&entry.name).contains(needle)
         {
             continue;
         }
@@ -198,6 +263,22 @@ pub fn find_sorted(
                 modified_at: *modified_at,
             },
         ));
+    }
+    Ok(())
+}
+
+fn collect_results<'a>(
+    db: &Connection,
+    folder_id: Option<&str>,
+    query: &str,
+    sort: ResultSort,
+    scopes: impl IntoIterator<Item = Scope<'a>>,
+) -> Result<SearchResults, NamespaceError> {
+    let mut digest = Sha256::new();
+    let needle = fold(query);
+    let mut matches = Vec::new();
+    for scope in scopes {
+        collect_scope(db, scope, &needle, &mut digest, &mut matches)?;
     }
     matches.sort_by(|a, b| {
         let name = || a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1));

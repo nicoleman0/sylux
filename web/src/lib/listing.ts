@@ -79,9 +79,9 @@ export class ListingApi {
   trash(entryId: string, etag: string): Promise<void> {
     return this.client.request(`/entries/${encodeURIComponent(entryId)}`, { method: 'DELETE', headers: { 'If-Match': etag } });
   }
-  move(entryId: string, parentId: string, etag: string): Promise<Entry> {
+  move(entryId: string, parentId: string, etag: string, confirmation?: string): Promise<Entry> {
     return this.client.request(`/entries/${encodeURIComponent(entryId)}/move`, {
-      method: 'POST', headers: { 'If-Match': etag }, body: { parent_id: parentId },
+      method: 'POST', headers: { 'If-Match': etag, ...(confirmation ? { 'X-Share-Confirmation': confirmation } : {}) }, body: { parent_id: parentId },
     });
   }
   async prepareCopy(entryId: string, parentId: string, etag: string): Promise<string> {
@@ -157,8 +157,8 @@ export class ListingApi {
   async removalStatus(operationId: string): Promise<RemovalStatus> {
     return this.validateRemoval(await this.client.request(`/trash/removals/${encodeURIComponent(operationId)}`), operationId);
   }
-  restore(entryId: string, etag: string): Promise<void> {
-    return this.client.request(`/trash/${encodeURIComponent(entryId)}/restore`, { method: 'POST', headers: { 'If-Match': etag } });
+  restore(entryId: string, etag: string, confirmation?: string): Promise<void> {
+    return this.client.request(`/trash/${encodeURIComponent(entryId)}/restore`, { method: 'POST', headers: { 'If-Match': etag, ...(confirmation ? { 'X-Share-Confirmation': confirmation } : {}) } });
   }
   /** Checks a selection and returns a single-use link that streams it as one ZIP. */
   archive(entryIds: string[]): Promise<ArchiveTicket> {

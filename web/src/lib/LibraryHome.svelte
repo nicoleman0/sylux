@@ -8,13 +8,14 @@
   import { HttpError } from '$lib/api';
   import type { Folder } from '$lib/listing';
 
-  let { items, pending, error, onopen, onretry, oncreate }: {
+  let { items, pending, error, onopen, onretry, oncreate, onshare }: {
     items: Folder[];
     pending: boolean;
     error: string;
     onopen: (folder: Folder) => void;
     onretry: () => void;
     oncreate: (name: string) => Promise<Folder>;
+    onshare: (folder: Folder, trigger: HTMLElement) => void;
   } = $props();
 
   let open = $state(false);
@@ -67,11 +68,11 @@
   {#if items.length}
     <ul aria-label="Private libraries" class="divide-y rounded-lg border">
       {#each items as folder (folder.id)}
-        <li><a class="flex min-h-11 items-center gap-3 rounded-md px-3 py-2 font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+        <li class="flex items-center gap-2 pr-2"><a class="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-md px-3 py-2 font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
           href={`#files/${encodeURIComponent(folder.id)}`} onclick={(event) => openFromLink(event, folder)}>
           <FolderIcon class="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
           <span class="min-w-0 [overflow-wrap:anywhere]">{folder.name}</span>
-        </a></li>
+        </a><Button variant="ghost" size="sm" aria-label={`Share ${folder.name}`} onclick={(event) => onshare(folder, event.currentTarget)}>Share</Button></li>
       {/each}
     </ul>
   {/if}

@@ -4,6 +4,7 @@ pub mod coordinator;
 #[cfg(feature = "test-harness")]
 pub mod coordinator_test_support;
 pub(crate) mod copy;
+pub(crate) mod direct_grants;
 pub mod ids;
 pub mod mutation;
 pub mod names;

@@ -827,7 +827,7 @@ fn valid_seed_passes_product_recovery_checks() {
 fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication() {
     use sylux::domain::namespace;
     use sylux::persistence::root;
-    for version in [1, 2, 3] {
+    for version in [1, 2, 3, 4] {
         for interrupted in [false, true] {
             let (owner, path) = fixture(&format!("legacy-v{version}-{interrupted}"));
             fs::remove_file(&path).unwrap();
@@ -872,8 +872,11 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
             if version >= 2 {
                 schema::migrate_v1(&db, None).unwrap();
             }
-            if version == 3 {
+            if version >= 3 {
                 schema::migrate_v2(&db, None).unwrap();
+            }
+            if version == 4 {
+                schema::migrate_v3(&db, None).unwrap();
             }
             if interrupted {
                 use sha2::{Digest, Sha256};
@@ -882,6 +885,7 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                     1 => schema::migrate_v1,
                     2 => schema::migrate_v2,
                     3 => schema::migrate_v3,
+                    4 => schema::migrate_direct_grants,
                     _ => unreachable!(),
                 };
                 migrate(&db, Some(hash.as_slice())).unwrap();
@@ -960,6 +964,7 @@ fn library_migration_rolls_back_schema_and_version_on_failure() {
     );
     db.execute_batch("DROP INDEX entry_library_name").unwrap();
     schema::migrate_v3(&db, None).unwrap();
+    schema::migrate_direct_grants(&db, None).unwrap();
     assert_eq!(
         schema::apply_migrations(&db).unwrap(),
         schema::MigrationOutcome::AlreadyCurrent
