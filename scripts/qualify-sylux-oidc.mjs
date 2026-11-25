@@ -486,6 +486,7 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         const replay = await context();
         check(oldCookies.length > 0, 'Revocation control requires the original cookie');
         await replay.addCookies(oldCookies);
+        check((await me(replay)).account_id === owner.account_id, 'Copied pre-revocation session did not authenticate as the owner');
         await api(adminContext, 'POST', `/auth/oidc/approvals/${identity}/revoke`, 204, { csrf: adminCsrf });
         await api(renamedBrowser, 'GET', '/me', 401);
         await api(adminContext, 'POST', `/accounts/${owner.account_id}/enable`, 409, { csrf: adminCsrf });
@@ -500,7 +501,6 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         await expectBytes(restoredOwner, `/entries/${liveFile.id}/content`, liveFile.bytes);
         await expectBytes(restoredOwner, `/entries/${trashFile.id}/content`, trashFile.bytes);
         await api(replay, 'GET', '/me', 401);
-        await api(ownerContext, 'GET', '/me', 401);
         console.log('L4 real provider: fresh approval restored the original subject, owner and exact bytes. Old sessions stayed revoked.');
 
         step('L5 revoked key and same-name recreation');
