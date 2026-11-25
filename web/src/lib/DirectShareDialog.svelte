@@ -168,7 +168,7 @@
           {#if publicationId}
             This library will disappear from Shared with all. Any separate direct shares stay in place.
           {:else}
-            Everyone signed in now or in the future can browse, search, preview PDFs and download individual files in this library, including files added later.
+            Everyone signed in now or in the future can browse, search, preview PDFs and download individual files in this library, including files added later. WebDAV cannot upload files, create folders or move new content into this published library.
           {/if}
         {:else}
           Accounts you add can browse, search and download files in this {folder.parent_id === null ? 'library' : 'folder'}. They cannot change anything.

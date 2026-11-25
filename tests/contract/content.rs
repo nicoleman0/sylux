@@ -944,6 +944,77 @@ async fn direct_grant_listing_and_search_paginate_with_isolated_cursors() {
     f.share_grant(&shared, "other").await;
     f.share_grant(&shared, "unrelated-admin").await;
 
+    let (status, library) = f
+        .share_request(
+            "POST",
+            "/libraries",
+            GRANT_OWNER_ACTOR,
+            json!({"name":"Search publication"}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let published = library["id"].as_str().unwrap();
+    f.share_folder(published, "Report C").await;
+    f.share_folder(published, "Report D").await;
+    assert_eq!(
+        f.share_request(
+            "POST",
+            &format!("/libraries/{published}/publication"),
+            GRANT_OWNER_ACTOR,
+            json!(null),
+            None,
+            None
+        )
+        .await
+        .0,
+        200
+    );
+    for folder in [&shared, published] {
+        let direct = format!("/shared/search?q=Report&folder_id={folder}&limit=1");
+        let public = format!("/published/search?q=Report&folder_id={folder}&limit=1");
+        let (status, direct_page) = f.share_get(&direct, GRANT_RECIPIENT_ACTOR).await;
+        assert_eq!(status, 200);
+        let (status, public_page) = f.share_get(&public, GRANT_RECIPIENT_ACTOR).await;
+        assert_eq!(status, 200);
+        for (url, page, other) in [
+            (&direct, &direct_page, &public),
+            (&public, &public_page, &direct),
+        ] {
+            let cursor = page["next_cursor"].as_str().unwrap();
+            assert_eq!(
+                f.share_get(&format!("{url}&cursor={cursor}"), GRANT_RECIPIENT_ACTOR)
+                    .await
+                    .0,
+                200
+            );
+            let (status, error) = f
+                .share_get(&format!("{other}&cursor={cursor}"), GRANT_RECIPIENT_ACTOR)
+                .await;
+            assert_eq!(status, 400);
+            assert_eq!(error["code"], "invalid_cursor");
+        }
+    }
+    for (url, expected) in [
+        ("/shared/search?q=Report", &first),
+        ("/published/search?q=Report", &published.to_string()),
+    ] {
+        let (status, page) = f.share_get(url, GRANT_RECIPIENT_ACTOR).await;
+        assert_eq!(status, 200);
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        if url.starts_with("/shared/") {
+            assert!(items.iter().any(|v| v["entry"]["id"] == *expected));
+        } else {
+            assert!(
+                items
+                    .iter()
+                    .all(|v| v["entry"]["id"] != first && v["entry"]["id"] != second)
+            );
+        }
+    }
+
     for (private, shared_url, other_scope, id_field) in [
         (
             format!("/folders/{shared}/children?limit=1"),
@@ -2481,6 +2552,33 @@ async fn publication_live_tree_moves_and_restores_recheck_consent() {
         )
         .await
     };
+
+    let carried = f.share_folder(&destination, "Carried grant").await;
+    f.share_grant(&carried, "other").await;
+    let (_, path) = f
+        .share_get(&format!("/folders/{carried}/path"), GRANT_OWNER_ACTOR)
+        .await;
+    let tag = path["items"].as_array().unwrap().last().unwrap()["etag"]
+        .as_str()
+        .unwrap();
+    let (status, confirmation) = move_to(&carried, ROOT, tag, None).await;
+    assert_eq!(status, 409);
+    assert_eq!(confirmation["confirmation"]["removes_access_for_all"], true);
+    assert_eq!(
+        confirmation["confirmation"]["carried_recipients"],
+        json!(["other"])
+    );
+    assert_eq!(
+        move_to(
+            &carried,
+            ROOT,
+            tag,
+            confirmation["confirmation"]["token"].as_str()
+        )
+        .await
+        .0,
+        200
+    );
 
     let mut tag = sylux::domain::upload::folder_etag(SHARE_FILE, 1);
     for id in [SHARE_FILE, folder.as_str()] {

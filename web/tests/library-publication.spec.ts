@@ -49,6 +49,7 @@ for (const [width, scheme] of [[1280, 'light'], [390, 'dark']] as const) {
     await review.press('Enter');
     await expect(button('Cancel')).toBeFocused();
     await expect(popup.getByRole('heading')).toHaveText(`Publish ${name}?`);
+    await expect(popup.getByText('WebDAV cannot upload files, create folders or move new content into this published library.', { exact: false })).toBeVisible();
     await expect(page.locator('html')).toHaveCSS('color-scheme', scheme);
     expect((await popup.boundingBox())!.width).toBeLessThan(width);
     expect(await popup.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
