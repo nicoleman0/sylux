@@ -137,13 +137,14 @@ pub fn find_sorted(
 pub(crate) fn find_shared(
     db: &Connection,
     recipient: &str,
+    scope: direct_grants::IncomingScope,
     folder_id: Option<&str>,
     query: &str,
     sort: ResultSort,
 ) -> Result<SearchResults, NamespaceError> {
     let paths = match folder_id {
         Some(folder) => vec![direct_grants::path(db, recipient, folder)?],
-        None => direct_grants::roots(db, recipient)?,
+        None => direct_grants::roots(db, recipient, scope)?,
     };
     let scopes = paths.iter().map(|path| {
         let (anchor, ancestors) = path.folders.split_last().expect("authorized shared path");

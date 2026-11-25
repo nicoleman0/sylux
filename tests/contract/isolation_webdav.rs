@@ -1059,3 +1059,115 @@ async fn webdav_respects_direct_grant_boundaries_on_reads_moves_and_trash() {
     assert_eq!(incoming, serde_json::json!({"items":[]}));
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn webdav_publication_preserves_owner_reads_and_blocks_unconfirmed_exposure() {
+    use serde_json::Value;
+
+    let f = Fixture::with_webdav(true).await;
+    let (_, owner) = f.credential(0, "Publication desktop", false).await;
+    let (_, recipient) = f.credential(1, "Recipient desktop", false).await;
+    let mutation = f.mutation_headers(CSRF);
+    let (status, _, body) = f
+        .request(
+            "POST",
+            "/libraries",
+            cookie(0),
+            &mutation,
+            r#"{"name":"Published"}"#,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let root: Value = serde_json::from_slice(&body).unwrap();
+    let root = root["id"].as_str().unwrap();
+    let publish_path = format!("/libraries/{root}/publication");
+    let held = "/dav/Published/held.bin";
+    let sibling = "/dav/Files/private-file.bin";
+    let published = "/dav/Published/read.bin";
+    let moved_out = "/dav/Files/moved-out.bin";
+    let bookmark = "/shared/entries/00000000000000000000000000000302/content";
+    let dav = async |method, path, body| {
+        f.request(method, path, None, std::slice::from_ref(&owner), body)
+            .await
+    };
+    let move_to = async |from, to: &str| {
+        f.request(
+            "MOVE",
+            from,
+            None,
+            &[owner.clone(), ("Destination", to.into())],
+            "",
+        )
+        .await
+        .0
+    };
+    let read = async || f.request("GET", bookmark, cookie(1), &[], "").await;
+
+    assert_eq!(move_to(sibling, published).await, 201);
+    assert_eq!(read().await.0, 404);
+
+    f.upload_commit.arm();
+    let (upload, (status, _, publication)) =
+        tokio::join!(dav("PUT", held, "unconfirmed private bytes"), async {
+            tokio::time::timeout(Duration::from_secs(5), f.upload_commit.wait_paused())
+                .await
+                .unwrap();
+            let response = f
+                .request("POST", &publish_path, cookie(0), &mutation, "")
+                .await;
+            f.upload_commit.release();
+            response
+        });
+    assert_eq!(status, 200);
+    assert_eq!(upload.0, 403);
+    assert_eq!(dav("GET", held, "").await.0, 404);
+
+    assert_eq!(read().await.2, b"synthetic isolation payload");
+    assert_eq!(
+        dav("GET", published, "").await.2,
+        b"synthetic isolation payload"
+    );
+    assert_eq!(
+        f.request("GET", published, None, std::slice::from_ref(&recipient), "")
+            .await
+            .0,
+        404
+    );
+    let (status, _, xml) = f
+        .request(
+            "PROPFIND",
+            "/dav/",
+            None,
+            &[recipient, ("Depth", "1".into())],
+            "",
+        )
+        .await;
+    assert_eq!(status, 207);
+    assert!(!std::str::from_utf8(&xml).unwrap().contains("Published"));
+    assert_eq!(dav("MKCOL", "/dav/Published/new/", "").await.0, 403);
+    assert_eq!(
+        dav("PUT", "/dav/Published/new.bin", "new bytes").await.0,
+        403
+    );
+    assert_eq!(move_to(published, moved_out).await, 201);
+    assert_eq!(read().await.0, 404);
+    assert_eq!(move_to(moved_out, published).await, 403);
+    assert_eq!(
+        dav("GET", moved_out, "").await.2,
+        b"synthetic isolation payload"
+    );
+    assert_eq!(read().await.0, 404);
+
+    let state: Value = serde_json::from_slice(&publication).unwrap();
+    let withdrawal = format!("/library-publications/{}", state["id"].as_str().unwrap());
+    assert_eq!(
+        f.request("DELETE", &withdrawal, cookie(0), &mutation, "")
+            .await
+            .0,
+        204
+    );
+    assert_eq!(move_to(moved_out, published).await, 201);
+    assert_eq!(dav("PUT", held, "now private").await.0, 201);
+    assert_eq!(read().await.0, 404);
+    f.close().await;
+}

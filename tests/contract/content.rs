@@ -944,6 +944,77 @@ async fn direct_grant_listing_and_search_paginate_with_isolated_cursors() {
     f.share_grant(&shared, "other").await;
     f.share_grant(&shared, "unrelated-admin").await;
 
+    let (status, library) = f
+        .share_request(
+            "POST",
+            "/libraries",
+            GRANT_OWNER_ACTOR,
+            json!({"name":"Search publication"}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let published = library["id"].as_str().unwrap();
+    f.share_folder(published, "Report C").await;
+    f.share_folder(published, "Report D").await;
+    assert_eq!(
+        f.share_request(
+            "POST",
+            &format!("/libraries/{published}/publication"),
+            GRANT_OWNER_ACTOR,
+            json!(null),
+            None,
+            None
+        )
+        .await
+        .0,
+        200
+    );
+    for folder in [&shared, published] {
+        let direct = format!("/shared/search?q=Report&folder_id={folder}&limit=1");
+        let public = format!("/published/search?q=Report&folder_id={folder}&limit=1");
+        let (status, direct_page) = f.share_get(&direct, GRANT_RECIPIENT_ACTOR).await;
+        assert_eq!(status, 200);
+        let (status, public_page) = f.share_get(&public, GRANT_RECIPIENT_ACTOR).await;
+        assert_eq!(status, 200);
+        for (url, page, other) in [
+            (&direct, &direct_page, &public),
+            (&public, &public_page, &direct),
+        ] {
+            let cursor = page["next_cursor"].as_str().unwrap();
+            assert_eq!(
+                f.share_get(&format!("{url}&cursor={cursor}"), GRANT_RECIPIENT_ACTOR)
+                    .await
+                    .0,
+                200
+            );
+            let (status, error) = f
+                .share_get(&format!("{other}&cursor={cursor}"), GRANT_RECIPIENT_ACTOR)
+                .await;
+            assert_eq!(status, 400);
+            assert_eq!(error["code"], "invalid_cursor");
+        }
+    }
+    for (url, expected) in [
+        ("/shared/search?q=Report", &first),
+        ("/published/search?q=Report", &published.to_string()),
+    ] {
+        let (status, page) = f.share_get(url, GRANT_RECIPIENT_ACTOR).await;
+        assert_eq!(status, 200);
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        if url.starts_with("/shared/") {
+            assert!(items.iter().any(|v| v["entry"]["id"] == *expected));
+        } else {
+            assert!(
+                items
+                    .iter()
+                    .all(|v| v["entry"]["id"] != first && v["entry"]["id"] != second)
+            );
+        }
+    }
+
     for (private, shared_url, other_scope, id_field) in [
         (
             format!("/folders/{shared}/children?limit=1"),
@@ -1958,5 +2029,709 @@ async fn file_share_admission_bounds_public_reads_before_sqlite() {
         assert_eq!(bytes, b"synthetic\0content\xff\x80");
     }
     assert_eq!(f.request("GET", path, None, &[]).await.0, 200);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn publication_lifecycle_and_independent_direct_grants() {
+    use serde_json::{Value, json};
+
+    let f = Fixture::new("library-publication").await;
+    f.seed_grant_admin().await;
+    let (status, library) = f
+        .share_request(
+            "POST",
+            "/libraries",
+            GRANT_OWNER_ACTOR,
+            json!({"name": "Published library"}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let root = library["id"].as_str().unwrap();
+    let folder = f.share_folder(root, "Published folder").await;
+    let private = f.share_folder(ROOT, "Private sibling").await;
+    let move_url = format!("/entries/{SHARE_FILE}/move");
+    let (status, _) = f
+        .share_request(
+            "POST",
+            &move_url,
+            GRANT_OWNER_ACTOR,
+            json!({"parent_id": folder}),
+            Some(&sylux::domain::upload::folder_etag(SHARE_FILE, 1)),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    let publish_url = format!("/libraries/{root}/publication");
+    let root_path = format!("/shared/folders/{root}/path");
+    let folder_path = format!("/shared/folders/{folder}/path");
+    let private_path = format!("/shared/folders/{private}/path");
+    let bookmark = format!("/shared/entries/{SHARE_FILE}");
+    let content = format!("{bookmark}/content");
+    let publish = async || {
+        let (status, value) = f
+            .share_request(
+                "POST",
+                &publish_url,
+                GRANT_OWNER_ACTOR,
+                Value::Null,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, 200);
+        value["id"].as_str().unwrap().to_owned()
+    };
+    let withdraw = async |id: &str| {
+        f.share_request(
+            "DELETE",
+            &format!("/library-publications/{id}"),
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            None,
+            None,
+        )
+        .await
+        .0
+    };
+    for actor in [GRANT_RECIPIENT_ACTOR, GRANT_ADMIN_ACTOR] {
+        assert_eq!(
+            f.share_request("POST", &publish_url, actor, Value::Null, None, None)
+                .await
+                .0,
+            404
+        );
+    }
+    assert_eq!(
+        f.share_request(
+            "POST",
+            &format!("/libraries/{folder}/publication"),
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            None,
+            None
+        )
+        .await
+        .0,
+        404
+    );
+
+    let visible = async |actor, ids: &[&str]| {
+        let (status, result) = f.share_get("/published", actor).await;
+        assert_eq!(status, 200);
+        assert_eq!(result["items"].as_array().unwrap().len(), ids.len());
+        for id in ids {
+            assert!(
+                result["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["entry"]["id"] == *id)
+            );
+        }
+    };
+    let first = publish().await;
+    assert_eq!(publish().await, first);
+    for actor in [GRANT_RECIPIENT_ACTOR, GRANT_ADMIN_ACTOR] {
+        visible(actor, &[root]).await;
+        assert_eq!(
+            f.share_get(&folder_path, actor).await.1["items"][0]["id"],
+            root
+        );
+        assert_eq!(f.share_get(&private_path, actor).await.0, 404);
+        assert_eq!(f.share_get(&bookmark, actor).await.0, 200);
+        assert_eq!(
+            f.share_get("/published/search?q=unsafe", actor).await.1["items"][0]["entry"]["id"],
+            SHARE_FILE
+        );
+        assert_eq!(
+            f.share_get("/published/search?q=Private", actor).await.1["items"],
+            json!([])
+        );
+        assert_eq!(
+            f.share_request(
+                "DELETE",
+                &format!("/library-publications/{first}"),
+                actor,
+                Value::Null,
+                None,
+                None
+            )
+            .await
+            .0,
+            404
+        );
+    }
+    for path in [
+        "/published",
+        "/published/search?q=unsafe",
+        &folder_path,
+        &bookmark,
+        &content,
+    ] {
+        assert_eq!(f.request("GET", path, None, &[]).await.0, 401);
+    }
+    let auth = Some(auth(OTHER_SESSION, OTHER_SECRET));
+    let (status, headers, bytes) = f.request("GET", &content, auth, &[]).await;
+    assert_eq!(
+        (status, bytes.as_slice()),
+        (200, b"synthetic\0content\xff\x80".as_slice())
+    );
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(
+        f.request("GET", &content, auth, &[("Range", "bytes=0-2".into())])
+            .await
+            .0,
+        206
+    );
+
+    let new_account =
+        json!({"handle":"new-member","password":"disposable passphrase for new member"});
+    assert_eq!(
+        f.share_request(
+            "POST",
+            "/accounts",
+            GRANT_ADMIN_ACTOR,
+            new_account.clone(),
+            None,
+            None
+        )
+        .await
+        .0,
+        204
+    );
+    let (status, anonymous, body) = f.request("GET", "/auth/csrf", None, &[]).await;
+    assert_eq!(status, 200);
+    let csrf: Value = serde_json::from_slice(&body).unwrap();
+    let (status, signed_in, _) = f
+        .request_with_body(
+            "POST",
+            "/auth/local",
+            None,
+            &[
+                ("Origin", SHARE_ORIGIN.to_owned()),
+                (
+                    "Cookie",
+                    anonymous["set-cookie"]
+                        .split(';')
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                ),
+                (
+                    "X-CSRF-Token",
+                    csrf["csrf_token"].as_str().unwrap().to_owned(),
+                ),
+                ("Content-Type", "application/json".into()),
+            ],
+            new_account.to_string().as_bytes(),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let late_cookie = (
+        "Cookie",
+        signed_in["set-cookie"]
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned(),
+    );
+    for path in [
+        "/published",
+        "/published/search?q=unsafe",
+        &root_path,
+        &content,
+    ] {
+        assert_eq!(
+            f.request("GET", path, None, std::slice::from_ref(&late_cookie))
+                .await
+                .0,
+            200
+        );
+    }
+
+    let file_tag = f.share_get(&bookmark, GRANT_RECIPIENT_ACTOR).await.1["entry"]["etag"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (method, path, body) in [
+        (
+            "PATCH",
+            format!("/entries/{SHARE_FILE}"),
+            json!({"name":"changed"}),
+        ),
+        ("DELETE", format!("/entries/{SHARE_FILE}"), Value::Null),
+        ("POST", move_url, json!({"parent_id":OTHER_ROOT})),
+        (
+            "POST",
+            format!("/folders/{folder}/children"),
+            json!({"name":"Foreign upload"}),
+        ),
+        (
+            "POST",
+            format!("/entries/{folder}/direct-grants"),
+            json!({"handle":"unrelated-admin"}),
+        ),
+        ("POST", "/archives".into(), json!({"entry_ids":[root]})),
+    ] {
+        assert_eq!(
+            f.share_request(
+                method,
+                &path,
+                GRANT_RECIPIENT_ACTOR,
+                body,
+                Some(&file_tag),
+                None
+            )
+            .await
+            .0,
+            404
+        );
+    }
+    let (status, copy) = f
+        .share_request(
+            "POST",
+            &format!("/entries/{SHARE_FILE}/copy-ticket"),
+            GRANT_RECIPIENT_ACTOR,
+            json!({"parent_id":OTHER_ROOT}),
+            Some(&file_tag),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        f.share_request("POST", "/copies", GRANT_RECIPIENT_ACTOR, copy, None, None)
+            .await
+            .0,
+        404
+    );
+    let (status, zip) = f
+        .share_request(
+            "POST",
+            "/archives",
+            GRANT_OWNER_ACTOR,
+            json!({"entry_ids":[&folder]}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let zip = zip["url"].as_str().unwrap();
+    assert_eq!(f.request("GET", zip, auth, &[]).await.0, 404);
+    assert_eq!(
+        f.request("GET", zip, Some((SESSION, SECRET)), &[]).await.0,
+        200
+    );
+
+    f.change_grant_authority(OTHER, "disable", GRANT_RECIPIENT_ACTOR)
+        .await;
+    assert_eq!(
+        f.share_get("/published", GRANT_RECIPIENT_ACTOR).await.0,
+        401
+    );
+    assert_eq!(f.request("GET", &content, auth, &[]).await.0, 401);
+    visible(GRANT_ADMIN_ACTOR, &[root]).await;
+    f.change_grant_authority(OTHER, "enable", GRANT_RECIPIENT_ACTOR)
+        .await;
+    visible(GRANT_RECIPIENT_ACTOR, &[root]).await;
+    assert_eq!(f.request("GET", &content, auth, &[]).await.0, 200);
+
+    let (status, link) = f
+        .share_request(
+            "POST",
+            "/share-links",
+            GRANT_OWNER_ACTOR,
+            json!({"entry_id":SHARE_FILE}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let anonymous_link = link["url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix(SHARE_ORIGIN)
+        .unwrap();
+    assert_eq!(
+        f.request("GET", anonymous_link, None, &[]).await.2,
+        BINARY_FILE.1
+    );
+    let direct = f.share_grant(&folder, "other").await;
+    assert_eq!(
+        f.share_get("/shared/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+            .await
+            .1["items"][0]["location"][0]["id"],
+        folder
+    );
+    assert_eq!(withdraw(&first).await, 204);
+    assert_eq!(
+        f.request("GET", anonymous_link, None, &[]).await.2,
+        BINARY_FILE.1
+    );
+    visible(GRANT_RECIPIENT_ACTOR, &[]).await;
+    assert_eq!(
+        f.share_get("/shared", GRANT_RECIPIENT_ACTOR).await.1["items"][0]["entry"]["id"],
+        folder
+    );
+    assert_eq!(
+        f.share_get("/shared/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+            .await
+            .1["items"][0]["location"][0]["id"],
+        folder
+    );
+    assert_eq!(f.share_get(&root_path, GRANT_RECIPIENT_ACTOR).await.0, 404);
+    assert_eq!(f.share_get(&bookmark, GRANT_RECIPIENT_ACTOR).await.0, 200);
+    assert_eq!(f.share_get(&bookmark, GRANT_ADMIN_ACTOR).await.0, 404);
+    f.share_revoke(&direct).await;
+    assert_eq!(
+        f.request(
+            "GET",
+            &content,
+            auth,
+            &[("If-None-Match", headers["etag"].clone())]
+        )
+        .await
+        .0,
+        404
+    );
+
+    let second = publish().await;
+    let direct = f.share_grant(&folder, "other").await;
+    f.share_revoke(&direct).await;
+    assert_eq!(
+        f.share_get("/shared", GRANT_RECIPIENT_ACTOR).await.1["items"],
+        json!([])
+    );
+    assert_eq!(
+        f.share_get("/shared/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+            .await
+            .1["items"],
+        json!([])
+    );
+    assert_eq!(withdraw(&first).await, 404);
+    visible(GRANT_RECIPIENT_ACTOR, &[root]).await;
+    assert_eq!(f.share_get(&bookmark, GRANT_RECIPIENT_ACTOR).await.0, 200);
+    assert_eq!(
+        f.share_get("/published/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+            .await
+            .1["items"][0]["location"][0]["id"],
+        root
+    );
+    assert_eq!(withdraw(&second).await, 204);
+    visible(GRANT_RECIPIENT_ACTOR, &[]).await;
+    assert_eq!(
+        f.share_get("/published/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+            .await
+            .1["items"],
+        json!([])
+    );
+    assert_eq!(f.share_get(&bookmark, GRANT_RECIPIENT_ACTOR).await.0, 404);
+
+    let (publication, ()) = tokio::join!(
+        f.share_request(
+            "POST",
+            &publish_url,
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            None,
+            None
+        ),
+        f.change_grant_authority(OWNER, "disable", GRANT_OWNER_ACTOR),
+    );
+    assert!(matches!(publication.0, 200 | 401));
+    visible(GRANT_RECIPIENT_ACTOR, &[]).await;
+    assert_eq!(f.request("GET", &content, auth, &[]).await.0, 404);
+    assert_eq!(
+        f.share_request(
+            "POST",
+            &publish_url,
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            None,
+            None
+        )
+        .await
+        .0,
+        401
+    );
+    f.change_grant_authority(OWNER, "enable", GRANT_OWNER_ACTOR)
+        .await;
+    visible(GRANT_RECIPIENT_ACTOR, &[]).await;
+    assert_eq!(
+        f.share_get("/published/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+            .await
+            .1["items"],
+        json!([])
+    );
+    assert_eq!(f.share_get(&bookmark, GRANT_RECIPIENT_ACTOR).await.0, 404);
+    let third = publish().await;
+    assert_ne!(third, second);
+    f.change_grant_authority(OWNER, "disable", GRANT_OWNER_ACTOR)
+        .await;
+    visible(GRANT_RECIPIENT_ACTOR, &[]).await;
+    f.change_grant_authority(OWNER, "enable", GRANT_OWNER_ACTOR)
+        .await;
+    assert_eq!(withdraw(&third).await, 404);
+    assert_eq!(f.request("GET", &content, auth, &[]).await.0, 404);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn publication_live_tree_moves_and_restores_recheck_consent() {
+    use serde_json::{Value, json};
+
+    let f = Fixture::new("publication-tree").await;
+    let (status, library) = f
+        .share_request(
+            "POST",
+            "/libraries",
+            GRANT_OWNER_ACTOR,
+            json!({"name":"Published tree"}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let root = library["id"].as_str().unwrap();
+    let destination = f.share_folder(root, "Published destination").await;
+    let retained = f.share_folder(&destination, "Still shared").await;
+    let folder = f.share_folder(ROOT, "Nested project").await;
+    let publish = async || {
+        let (status, reply) = f
+            .share_request(
+                "POST",
+                &format!("/libraries/{root}/publication"),
+                GRANT_OWNER_ACTOR,
+                Value::Null,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, 200);
+        reply["id"].as_str().unwrap().to_owned()
+    };
+    let mut publication = publish().await;
+    let bookmark = format!("/shared/entries/{SHARE_FILE}/content");
+    let listing = format!("/shared/folders/{destination}/children");
+    let scoped_search = format!("/published/search?folder_id={destination}&q=unsafe");
+    let recipient = Some((OTHER_SESSION, OTHER_SECRET));
+    let check_reachability = async |id, visible| {
+        let (status, entries) = f.share_get(&listing, GRANT_RECIPIENT_ACTOR).await;
+        assert_eq!(status, 200);
+        let items = entries["items"].as_array().unwrap();
+        assert!(items.iter().any(|item| item["id"] == retained));
+        assert_eq!(items.iter().any(|item| item["id"] == id), visible);
+        let (status, results) = f.share_get(&scoped_search, GRANT_RECIPIENT_ACTOR).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            results["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["entry"]["id"] == SHARE_FILE),
+            visible
+        );
+        let (status, _, bytes) = f.request("GET", &bookmark, recipient, &[]).await;
+        if visible {
+            assert_eq!(status, 200);
+            assert_eq!(bytes, BINARY_FILE.1);
+        } else {
+            assert_eq!(status, 404);
+        }
+    };
+    let move_to = async |id: &str, parent: &str, tag: &str, token: Option<&str>| {
+        f.share_request(
+            "POST",
+            &format!("/entries/{id}/move"),
+            GRANT_OWNER_ACTOR,
+            json!({"parent_id":parent}),
+            Some(tag),
+            token,
+        )
+        .await
+    };
+
+    let carried = f.share_folder(&destination, "Carried grant").await;
+    f.share_grant(&carried, "other").await;
+    let (_, path) = f
+        .share_get(&format!("/folders/{carried}/path"), GRANT_OWNER_ACTOR)
+        .await;
+    let tag = path["items"].as_array().unwrap().last().unwrap()["etag"]
+        .as_str()
+        .unwrap();
+    let (status, confirmation) = move_to(&carried, ROOT, tag, None).await;
+    assert_eq!(status, 409);
+    assert_eq!(confirmation["confirmation"]["removes_access_for_all"], true);
+    assert_eq!(
+        confirmation["confirmation"]["carried_recipients"],
+        json!(["other"])
+    );
+    assert_eq!(
+        move_to(
+            &carried,
+            ROOT,
+            tag,
+            confirmation["confirmation"]["token"].as_str()
+        )
+        .await
+        .0,
+        200
+    );
+
+    let mut tag = sylux::domain::upload::folder_etag(SHARE_FILE, 1);
+    for id in [SHARE_FILE, folder.as_str()] {
+        let (status, preflight) = move_to(id, &destination, &tag, None).await;
+        assert_eq!(status, 409);
+        assert_eq!(preflight["confirmation"]["exposes_to_all"], true);
+        check_reachability(id, false).await;
+        assert_eq!(
+            f.share_request(
+                "DELETE",
+                &format!("/library-publications/{publication}"),
+                GRANT_OWNER_ACTOR,
+                Value::Null,
+                None,
+                None
+            )
+            .await
+            .0,
+            204
+        );
+        assert_eq!(
+            move_to(
+                id,
+                &destination,
+                &tag,
+                preflight["confirmation"]["token"].as_str()
+            )
+            .await
+            .1["code"],
+            "sharing_audience_changed"
+        );
+        publication = publish().await;
+        let (status, renewed) = move_to(
+            id,
+            &destination,
+            &tag,
+            preflight["confirmation"]["token"].as_str(),
+        )
+        .await;
+        assert_eq!(status, 409);
+        assert_ne!(
+            preflight["confirmation"]["token"],
+            renewed["confirmation"]["token"]
+        );
+        assert_eq!(renewed["confirmation"]["exposes_to_all"], true);
+        let (status, moved) = move_to(
+            id,
+            &destination,
+            &tag,
+            renewed["confirmation"]["token"].as_str(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        check_reachability(id, true).await;
+
+        let (status, moved_out) = move_to(id, ROOT, moved["etag"].as_str().unwrap(), None).await;
+        assert_eq!(status, 200);
+        check_reachability(id, false).await;
+        let (status, preflight) =
+            move_to(id, &destination, moved_out["etag"].as_str().unwrap(), None).await;
+        assert_eq!(status, 409);
+        let (status, returned) = move_to(
+            id,
+            &destination,
+            moved_out["etag"].as_str().unwrap(),
+            preflight["confirmation"]["token"].as_str(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            f.share_request(
+                "DELETE",
+                &format!("/entries/{id}"),
+                GRANT_OWNER_ACTOR,
+                Value::Null,
+                returned["etag"].as_str(),
+                None
+            )
+            .await
+            .0,
+            204
+        );
+        check_reachability(id, false).await;
+        let (_, trash) = f.share_get("/trash", GRANT_OWNER_ACTOR).await;
+        let deleted = trash["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == id)
+            .unwrap();
+        let restore = async |token: Option<&str>| {
+            f.share_request(
+                "POST",
+                &format!("/trash/{id}/restore"),
+                GRANT_OWNER_ACTOR,
+                Value::Null,
+                deleted["etag"].as_str(),
+                token,
+            )
+            .await
+        };
+        let (status, preflight) = restore(None).await;
+        assert_eq!(status, 409);
+        assert_eq!(preflight["confirmation"]["exposes_to_all"], true);
+        check_reachability(id, false).await;
+        assert_eq!(
+            restore(preflight["confirmation"]["token"].as_str()).await.0,
+            204
+        );
+        check_reachability(id, true).await;
+
+        if id == SHARE_FILE {
+            let (status, metadata) = f
+                .share_get(&format!("/shared/entries/{id}"), GRANT_RECIPIENT_ACTOR)
+                .await;
+            assert_eq!(status, 200);
+            assert_eq!(
+                move_to(
+                    id,
+                    &folder,
+                    metadata["entry"]["etag"].as_str().unwrap(),
+                    None
+                )
+                .await
+                .0,
+                200
+            );
+            let (_, path) = f
+                .share_get(&format!("/folders/{folder}/path"), GRANT_OWNER_ACTOR)
+                .await;
+            tag = path["items"][1]["etag"].as_str().unwrap().to_owned();
+        }
+    }
+
+    // Existing library roots cannot be moved or trashed through Files.
+    let (_, root_path) = f
+        .share_get(&format!("/folders/{root}/path"), GRANT_OWNER_ACTOR)
+        .await;
+    let root_tag = root_path["items"][0]["etag"].as_str().unwrap();
+    assert_eq!(move_to(root, ROOT, root_tag, None).await.0, 404);
+    assert_eq!(
+        f.share_request(
+            "DELETE",
+            &format!("/entries/{root}"),
+            GRANT_OWNER_ACTOR,
+            Value::Null,
+            Some(root_tag),
+            None
+        )
+        .await
+        .0,
+        404
+    );
+    check_reachability(folder.as_str(), true).await;
     f.close().await;
 }

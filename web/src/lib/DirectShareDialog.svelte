@@ -17,6 +17,8 @@
   let error = $state('');
   let notice = $state('');
   let loaded = $state(false);
+  let publicationId = $state<string | null>(null);
+  let confirmingPublication = $state(false);
   const controller = new AbortController();
 
   onMount(() => {
@@ -28,7 +30,11 @@
     busy = 'load'; error = ''; notice = '';
     try {
       const response = await sharing.grants(folder.id, controller.signal);
-      if (!controller.signal.aborted) { grants = response.items; loaded = true; }
+      if (!controller.signal.aborted) {
+        grants = response.items;
+        publicationId = response.publication_id;
+        loaded = true;
+      }
     } catch {
       if (!controller.signal.aborted) { loaded = false; error = 'Could not load access. Try again.'; }
     } finally { busy = ''; }
@@ -72,6 +78,7 @@
           const response = await sharing.grants(folder.id, controller.signal);
           if (controller.signal.aborted) return;
           grants = response.items;
+          publicationId = response.publication_id;
           notice = grants.some(item => item.handle === grant.handle)
             ? `${grant.handle} still has direct access to this folder.`
             : `${grant.handle} has no direct access to this folder.`;
@@ -93,17 +100,98 @@
       }
     }
   }
+
+  async function reviewPublication(): Promise<void> {
+    if (busy || !loaded) return;
+    error = ''; notice = '';
+    confirmingPublication = true;
+    await tick();
+    document.getElementById('cancel-publication')?.focus();
+  }
+
+  async function cancelPublication(): Promise<void> {
+    confirmingPublication = false;
+    await focusAccessAction();
+  }
+
+  async function focusAccessAction(): Promise<void> {
+    await tick();
+    if (!controller.signal.aborted) {
+      const target = !loaded ? 'direct-share-refresh' : folder.parent_id === null ? 'review-publication' : 'direct-share-handle';
+      document.getElementById(target)?.focus();
+    }
+  }
+
+  async function changePublication(): Promise<void> {
+    if (!confirmingPublication || busy || !loaded) return;
+    busy = 'publication';
+    const wasPublished = publicationId;
+    try {
+      if (wasPublished) {
+        await sharing.withdraw(wasPublished, controller.signal);
+        publicationId = null;
+        notice = 'Publication withdrawn.';
+      } else {
+        const result = await sharing.publish(folder.id, controller.signal);
+        publicationId = result.id;
+        notice = 'Library published.';
+      }
+    } catch {
+      if (!controller.signal.aborted) {
+        loaded = false;
+        error = 'Could not confirm the change. Refresh access before trying again.';
+      }
+    } finally {
+      confirmingPublication = false;
+      busy = '';
+    }
+    await focusAccessAction();
+  }
 </script>
 
 <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onclose(); }}>
-  <Dialog.Content aria-busy={!!busy} showCloseButton={!busy}
-    escapeKeydownBehavior={busy ? 'ignore' : 'close'} interactOutsideBehavior={busy ? 'ignore' : 'close'}
+  <Dialog.Content class="max-h-[85dvh] overflow-y-auto" aria-busy={!!busy} showCloseButton={!busy && !confirmingPublication}
+    escapeKeydownBehavior={busy ? 'ignore' : 'close'} interactOutsideBehavior={busy || confirmingPublication ? 'ignore' : 'close'}
+    onEscapeKeydown={(event) => {
+      if (confirmingPublication && !busy) {
+        event.preventDefault();
+        void cancelPublication();
+      }
+    }}
     onCloseAutoFocus={(event) => event.preventDefault()}>
     <Dialog.Header>
-      <Dialog.Title class="[overflow-wrap:anywhere]">Share {folder.name}</Dialog.Title>
-      <Dialog.Description>Accounts you add can browse, search and download files in this folder. They cannot change anything.</Dialog.Description>
+      <Dialog.Title class="[overflow-wrap:anywhere]">
+        {confirmingPublication ? publicationId ? `Withdraw publication of ${folder.name}?` : `Publish ${folder.name}?` : `Share ${folder.name}`}
+      </Dialog.Title>
+      <Dialog.Description>
+        {#if confirmingPublication}
+          {#if publicationId}
+            This library will disappear from Shared with all. Any separate direct shares stay in place.
+          {:else}
+            Everyone signed in now or in the future can browse, search, preview PDFs and download individual files in this library, including files added later. WebDAV cannot upload files, create folders or move new content into this published library.
+          {/if}
+        {:else}
+          Accounts you add can browse, search and download files in this {folder.parent_id === null ? 'library' : 'folder'}. They cannot change anything.
+        {/if}
+      </Dialog.Description>
     </Dialog.Header>
-    {#if loaded}
+    {#if confirmingPublication}
+      <Dialog.Footer>
+        <Button id="cancel-publication" variant="outline" disabled={!!busy} onclick={cancelPublication}>Cancel</Button>
+        <Button aria-disabled={!!busy} aria-busy={busy === 'publication'} onclick={changePublication}>
+          {publicationId ? (busy ? 'Withdrawing…' : 'Withdraw publication') : (busy ? 'Publishing…' : 'Publish library')}
+        </Button>
+      </Dialog.Footer>
+    {:else if loaded}
+      {#if folder.parent_id === null}
+        <section class="grid gap-2 border-b pb-4" aria-labelledby="library-publication-heading">
+          <h2 id="library-publication-heading" class="font-medium">Shared with all</h2>
+          <p class="text-muted-foreground">{publicationId ? 'Read-only access for everyone signed in.' : 'This library is unpublished.'}</p>
+          <Button id="review-publication" variant="outline" class="justify-self-start" disabled={!!busy} onclick={reviewPublication}>
+            {publicationId ? 'Withdraw publication…' : 'Publish library…'}
+          </Button>
+        </section>
+      {/if}
       <form class="grid gap-2" onsubmit={add}>
         <Label for="direct-share-handle">Account name</Label>
         <div class="flex flex-wrap gap-2">
@@ -124,11 +212,13 @@
     {:else if busy === 'load'}
       <p role="status">Loading access…</p>
     {/if}
-    {#if error}<p role="alert">{error}</p>{/if}
-    {#if notice}<p role="status" class="[overflow-wrap:anywhere]">{notice}</p>{/if}
-    <Dialog.Footer>
-      {#if !loaded && error}<Button id="direct-share-refresh" variant="outline" disabled={!!busy} onclick={load}>Refresh access</Button>{/if}
-      <Button variant="outline" disabled={!!busy} onclick={onclose}>Close</Button>
-    </Dialog.Footer>
+    {#if !confirmingPublication}
+      {#if error}<p role="alert">{error}</p>{/if}
+      {#if notice}<p role="status" class="[overflow-wrap:anywhere]">{notice}</p>{/if}
+      <Dialog.Footer>
+        {#if !loaded && error}<Button id="direct-share-refresh" variant="outline" disabled={!!busy} onclick={async () => { await load(); await focusAccessAction(); }}>Refresh access</Button>{/if}
+        <Button variant="outline" disabled={!!busy} onclick={onclose}>Close</Button>
+      </Dialog.Footer>
+    {/if}
   </Dialog.Content>
 </Dialog.Root>

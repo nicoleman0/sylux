@@ -101,7 +101,7 @@ test('bulk move confirms each current audience and retries without reusing conse
     const challenge = id === 'alpha' ? (token ? changed : original) : (++betaPrompts === 1 ? beta : retry);
     return route.fulfill({ status: 409, json: {
       code: 'sharing_confirmation_required',
-      confirmation: { token: challenge, new_recipients: challenge === original ? ['alice'] : ['alice', 'bob'], lost_recipients: [], carried_recipients: [] },
+      confirmation: { token: challenge, new_recipients: challenge === original ? ['alice'] : ['alice', 'bob'], lost_recipients: [], carried_recipients: [], exposes_to_all: false, removes_access_for_all: false },
     } });
   });
   await select(page, 'alpha.bin', 'beta.bin');

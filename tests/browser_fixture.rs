@@ -58,6 +58,7 @@ fn safe_reporter_events(log: &str) -> Vec<Value> {
         "storage_text_edit_retry",
         "storage_private_libraries",
         "storage_direct_sharing",
+        "storage_library_publication",
         "storage_webdav_changes",
         "unregistered",
     ];

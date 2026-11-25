@@ -143,6 +143,16 @@ impl AuthState {
 pub fn router(state: AuthState) -> Router {
     let app = Router::new()
         .route("/shared", get(direct_grants::incoming))
+        .route("/published", get(direct_grants::published))
+        .route("/published/search", get(entries::published_search))
+        .route(
+            "/libraries/{id}/publication",
+            axum::routing::post(direct_grants::publish),
+        )
+        .route(
+            "/library-publications/{id}",
+            axum::routing::delete(direct_grants::withdraw),
+        )
         .route("/shared/folders/{id}/path", get(direct_grants::path))
         .route(
             "/shared/folders/{id}/children",

@@ -10,6 +10,7 @@ use self::{
 use super::{AuthState, content, middleware::origin_absent_or_matches, uploads};
 use crate::domain::{
     dav_credentials::{DavGrant, DavProof},
+    library_publication,
     names::EntryName,
     namespace as storage_namespace,
     upload::{MAX_UPLOAD_LENGTH, UploadAdmission},
@@ -377,6 +378,8 @@ impl NamespaceWrite {
             if existing.is_some() {
                 return Err(StatusCode::METHOD_NOT_ALLOWED);
             }
+            library_publication::require_unpublished_parent(db, owner, &parent.id)
+                .map_err(namespace_error)?;
             storage_namespace::create_folder(db, owner, &parent.id, &name.display)
                 .map_err(namespace_error)?;
             return Ok(StatusCode::CREATED);
@@ -458,6 +461,8 @@ async fn put(
         if existing.is_some() {
             return Err(StatusCode::PRECONDITION_FAILED);
         }
+        library_publication::require_unpublished_parent(db, &grant.account_id, &parent.id)
+            .map_err(namespace_error)?;
         let admission = UploadAdmission {
             parent_id: parent.id,
             parent_etag: parent.etag,
@@ -483,7 +488,10 @@ pub(super) fn check_upload_path(
     id: &str,
 ) -> Result<(), StatusCode> {
     match resolve(db, account, path) {
-        Ok(resource) if resource.entry.as_ref().is_some_and(|entry| entry.id == id) => Ok(()),
+        Ok(resource) if resource.entry.as_ref().is_some_and(|entry| entry.id == id) => {
+            library_publication::require_unpublished_parent(db, account, id)
+                .map_err(namespace_error)
+        }
         Err(status) if status != StatusCode::NOT_FOUND => Err(status),
         _ => Err(StatusCode::PRECONDITION_FAILED),
     }

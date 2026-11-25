@@ -1,13 +1,18 @@
 import type { FolderSort, ResultSort } from './listing';
 
-export type Destination = 'files' | 'libraries' | 'shared' | 'trash' | 'account' | 'settings';
+export type SharingDestination = 'shared' | 'published';
+export type Destination = 'files' | 'libraries' | SharingDestination | 'trash' | 'account' | 'settings';
+
+export function isSharingDestination(value: string): value is SharingDestination {
+  return value === 'shared' || value === 'published';
+}
 export type AccountSort = 'name_asc' | 'name_desc' | 'role_asc' | 'role_desc' | 'status_asc' | 'status_desc';
 export type Location = { destination: Destination; folder: string; file?: string; query: string; sort: FolderSort; searchSort?: ResultSort; trashSort?: ResultSort; accountSort?: AccountSort };
 export type BrowsingContext = Location & { version: 1; owner: string; cursors: (string | null)[]; page: number; searchCursors: (string | null)[]; searchPage: number; scroll: number };
 const sorts: FolderSort[] = ['name_asc', 'name_desc', 'size_asc', 'size_desc', 'modified_asc', 'modified_desc'];
 const resultSorts = [...sorts, 'location_asc', 'location_desc'];
 const accountSorts = ['name_asc', 'name_desc', 'role_asc', 'role_desc', 'status_asc', 'status_desc'];
-const destinations = ['files', 'libraries', 'shared', 'trash', 'account', 'settings'];
+const destinations = ['files', 'libraries', 'shared', 'published', 'trash', 'account', 'settings'];
 const validQuery = (query: string) => new TextEncoder().encode(query).length <= 255 && !/\p{Cc}/u.test(query);
 
 export function parseLocation(hash: string): Location {
@@ -16,14 +21,14 @@ export function parseLocation(hash: string): Location {
   try {
     const [path, query = ''] = hash.replace(/^#/, '').split('?');
     const [destination, folder = '', ...rest] = path.split('/');
-    const isFile = destination === 'shared' && folder === 'file' && rest.length === 1;
+    const isFile = isSharingDestination(destination) && folder === 'file' && rest.length === 1;
     if (!destinations.includes(destination) || (rest.length && !isFile)) return fallback;
     const params = new URLSearchParams(query);
     const search = params.get('q') ?? '';
     const sort = params.get('sort') as FolderSort;
     const id = decodeURIComponent(isFile ? rest[0] : folder);
     if (id.length > 256 || /[\p{Cc}/]/u.test(id)) return fallback;
-    return { destination: destination as Destination, folder: !isFile && (destination === 'files' || destination === 'shared') ? id : '', ...(isFile ? { file: id } : {}), query: destination === 'files' && validQuery(search) ? search : '', sort: sorts.includes(sort) ? sort : 'name_asc',
+    return { destination: destination as Destination, folder: !isFile && (destination === 'files' || isSharingDestination(destination)) ? id : '', ...(isFile ? { file: id } : {}), query: destination === 'files' && validQuery(search) ? search : '', sort: sorts.includes(sort) ? sort : 'name_asc',
       ...(resultSorts.includes(params.get('searchSort') ?? '') ? { searchSort: params.get('searchSort') as ResultSort } : {}),
       ...(resultSorts.includes(params.get('trashSort') ?? '') ? { trashSort: params.get('trashSort') as ResultSort } : {}),
       ...(accountSorts.includes(params.get('accountSort') ?? '') ? { accountSort: params.get('accountSort') as AccountSort } : {}),
@@ -39,8 +44,8 @@ export function locationHash(location: Location): string {
     const value = location[key];
     if (value && value !== 'name_asc') params.set(key, value);
   }
-  const suffix = location.destination === 'shared' && location.file ? `/file/${encodeURIComponent(location.file)}`
-    : (location.destination === 'files' || location.destination === 'shared') && location.folder ? `/${encodeURIComponent(location.folder)}` : '';
+  const suffix = isSharingDestination(location.destination) && location.file ? `/file/${encodeURIComponent(location.file)}`
+    : (location.destination === 'files' || isSharingDestination(location.destination)) && location.folder ? `/${encodeURIComponent(location.folder)}` : '';
   return `#${location.destination}${suffix}${params.size ? '?' + params : ''}`;
 }
 
@@ -55,7 +60,7 @@ export function savedContext(value: unknown, owner: string, location: Location):
   if ((state.searchSort !== undefined && !resultSorts.includes(state.searchSort)) ||
     (state.trashSort !== undefined && !resultSorts.includes(state.trashSort)) ||
     (state.accountSort !== undefined && !accountSorts.includes(state.accountSort))) return null;
-  if (state.file !== undefined && (state.destination !== 'shared' || typeof state.file !== 'string' || !state.file || state.file.length > 256 || /[\p{Cc}/]/u.test(state.file))) return null;
+  if (state.file !== undefined && (!isSharingDestination(state.destination) || typeof state.file !== 'string' || !state.file || state.file.length > 256 || /[\p{Cc}/]/u.test(state.file))) return null;
   if (state.version !== 1 || state.owner !== owner || locationHash(state) !== locationHash(location)) return null;
   if (!validStack(state.cursors, state.page) || !validStack(state.searchCursors, state.searchPage) || !Number.isFinite(state.scroll) || state.scroll < 0 || state.scroll > 100_000_000) return null;
   return state;

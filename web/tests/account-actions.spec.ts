@@ -71,7 +71,7 @@ test('account action pending and uncertain results preserve recovery and row foc
   const trigger = page.getByRole('button', { name: 'Actions for member' });
   await trigger.click(); await page.getByRole('menuitem', { name: 'Disable', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Disable member?' });
-  await expect(dialog).toHaveAccessibleDescription(/Direct shares to and from this account end permanently\. Enabling the account again does not restore them\./);
+  await expect(dialog).toHaveAccessibleDescription(/Direct shares to and from this account end, and their published libraries are withdrawn\. Enabling the account again does not restore sharing\./);
   await dialog.getByRole('button', { name: 'Disable account' }).click();
   await expect.poll(() => !!held).toBe(true);
   const pending = dialog.getByRole('button', { name: 'Disabling…' });

@@ -1,4 +1,4 @@
-//! Account grants are separate from private namespace authority.
+//! Shared reads and exposure checks are separate from private namespace authority.
 
 use std::collections::BTreeSet;
 
@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 
 use super::{
+    library_publication,
     namespace::{self, Entry, NamespaceError},
     search::SearchHit,
     upload::folder_etag,
@@ -90,10 +91,25 @@ pub(crate) struct Incoming {
     pub owner: String,
 }
 
-pub(crate) fn roots(db: &Connection, recipient: &str) -> Result<Vec<SharedPath>, NamespaceError> {
+#[derive(Clone, Copy)]
+pub(crate) enum IncomingScope {
+    Direct,
+    Published,
+}
+
+pub(crate) fn roots(
+    db: &Connection,
+    recipient: &str,
+    scope: IncomingScope,
+) -> Result<Vec<SharedPath>, NamespaceError> {
     let mut roots = Vec::new();
-    for grant in incoming(db, recipient).map_err(|_| NamespaceError::Sql)? {
-        let path = path(db, recipient, &grant.entry.id)?;
+    for grant in incoming(db, recipient, scope).map_err(|_| NamespaceError::Sql)? {
+        let path = resolve_path(
+            db,
+            recipient,
+            &grant.entry.id,
+            matches!(scope, IncomingScope::Published),
+        )?;
         if path.folders.len() == 1 {
             roots.push(path);
         }
@@ -101,16 +117,27 @@ pub(crate) fn roots(db: &Connection, recipient: &str) -> Result<Vec<SharedPath>,
     Ok(roots)
 }
 
-pub(crate) fn incoming(db: &Connection, recipient: &str) -> rusqlite::Result<Vec<Incoming>> {
-    let mut stmt = db.prepare(
-        "SELECT e.entry_id,coalesce(e.library_display_name,e.original_name),e.generation,a.handle
-         FROM direct_grant g
-         JOIN account a ON a.account_id=g.owner_account_id AND a.enabled=1
-         JOIN account r ON r.account_id=g.recipient_account_id AND r.enabled=1
-         JOIN entry e ON e.entry_id=g.root_id AND e.owner_account_id=g.owner_account_id
-         WHERE g.recipient_account_id=?1 AND e.state='active' AND e.kind='folder'
-         ORDER BY 2,a.handle,e.entry_id",
-    )?;
+pub(crate) fn incoming(
+    db: &Connection,
+    recipient: &str,
+    scope: IncomingScope,
+) -> rusqlite::Result<Vec<Incoming>> {
+    let mut stmt = db.prepare(match scope {
+        IncomingScope::Direct => "SELECT e.entry_id,coalesce(e.library_display_name,e.original_name),e.generation,a.handle
+            FROM direct_grant g
+            JOIN account a ON a.account_id=g.owner_account_id AND a.enabled=1
+            JOIN account r ON r.account_id=g.recipient_account_id AND r.enabled=1
+            JOIN entry e ON e.entry_id=g.root_id AND e.owner_account_id=g.owner_account_id
+            WHERE g.recipient_account_id=?1 AND e.state='active' AND e.kind='folder'
+            ORDER BY 2,a.handle,e.entry_id",
+        IncomingScope::Published => "SELECT e.entry_id,e.library_display_name,e.generation,a.handle
+            FROM library_publication p
+            JOIN account a ON a.account_id=p.owner_account_id AND a.enabled=1
+            JOIN account r ON r.account_id=?1 AND r.enabled=1
+            JOIN entry e ON e.entry_id=p.root_id AND e.owner_account_id=p.owner_account_id
+            WHERE e.state='active' AND e.library_display_name IS NOT NULL
+            ORDER BY 2,a.handle,e.entry_id",
+    })?;
     stmt.query_map([recipient], |row| {
         let id: String = row.get(0)?;
         let generation: i64 = row.get(2)?;
@@ -141,16 +168,27 @@ pub(crate) fn path(
     recipient: &str,
     folder: &str,
 ) -> Result<SharedPath, NamespaceError> {
+    resolve_path(db, recipient, folder, true)
+}
+
+fn resolve_path(
+    db: &Connection,
+    recipient: &str,
+    folder: &str,
+    include_publication: bool,
+) -> Result<SharedPath, NamespaceError> {
     let owner: String = db
         .query_row(
             "SELECT e.owner_account_id FROM entry e
          JOIN account o ON o.account_id=e.owner_account_id AND o.enabled=1
          JOIN account r ON r.account_id=?2 AND r.enabled=1
-         WHERE e.entry_id=?1 AND EXISTS(
+         WHERE e.entry_id=?1 AND (EXISTS(
              SELECT 1 FROM direct_grant g
              WHERE g.recipient_account_id=?2 AND g.owner_account_id=e.owner_account_id
-         )",
-            params![folder, recipient],
+         ) OR (?3 AND EXISTS(
+             SELECT 1 FROM library_publication p WHERE p.owner_account_id=e.owner_account_id
+         )))",
+            params![folder, recipient, include_publication],
             |row| row.get(0),
         )
         .optional()
@@ -158,20 +196,24 @@ pub(crate) fn path(
         .ok_or(NamespaceError::NotFound)?;
     let mut folders = namespace::folder_path(db, &owner, folder)?;
     let depth = folders.len() as i64 - 1;
-    let mut granted = db.prepare(
-        "SELECT 1 FROM direct_grant WHERE root_id=?1 AND recipient_account_id=?2 AND owner_account_id=?3",
-    ).map_err(|_| NamespaceError::Sql)?;
-    let mut first = None;
-    for (index, entry) in folders.iter().enumerate() {
-        if granted
-            .exists(params![entry.id, recipient, owner])
-            .map_err(|_| NamespaceError::Sql)?
-        {
-            first = Some(index);
-            break;
+    let is_published =
+        include_publication && library_publication::inherited(db, &owner, &folders)?.is_some();
+    if !is_published {
+        let mut granted = db.prepare(
+            "SELECT 1 FROM direct_grant WHERE root_id=?1 AND recipient_account_id=?2 AND owner_account_id=?3",
+        ).map_err(|_| NamespaceError::Sql)?;
+        let mut first = None;
+        for (index, entry) in folders.iter().enumerate() {
+            if granted
+                .exists(params![entry.id, recipient, owner])
+                .map_err(|_| NamespaceError::Sql)?
+            {
+                first = Some(index);
+                break;
+            }
         }
+        folders.drain(..first.ok_or(NamespaceError::NotFound)?);
     }
-    folders.drain(..first.ok_or(NamespaceError::NotFound)?);
     folders[0].parent_id = None;
     if folders[0].name.is_empty() {
         folders[0].name = "Files".into();
@@ -232,11 +274,17 @@ pub(crate) struct TreeImpact {
     pub new_recipients: BTreeSet<String>,
     pub lost_recipients: BTreeSet<String>,
     pub carried_recipients: BTreeSet<String>,
+    previous_publication: Option<String>,
+    destination_publication: Option<String>,
+    pub exposes_to_all: bool,
+    pub removes_access_for_all: bool,
 }
 
 impl TreeImpact {
     pub(crate) fn requires_confirmation(&self) -> bool {
-        !self.new_recipients.is_empty() || !self.carried_recipients.is_empty()
+        self.exposes_to_all
+            || !self.new_recipients.is_empty()
+            || !self.carried_recipients.is_empty()
     }
 }
 
@@ -283,6 +331,11 @@ pub(crate) fn tree_impact(
             stmt.query_map(params![owner, entry, namespace::MAX_ENTRY_DEPTH], audience_grant)?.collect()
         }).map_err(|_| NamespaceError::Sql)?;
     }
+    let previous_publication = library_publication::inherited(db, owner, source)?;
+    let destination_publication = library_publication::inherited(db, owner, destination)?;
+    let exposes_to_all = previous_publication.is_none() && destination_publication.is_some();
+    let removes_access_for_all =
+        previous_publication.is_some() && destination_publication.is_none();
     let root_recipients = carried_grants.iter().filter(|grant| grant.root == entry);
     let previous: BTreeSet<_> = previous_grants
         .iter()
@@ -296,12 +349,12 @@ pub(crate) fn tree_impact(
         .collect();
     let new_recipients = destination_grants
         .iter()
-        .filter(|grant| !previous.contains(&grant.handle))
+        .filter(|grant| previous_publication.is_none() && !previous.contains(&grant.handle))
         .map(|grant| grant.handle.clone())
         .collect();
     let lost_recipients = previous_grants
         .iter()
-        .filter(|grant| !retained.contains(&grant.handle))
+        .filter(|grant| destination_publication.is_none() && !retained.contains(&grant.handle))
         .map(|grant| grant.handle.clone())
         .collect();
     let carried_recipients = carried_grants
@@ -322,6 +375,10 @@ pub(crate) fn tree_impact(
         new_recipients,
         lost_recipients,
         carried_recipients,
+        previous_publication,
+        destination_publication,
+        exposes_to_all,
+        removes_access_for_all,
     })
 }
 
