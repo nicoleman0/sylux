@@ -49,7 +49,7 @@ async fn webdav_option_credentials_read_only_and_owner_isolation() {
     let (_, other) = fixture.credential(1, "Other device", false).await;
     let (_, admin) = fixture.credential(2, "Administrator device", false).await;
     let options = fixture
-        .request("OPTIONS", path, None, &[owner.clone()], "")
+        .request("OPTIONS", path, None, std::slice::from_ref(&owner), "")
         .await;
     assert_eq!(options.0, 204);
     assert_eq!(options.1["allow"], "OPTIONS, PROPFIND, GET, HEAD");
@@ -76,7 +76,7 @@ async fn webdav_option_credentials_read_only_and_owner_isolation() {
                     "GET",
                     "/dav/Files/private-file.bin",
                     None,
-                    &[credential.clone()],
+                    std::slice::from_ref(credential),
                     ""
                 )
                 .await
@@ -100,7 +100,7 @@ async fn webdav_option_credentials_read_only_and_owner_isolation() {
     }
     assert_eq!(
         fixture
-            .request("GET", source, None, &[owner.clone()], "")
+            .request("GET", source, None, std::slice::from_ref(&owner), "")
             .await
             .2,
         b"synthetic isolation payload"
@@ -162,7 +162,7 @@ async fn webdav_option_credentials_read_only_and_owner_isolation() {
     );
     assert_eq!(
         fixture
-            .request("OPTIONS", "/dav/", None, &[other.clone()], "")
+            .request("OPTIONS", "/dav/", None, std::slice::from_ref(&other), "")
             .await
             .0,
         401
@@ -565,7 +565,7 @@ async fn webdav_upload_rechecks_path_and_revocation_at_final_commit() {
     let path = "/dav/Files/private-name/nested/";
     assert_eq!(
         fixture
-            .request("MKCOL", path, None, &[writer.clone()], "")
+            .request("MKCOL", path, None, std::slice::from_ref(&writer), "")
             .await
             .0,
         201
@@ -601,7 +601,13 @@ async fn webdav_upload_rechecks_path_and_revocation_at_final_commit() {
     );
     assert_eq!(
         fixture
-            .request("GET", target_after_move, None, &[organizer.clone()], "")
+            .request(
+                "GET",
+                target_after_move,
+                None,
+                std::slice::from_ref(&organizer),
+                ""
+            )
             .await
             .0,
         404
@@ -628,7 +634,13 @@ async fn webdav_upload_rechecks_path_and_revocation_at_final_commit() {
     assert_eq!(upload.0, 401);
     assert_eq!(
         fixture
-            .request("GET", target_after_move, None, &[organizer.clone()], "")
+            .request(
+                "GET",
+                target_after_move,
+                None,
+                std::slice::from_ref(&organizer),
+                ""
+            )
             .await
             .0,
         404
@@ -639,7 +651,7 @@ async fn webdav_upload_rechecks_path_and_revocation_at_final_commit() {
                 "PUT",
                 target_after_move,
                 None,
-                &[organizer.clone()],
+                std::slice::from_ref(&organizer),
                 "accepted"
             )
             .await
@@ -652,7 +664,7 @@ async fn webdav_upload_rechecks_path_and_revocation_at_final_commit() {
                 "PUT",
                 target_after_move,
                 None,
-                &[organizer.clone()],
+                std::slice::from_ref(&organizer),
                 "retry"
             )
             .await
