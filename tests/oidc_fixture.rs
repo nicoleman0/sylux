@@ -25,9 +25,12 @@ struct Config {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> io::Result<()> {
     let mut args = std::env::args_os().skip(1);
-    let Some(fixture) = args.next().filter(|arg| arg != "--list") else {
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("--fixture")) {
         return Ok(());
-    };
+    }
+    let fixture = args
+        .next()
+        .ok_or_else(|| io::Error::other("fixture directory required"))?;
     let fixture = PathBuf::from(fixture);
     let mode = args
         .next()

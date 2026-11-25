@@ -88,7 +88,7 @@ export async function faultProvider(fixture, clientId, clientSecret) {
                 sub: attempt.subject,
                 nonce: fault === 'nonce' ? random() : attempt.nonce,
                 iat: fault === 'future' ? now + 3600 : now,
-                exp: fault === 'expiry' ? now - 1 : now + 30,
+                exp: fault === 'expiry' ? now - 1 : now + (fault === 'future' ? 3630 : 30),
                 auth_time: fault === 'auth_time' ? undefined : now,
             };
             const signed = encode(header) + '.' + encode(claims);

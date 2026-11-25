@@ -25,7 +25,7 @@ export async function qualifySylux(fixture, executable, browser, provider) {
     let process, origin;
     const contexts = [];
     async function start(mode) {
-        const args = [fixture, mode];
+        const args = ['--fixture', fixture, mode];
         if (origin) args.push(new URL(origin).port);
         process = spawn(executable, args, { stdio: ['ignore', 'pipe', 'ignore'] });
         const lines = createInterface({ input: process.stdout });
