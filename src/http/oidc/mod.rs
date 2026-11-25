@@ -43,13 +43,42 @@ const SESSION_SECONDS: i64 = 15 * 60;
 pub(super) struct Oidc {
     provider: Provider,
     registration: [u8; 32],
-    attempts: Mutex<HashMap<[u8; 32], Attempt>>,
+    attempts: Mutex<HashMap<[u8; 32], AttemptSlot>>,
     provider_flows: Semaphore,
+}
+
+struct AttemptSlot {
+    expires: Instant,
+    pending: Option<Attempt>,
+}
+
+struct Exchange {
+    oidc: Arc<Oidc>,
+    binding: [u8; 32],
+}
+
+impl Exchange {
+    fn is_current(&self) -> Result<bool, StatusCode> {
+        let attempts = self.oidc.attempts.lock().map_err(|_| INTERNAL)?;
+        Ok(attempts.contains_key(&self.binding))
+    }
+}
+
+impl Drop for Exchange {
+    fn drop(&mut self) {
+        let _ = self.oidc.cancel_attempt(self.binding);
+    }
+}
+
+impl Oidc {
+    pub(super) fn cancel_attempt(&self, binding: [u8; 32]) -> Result<(), StatusCode> {
+        self.attempts.lock().map_err(|_| INTERNAL)?.remove(&binding);
+        Ok(())
+    }
 }
 
 struct Attempt {
     started: i64,
-    expires: Instant,
     handle: String,
     target: Option<Snapshot>,
     local: Option<SessionCookie>,
@@ -226,14 +255,16 @@ async fn begin(
     }
     attempts.insert(
         authz::verifier(&browser),
-        Attempt {
-            started,
+        AttemptSlot {
             expires,
-            handle: input.handle,
-            target,
-            local,
-            grant,
-            pending: output.pending_state,
+            pending: Some(Attempt {
+                started,
+                handle: input.handle,
+                target,
+                local,
+                grant,
+                pending: output.pending_state,
+            }),
         },
     );
     let mut response = private(
@@ -247,7 +278,7 @@ async fn begin(
     Ok(response)
 }
 
-fn attempt_binding(headers: &HeaderMap) -> Option<[u8; 32]> {
+pub(super) fn attempt_binding(headers: &HeaderMap) -> Option<[u8; 32]> {
     middleware::cookie_value(headers, COOKIE)
         .and_then(|cookie| middleware::decode_secret(&cookie))
         .map(|secret| authz::verifier(&secret))
@@ -301,27 +332,31 @@ async fn finish(
 ) -> Result<Response, StatusCode> {
     let oidc = state.oidc.as_ref().ok_or(StatusCode::NOT_FOUND)?;
     let binding = attempt_binding(headers).ok_or(DENIED)?;
-    let attempt = oidc
+    let (expires, attempt) = oidc
         .attempts
         .lock()
         .map_err(|_| INTERNAL)?
-        .remove(&binding)
+        .get_mut(&binding)
+        .and_then(|slot| slot.pending.take().map(|attempt| (slot.expires, attempt)))
         .ok_or(DENIED)?;
-    if attempt.expires <= Instant::now() || !valid_callback(query) {
+    let exchange = Exchange {
+        oidc: Arc::clone(oidc),
+        binding,
+    };
+    if expires <= Instant::now() || !valid_callback(query) {
         return Err(DENIED);
     }
     let callback = CompleteInput::builder_from_callback(query)
         .map_err(|_| DENIED)?
         .build();
+    let presented = middleware::session_cookie(headers);
     if let Some(local) = &attempt.local {
-        let current = middleware::session_cookie(headers).ok_or(DENIED)?;
+        let current = presented.as_ref().ok_or(DENIED)?;
         if current.session_id != local.session_id
             || !authz::verifier_matches(&current.secret, &local.secret)
         {
             return Err(DENIED);
         }
-    } else if middleware::session_cookie(headers).is_some() {
-        return Err(DENIED);
     }
     let _permit = oidc.provider_flows.try_acquire().map_err(|_| UNAVAILABLE)?;
     let proof = oidc
@@ -332,7 +367,7 @@ async fn finish(
             ProtocolError::InvalidProof => DENIED,
             _ => UNAVAILABLE,
         })?;
-    if attempt.expires <= Instant::now() {
+    if expires <= Instant::now() {
         return Err(DENIED);
     }
     let target = attempt.target.ok_or(DENIED)?;
@@ -353,7 +388,8 @@ async fn finish(
     state
         .workers
         .transact_result(move |db| {
-            if attempt.expires <= Instant::now()
+            if expires <= Instant::now()
+                || !exchange.is_current()?
                 || !lifecycle::registration_matches(db, &registration).map_err(|_| INTERNAL)?
             {
                 return Err(DENIED);
@@ -369,6 +405,18 @@ async fn finish(
                 }
                 true
             } else {
+                if let Some(cookie) = presented
+                    && authz::validate_session_result(
+                        db,
+                        &cookie.session_id,
+                        &cookie.secret,
+                        auth::now(),
+                    )
+                    .map_err(|_| INTERNAL)?
+                    .is_some()
+                {
+                    return Err(DENIED);
+                }
                 false
             };
             lifecycle::admit(

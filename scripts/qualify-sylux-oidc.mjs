@@ -185,24 +185,25 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         await page.getByText('Keycloak sign-in approved. The approval expires in 24 hours.').waitFor();
         await dialog.waitFor({ state: 'hidden' });
     }
-    async function browserFinish(page, username) {
+    async function browserFinish(page, username, beforeProof) {
         await page.waitForURL((url) => url.origin === new URL(issuer).origin);
         const authorization = new URL(page.url());
         check(authorization.searchParams.get('max_age') === '0' &&
             authorization.searchParams.get('code_challenge_method') === 'S256', 'Browser sign-in used a different OIDC policy');
+        await beforeProof?.();
         const response = page.waitForResponse((item) => new URL(item.url()).pathname === callbackPath);
         await submit(page, username, true);
         await submitFactor(page, username);
         check((await response).headers().location === '/', 'Keycloak response did not establish the browser session');
         await page.getByRole('button', { name: 'Toggle Sidebar' }).waitFor();
     }
-    async function keycloakUi(page, handle) {
+    async function keycloakUi(page, handle, beforeProof) {
         await page.goto(origin);
         await page.getByLabel('Account name').fill(handle);
         const keycloak = page.getByRole('button', { name: 'Sign in with Keycloak' });
         await keycloak.focus();
         await keycloak.press('Enter');
-        await browserFinish(page, handle);
+        await browserFinish(page, handle, beforeProof);
     }
     function withDb(operation) {
         const db = new DatabaseSync(root + '/metadata/sylux.sqlite3');
@@ -428,6 +429,23 @@ export async function qualifySylux(fixture, executable, browser, provider) {
                 check(db.prepare('SELECT count(*) AS total FROM session WHERE external_identity_id=?').get(identity).total === 1,
                     'Concurrent activation inserted more than one session');
 
+                step('M1 local sign-in committed during a held exchange prevents switching accounts');
+                const switching = await context();
+                const switchProof = mock.proof(await begin(switching, 'fault-user'), 'fault-subject');
+                const switchGate = mock.hold();
+                const switchVerdict = send(switching, switchProof);
+                let signedIn;
+                try {
+                    await Promise.race([switchGate.entered, wait(3000, undefined, { ref: false })
+                        .then(() => check(false, 'Account-switch exchange did not reach the token endpoint'))]);
+                    signedIn = await local(switching, 'rescue');
+                } finally {
+                    switchGate.release();
+                }
+                check(await switchVerdict === 401, 'Held callback replaced a newly issued local session');
+                check((await json(switching, 'GET', '/me', 200)).account_id === signedIn.account_id,
+                    'Rejected held callback changed the local account');
+
                 step('L3 hold token exchange during local disable, then release');
                 const race = await context();
                 const attempt = mock.proof(await begin(race, 'fault-user'), 'fault-subject');
@@ -544,6 +562,7 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         const owner = await local(ownerContext, 'alice');
         const staleLocal = await context();
         await local(staleLocal, 'alice');
+        const previousCookie = await sessionCookie(staleLocal);
         const liveFile = await upload(ownerContext, owner.csrf_token, 'owner-live.txt');
         const trashFile = await upload(ownerContext, owner.csrf_token, 'owner-trash.txt');
         const files = await json(ownerContext, 'GET', '/folders/children', 200);
@@ -612,7 +631,28 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         await browserFinish(ownerPage, 'alice');
         await callback(ownerContext, conversion, 401);
         await api(staleLocal, 'GET', '/me', 401);
-        await local(staleLocal, 'alice', 401);
+        check((await sessionCookie(staleLocal)).value === previousCookie.value, '401 cleared the revoked cookie');
+        step('M1 stale local cookie can sign in as the same owner');
+        const stalePage = await staleLocal.newPage();
+        await keycloakUi(stalePage, 'alice', async () => {
+            // The CSRF bootstrap uses the same cookie name. Restore the revoked value to exercise the callback guard.
+            await staleLocal.addCookies([previousCookie]);
+        });
+        check((await me(staleLocal)).account_id === owner.account_id, 'Fresh sign-in changed the converted owner');
+        await expectBytes(staleLocal, `/entries/${liveFile.id}/content`, liveFile.bytes);
+        const oldLocalReplay = await context();
+        await oldLocalReplay.addCookies([previousCookie]);
+        await api(oldLocalReplay, 'GET', '/me', 401);
+        await local(oldLocalReplay, 'alice', 401);
+
+        step('M1 live local cookie blocks switching to a different owner');
+        const switchControl = await context();
+        const switchProof = await proof(switchControl, await begin(switchControl, 'alice'), 'alice');
+        await switchControl.addCookies([await sessionCookie(peerContext)]);
+        await callback(switchControl, switchProof, 401);
+        check((await json(switchControl, 'GET', '/me', 200)).account_id === peer.account_id,
+            'Rejected callback replaced the live local session');
+
         const external = await me(ownerContext);
         const staleApproval = links.find((item) => item.id === identity);
         await api(adminContext, 'POST', `/auth/oidc/approvals/${identity}/revoke`, 409,

@@ -152,6 +152,17 @@ pub fn validate_session(
     secret: &[u8],
     now: i64,
 ) -> Option<(String, String, String)> {
+    validate_session_result(connection, session_id, secret, now)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn validate_session_result(
+    connection: &Connection,
+    session_id: &str,
+    secret: &[u8],
+    now: i64,
+) -> rusqlite::Result<Option<(String, String, String)>> {
     let digest = verifier(secret);
     connection
         .query_row(
@@ -165,7 +176,7 @@ pub fn validate_session(
             rusqlite::params![session_id, digest.as_slice(), now],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .ok()
+        .optional()
 }
 
 /// Validate session-bound CSRF material after validating that session in this transaction.

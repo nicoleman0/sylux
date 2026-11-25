@@ -4,6 +4,7 @@ use super::{
         anonymous_cookie, decode_secret, origin_absent_or_matches, origin_matches, secure_cookie,
         session_cookie,
     },
+    oidc,
 };
 use axum::{
     Json,
@@ -243,8 +244,10 @@ pub async fn login(
     let expected_epoch = account.credential_epoch;
     let expected_verifier = account.password_verifier.clone();
     let session_id_for_insert = session_id.clone();
-    let insert_result = state.workers.transact(move |tx| {
-        let current = account_by_id(tx, &account_id)?;
+    let keycloak_attempt = state.oidc.clone().zip(oidc::attempt_binding(&headers));
+    let internal = StatusCode::INTERNAL_SERVER_ERROR;
+    let insert_result = state.workers.transact_result(move |tx| {
+        let current = account_by_id(tx, &account_id).map_err(|_| internal)?;
         let Some(current) = current.filter(|current| {
             current.enabled == 1
                 && current.credential_epoch == expected_epoch
@@ -257,13 +260,18 @@ pub async fn login(
             params![session_id_for_insert, current.account_id, current.credential_epoch,
                 session_verifier.as_slice(), csrf_verifier.as_slice(), now,
                 idle_expires, absolute_expires],
-        )?;
+        ).map_err(|_| internal)?;
+        // A callback already exchanging proof cannot see this response's session cookie.
+        if let Some((oidc, binding)) = keycloak_attempt {
+            oidc.cancel_attempt(binding)?;
+        }
         Ok(Some(current))
     }).await;
     let account = match insert_result {
-        Ok(Some(account)) => account,
-        Ok(None) => return fail(StatusCode::UNAUTHORIZED),
-        Err(_) => return fail(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(Ok(Some(account))) => account,
+        Ok(Ok(None)) => return fail(StatusCode::UNAUTHORIZED),
+        Ok(Err(status)) => return fail(status),
+        Err(_) => return fail(internal),
     };
     with_cookie(
         Json(serde_json::json!({
