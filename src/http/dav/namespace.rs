@@ -8,11 +8,17 @@ use axum::http::StatusCode;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 const MAX_CHILDREN: i64 = 2048;
-const METADATA: &str = "e.entry_id,e.parent_id,coalesce(e.library_display_name,e.original_name),
-    e.kind,e.generation,r.revision_id,b.blob_id,b.length,b.sha256,r.committed_at";
-const LIVE_REVISION: &str =
-    "LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id
-    LEFT JOIN blob b ON b.blob_id=r.blob_id AND b.lifecycle='live'";
+macro_rules! select_entries {
+    ($filter:literal) => {
+        concat!(
+            "SELECT e.entry_id,e.parent_id,coalesce(e.library_display_name,e.original_name), ",
+            "e.kind,e.generation,r.revision_id,b.blob_id,b.length,b.sha256,r.committed_at ",
+            "FROM entry e LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id ",
+            "LEFT JOIN blob b ON b.blob_id=r.blob_id AND b.lifecycle='live' ",
+            "WHERE e.owner_account_id=?1 AND e.state='active' AND ", $filter
+        )
+    };
+}
 
 pub(super) struct Resource {
     pub(super) entry: Option<Entry>,
@@ -123,22 +129,16 @@ pub(super) fn child(
     parent: Option<&str>,
     name: &EntryName,
 ) -> Result<Option<Entry>, StatusCode> {
-    let filter = if parent.is_some() {
-        "e.parent_id=?2 AND e.name_key=?3"
+    let query = if parent.is_some() {
+        select_entries!("e.parent_id=?2 AND e.name_key=?3")
     } else {
-        "e.parent_id IS ?2 AND e.kind='folder'
-         AND coalesce(e.library_name_key,CAST(e.library_display_name AS BLOB))=?3"
+        select_entries!(
+            "e.parent_id IS ?2 AND e.kind='folder' AND coalesce(e.library_name_key,CAST(e.library_display_name AS BLOB))=?3"
+        )
     };
-    db.query_row(
-        &format!(
-            "SELECT {METADATA} FROM entry e {LIVE_REVISION}
-            WHERE e.owner_account_id=?1 AND e.state='active' AND {filter}"
-        ),
-        params![owner, parent, name.key],
-        Entry::from_row,
-    )
-    .optional()
-    .map_err(unavailable)
+    db.query_row(query, params![owner, parent, name.key], Entry::from_row)
+        .optional()
+        .map_err(unavailable)
 }
 
 pub(super) fn children(
@@ -148,10 +148,8 @@ pub(super) fn children(
 ) -> Result<Vec<Resource>, StatusCode> {
     let parent = directory.entry.as_ref().map(|entry| entry.id.as_str());
     let mut statement = db
-        .prepare(&format!(
-            "SELECT {METADATA} FROM entry e {LIVE_REVISION}
-        WHERE e.owner_account_id=?1 AND e.state='active' AND e.parent_id IS ?2
-        ORDER BY e.name_key, e.entry_id LIMIT ?3"
+        .prepare(select_entries!(
+            "e.parent_id IS ?2 ORDER BY e.name_key, e.entry_id LIMIT ?3"
         ))
         .map_err(unavailable)?;
     let mut children = Vec::new();

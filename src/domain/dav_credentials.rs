@@ -2,6 +2,8 @@ use crate::domain::{authz, upload};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rusqlite::{Connection, OptionalExtension, params};
 
+const PASSWORD_PREFIX: &str = "sylux.";
+
 #[derive(Clone)]
 pub(crate) struct DavProof {
     id: String,
@@ -11,7 +13,7 @@ pub(crate) struct DavProof {
 
 impl DavProof {
     pub(crate) fn parse(handle: &str, password: &str) -> Option<Self> {
-        let (id, secret) = password.strip_prefix("sylux.")?.split_once('.')?;
+        let (id, secret) = password.strip_prefix(PASSWORD_PREFIX)?.split_once('.')?;
         if handle.is_empty() || handle.len() > 64 || secret.len() != 43 {
             return None;
         }
@@ -72,7 +74,7 @@ pub(crate) fn generate() -> Result<(String, [u8; 32], String), &'static str> {
     let id = upload::random_id()?;
     let mut secret = [0; 32];
     getrandom::fill(&mut secret).map_err(|_| "entropy_unavailable")?;
-    let password = format!("sylux.{id}.{}", URL_SAFE_NO_PAD.encode(secret));
+    let password = format!("{PASSWORD_PREFIX}{id}.{}", URL_SAFE_NO_PAD.encode(secret));
     let verifier = authz::verifier(&secret);
     secret.fill(0);
     Ok((id, verifier, password))
