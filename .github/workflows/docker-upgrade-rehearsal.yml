@@ -22,6 +22,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      - name: Check rehearsal scripts
+        run: |
+          bash -n scripts/rehearse-docker-upgrade.sh
+          shellcheck -x scripts/rehearse-docker-upgrade.sh
+          python3 -m py_compile scripts/rehearse-docker-upgrade.py
       - name: Rehearse upgrade from published packages
         run: scripts/rehearse-docker-upgrade.sh upgrade
       - name: Remove the disposable fixture

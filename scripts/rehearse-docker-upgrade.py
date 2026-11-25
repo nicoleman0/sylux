@@ -246,8 +246,8 @@ def verify_revoked_grant(admin, member, library, entry_id):
     library_id = library["id"]
     path = f"/shared/entries/{entry_id}/content"
     manage = f"/entries/{library_id}/direct-grants"
-    check(member.data("member incoming shares", "GET", "/shared", 200)["items"] == [],
-          "Unexpected incoming library grant.")
+    check(library_id not in [item["entry"]["id"] for item in member.data("member incoming shares", "GET", "/shared", 200)["items"]],
+          "Revoked library remains discoverable.")
     member.request("member shared listing denied", "GET", f"/shared/folders/{library_id}/children", 404)
     member.request("member shared download denied", "GET", path, 404)
     check(admin.data("owner grant inventory without a grant", "GET", manage, 200)["items"] == [],
@@ -263,7 +263,12 @@ def verify_grants(trust, state, baseline):
     verify_revoked_grant(admin, member, library, entry_id)
     check(download(admin, "owner named library download", f"/entries/{entry_id}/content", "notes.txt")
           == baseline["download"], "Owner named library bytes changed.")
-    evidence("Named library inventory, revoked member access and owner download matched.")
+    active = baseline["active"]
+    incoming = member.data("member incoming shares", "GET", "/shared", 200)["items"]
+    check([item["entry"]["id"] for item in incoming] == [active["library_id"]], "Active grant missing or unexpected shares.")
+    check([item["id"] for item in items(member, "active shared listing", f"/shared/folders/{active['library_id']}/children")] == [active["entry_id"]], "Active grant listing differed.")
+    check(download(member, "active shared download", f"/shared/entries/{active['entry_id']}/content", "notes.txt") == active["download"], "Active grant bytes changed.")
+    evidence("Active and revoked library grants and bytes matched.")
 
 
 def grants(trust, state):
@@ -292,7 +297,11 @@ def grants(trust, state):
     observed = download(admin, "owner download after named grant revocation",
                         f"/entries/{uploaded['id']}/content", "notes.txt")
     evidence("Named library baseline passed. The member discovered, listed and downloaded the grant, then lost access on revoke. Owner bytes still matched.")
-    return {"library": inventory(library), "entry_id": uploaded["id"], "download": observed}
+    active_library = admin.data("create active library", "POST", "/libraries", 201, {"name": "Active rehearsal"})
+    active_entry = upload(admin, active_library, "notes.txt")
+    admin.data("grant active library", "POST", f"/entries/{active_library['id']}/direct-grants", 200, {"handle": "fixture-member"})
+    return {"library": inventory(library), "entry_id": uploaded["id"], "download": observed,
+            "active": {"library_id": active_library["id"], "entry_id": active_entry["id"], "download": observed}}
 
 
 def save(path, value):

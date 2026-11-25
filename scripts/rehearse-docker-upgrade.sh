@@ -42,7 +42,7 @@ fi
 mkdir -m 0700 -- "$fixture"
 stage='preparing supported storage and the loopback certificate'
 exec 3>&1
-trap 'printf "Upgrade rehearsal failed while %s (private command output withheld).\n" "$stage" >&3' ERR
+trap 'status=$?; trap - ERR; printf "Upgrade rehearsal failed while %s (line %s, exit %s; output withheld).\n" "$stage" "$LINENO" "$status" >&3' ERR
 exec >"$fixture/private.log" 2>&1
 unset DEBUG PWDEBUG
 
@@ -67,18 +67,25 @@ mkdir "$fixture/archive"
 sudo install -d -o 10001 -g 10001 -m 0700 "$fixture/live" "$fixture/tls"
 check_storage "$fixture/live"
 live_device=$(findmnt -n -o SOURCE -T "$fixture/live")
-[[ -b "$live_device" ]]
+live_major_minor=$(findmnt -n -o MAJ:MIN -T "$fixture/live")
+[[ "$live_major_minor" =~ ^[0-9]+:[0-9]+$ && -e "/sys/dev/block/$live_major_minor" ]]
 truncate -s 128M "$fixture/archive.ext4"
 mkfs.ext4 -q -F "$fixture/archive.ext4"
 sudo mount -o loop,nosuid,nodev,noexec "$fixture/archive.ext4" "$fixture/archive"
 sudo chmod 0700 "$fixture/archive"
 check_storage "$fixture/archive"
 archive_device=$(findmnt -n -o SOURCE --mountpoint "$fixture/archive")
-[[ -b "$archive_device" && "$live_device" != "$archive_device" ]]
+archive_major_minor=$(findmnt -n -o MAJ:MIN --mountpoint "$fixture/archive")
+[[ -b "$archive_device" && "$live_major_minor" != "$archive_major_minor" ]]
 [[ "$(stat -c %d "$fixture/live")" != "$(stat -c %d "$fixture/archive")" ]]
 docker_version=$(docker_local version --format '{{.Server.Version}}')
 compose_version=$(docker_local compose version --short)
 [[ "$docker_version" =~ ^[a-zA-Z0-9.+~-]+$ && "$compose_version" =~ ^[a-zA-Z0-9.+~-]+$ ]]
+kernel=$(uname -r)
+image_os=${ImageOS:-unknown}
+image_version=${ImageVersion:-unknown}
+[[ "$kernel" =~ ^[a-zA-Z0-9.+~-]+$ && "$image_os" =~ ^[a-zA-Z0-9.+~-]+$ && "$image_version" =~ ^[a-zA-Z0-9.+~-]+$ ]]
+evidence "Runner image $image_os $image_version, kernel $kernel"
 evidence "Host: Ubuntu 24.04 x86_64, Docker $docker_version, Compose $compose_version"
 evidence "Mounts: live ext4 ($live_device), distinct mounted archive ext4 ($archive_device)"
 
