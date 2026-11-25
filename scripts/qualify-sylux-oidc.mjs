@@ -165,9 +165,11 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         const response = await api(context, 'GET', path, 200, { headers });
         check((await response.body()).equals(bytes), 'Fixture download changed bytes');
     }
-    async function shareForConversion(ownerContext, owner, file, recipient, handle) {
+    async function shareForConversion(ownerContext, owner, recipient, handle) {
         const csrf = owner.csrf_token;
-        const [root] = (await json(ownerContext, 'GET', '/libraries', 200)).items;
+        const root = await json(ownerContext, 'POST', '/libraries', 201,
+            { csrf, data: { name: 'Direct grant fixture' } });
+        const file = await upload(ownerContext, csrf, 'granted.txt', root);
         const grantPath = `/entries/${root.id}/direct-grants`;
         const grant = await json(ownerContext, 'POST', grantPath, 200, { csrf, data: { handle } });
         check(!!grant.id && grant.handle === handle, 'Fixture grant was not created');
@@ -394,9 +396,8 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         });
         const peerContext = await context();
         const peer = await local(peerContext, 'peer');
-        const peerFile = await upload(peerContext, peer.csrf_token, 'peer-live.txt');
-        const verifyOwned = await shareForConversion(ownerContext, owner, liveFile, peerContext, 'peer');
-        const verifyReceived = await shareForConversion(peerContext, peer, peerFile, ownerContext, 'alice');
+        const verifyOwned = await shareForConversion(ownerContext, owner, peerContext, 'peer');
+        const verifyReceived = await shareForConversion(peerContext, peer, ownerContext, 'alice');
         await verifyOwned();
         await verifyReceived();
         const dav = await json(ownerContext, 'POST', '/me/webdav', 201, {
