@@ -964,6 +964,7 @@ fn library_migration_rolls_back_schema_and_version_on_failure() {
     );
     db.execute_batch("DROP INDEX entry_library_name").unwrap();
     schema::migrate_v3(&db, None).unwrap();
+    schema::migrate_v4(&db, None).unwrap();
     assert_eq!(
         schema::apply_migrations(&db).unwrap(),
         schema::MigrationOutcome::AlreadyCurrent

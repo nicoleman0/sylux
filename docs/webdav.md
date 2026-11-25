@@ -4,7 +4,7 @@ WebDAV is off by default. To enable it, add `--webdav` to the server's existing 
 
 Open **Account → Manage app passwords**. Choose a name for the client and select **Read only** if it should only browse and download. Create the password and copy it from the one-time display. Enter the server URL ending in `/dav/`, your Sylux account name, and that app password in the client. You can revoke each password from Account. Account password or authority changes invalidate existing app passwords.
 
-Use the **WebDAV (HTTPS)** connection type in Cyberduck. Set the starting path to `/dav/`. Turn off upload timestamp preservation if enabled. Browse **Files** for the default library or open any other private library in the same account. Library roots can be created in Sylux.
+In Thunar, enter `davs://ACCOUNT@HOST:PORT/dav/` in the location bar. In clients with separate connection settings, select **WebDAV (HTTPS)** and use `/dav/` as the starting path. Browse **Files** for the default library or open any other private library in the same account. Create library roots in Sylux.
 
 ## Method limits
 
@@ -20,6 +20,6 @@ Use the **WebDAV (HTTPS)** connection type in Cyberduck. Set the starting path t
 
 Read-only passwords receive 403 for the supported write methods. An app password only sees its account's private libraries, including when the account is an administrator.
 
-The endpoint implements a subset of WebDAV. Locks, lock-token conditions, property writes, `COPY`, overwriting, resumable uploads and mounting as an operating system drive are outside this compatibility boundary. Unsupported methods return 405. Clients can use the ordinary `If-Match` and `If-None-Match` ETag conditions. A file closed out by the server immediately before a connection failure may already be present. Check its name and bytes before retrying.
+The endpoint advertises its method subset with `DAV: sylux`. Locks, lock-token conditions, property writes, `COPY`, overwriting, resumable uploads and filesystem mounts that require locking are outside this compatibility boundary. Turn off upload timestamp preservation in clients that use property writes. Unsupported methods return 405. Clients can use the ordinary `If-Match` and `If-None-Match` ETag conditions. A file closed out by the server immediately before a connection failure may already be present. Check its name and bytes before retrying.
 
 Use **Refresh folder** in Sylux to see changes made while that folder was open.

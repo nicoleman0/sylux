@@ -1,0 +1,75 @@
+name: WebDAV desktop journey
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/webdav-desktop.yml
+      - scripts/check-webdav-desktop.py
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .nvmrc
+      - src/config.rs
+      - src/main.rs
+      - src/domain/dav_credentials.rs
+      - src/domain/coordinator.rs
+      - src/domain/namespace.rs
+      - src/domain/upload.rs
+      - src/http/dav/**
+      - src/http/dav_credentials.rs
+      - src/http/mod.rs
+      - src/http/content.rs
+      - src/http/uploads.rs
+      - src/persistence/**
+      - migrations/sqlite/**
+      - web/package.json
+      - web/package-lock.json
+
+permissions:
+  contents: read
+
+jobs:
+  thunar:
+    name: Thunar over loopback TLS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master snapshot
+        with:
+          toolchain: 1.99.1
+          targets: x86_64-unknown-linux-gnu
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install desktop dependencies
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends thunar gvfs gvfs-backends dbus-x11 xvfb xdotool xauth openbox ca-certificates openssl at-spi2-core python3-pyatspi
+      - name: Build Sylux
+        run: |
+          npm install --global npm@11.19.1
+          npm --prefix web ci
+          npm --prefix web run build
+          cargo build --locked --bin sylux
+      - name: Run Thunar journey
+        timeout-minutes: 4
+        run: |
+          mkdir -p "$RUNNER_TEMP/sylux-webdav-evidence"
+          set -o pipefail
+          xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' dbus-run-session -- \
+            /usr/bin/python3 scripts/check-webdav-desktop.py target/debug/sylux \
+            | tee "$RUNNER_TEMP/sylux-webdav-evidence/journey.jsonl"
+      - name: Preserve desktop evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: webdav-thunar
+          path: ${{ runner.temp }}/sylux-webdav-evidence/journey.jsonl
+          if-no-files-found: warn
+          retention-days: 14

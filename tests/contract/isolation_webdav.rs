@@ -220,6 +220,30 @@ async fn webdav_storage_writes_preserve_bytes_preconditions_and_trash() {
     let root_xml = std::str::from_utf8(&root_xml).unwrap();
     assert!(root_xml.contains("/dav/Work%20%26%20notes/"));
     assert!(root_xml.contains("Work &amp; notes"));
+    for (actor, name) in [(1, "Other libraries"), (2, "Admin libraries")] {
+        let (_, credential) = fixture.credential(actor, name, false).await;
+        assert_eq!(
+            fixture
+                .request(
+                    "PROPFIND",
+                    "/dav/Work%20%26%20notes/",
+                    None,
+                    &[credential, ("Depth", "0".into())],
+                    ""
+                )
+                .await
+                .0,
+            404
+        );
+    }
+    assert_eq!(
+        fixture
+            .request("DELETE", "/dav/Files/", None, &credentials, "")
+            .await
+            .0,
+        403
+    );
+
     for path in [
         "/dav/Files/..",
         "/dav/Files/%2e%2e",
@@ -658,5 +682,59 @@ async fn webdav_upload_rechecks_path_and_revocation_at_final_commit() {
         .await
         .unwrap();
     assert_eq!(settled, 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn webdav_lost_put_response_does_not_duplicate_a_publication() {
+    use super::common::server::tls_connect;
+    use tokio::io::AsyncWriteExt;
+
+    let fixture = Fixture::with_webdav(true).await;
+    let (_, credential) = fixture.credential(0, "Lost response", false).await;
+    let path = "/dav/Files/lost-response.bin";
+    let address = fixture.server.as_ref().unwrap().address();
+    let mut socket = tls_connect(address, &fixture.ca, "127.0.0.1")
+        .await
+        .unwrap();
+    fixture.upload_commit.arm();
+    let request = format!(
+        "PUT {path} HTTP/1.1\r\nHost: {address}\r\n{}: {}\r\nContent-Length: 8\r\n\r\nsurvives",
+        credential.0, credential.1
+    );
+    socket.write_all(request.as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), fixture.upload_commit.wait_paused())
+        .await
+        .unwrap();
+    drop(socket);
+    fixture.upload_commit.release();
+
+    let auth = [credential];
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (status, _, payload) = fixture.request("GET", path, None, &auth, "").await;
+            if status == 200 {
+                assert_eq!(payload, b"survives");
+                break;
+            }
+            assert_eq!(status, 404);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture.request("PUT", path, None, &auth, "retry").await.0,
+        412
+    );
+    let published = fixture.workers.as_ref().unwrap().read(|db| {
+        db.query_row(
+            "SELECT count(*) FROM mutation m JOIN revision r ON r.revision_id=m.result_revision_id
+             JOIN entry e ON e.entry_id=r.entry_id
+             WHERE m.principal_account_id=?1 AND m.state='committed' AND e.original_name='lost-response.bin'",
+            [OWNER], |row| row.get::<_, i64>(0),
+        )
+    }).await.unwrap();
+    assert_eq!(published, 1);
     fixture.close().await;
 }
