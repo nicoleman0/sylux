@@ -738,6 +738,10 @@
   let deletedItems = $state<DeletedEntry[]>([]);
   let trashRequest = 0;
   let showTrash = $state(false);
+  const filesView = $derived(!showTrash && !accountView && !settingsView && !librariesView);
+  const namedLibrary = $derived(folderPath[0]?.id && folderPath[0].id !== folders[0]?.id ? folderPath[0] : undefined);
+  const librariesCurrent = $derived(librariesView ? 'page' : filesView && namedLibrary ? 'location' : undefined);
+  const filesCurrent = $derived(filesView && !namedLibrary);
   let trashError = $state('');
   let trashBusy = $state(false);
   const resultSortBlocked = $derived(bulkBusy || bulkNeedsRefresh || restorationPending || trashBusy);
@@ -3029,8 +3033,8 @@
       <AppSidebar {instanceName} logoUrl={appearance.logoUrl} onhome={home}>
         {#snippet navigation(close)}
           <nav aria-label="Files"><Sidebar.Menu>
-          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="My libraries" aria-label="My libraries" aria-busy={routeName === 'libraries'} isActive={librariesView} aria-current={librariesView ? 'page' : undefined} onclick={() => { close(); void navigate('libraries'); }}><LibraryIcon /><span>My libraries</span></Sidebar.MenuButton></Sidebar.MenuItem>
-          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" aria-busy={routeName === 'files'} isActive={!showTrash && !accountView && !settingsView && !librariesView} aria-current={!showTrash && !accountView && !settingsView && !librariesView ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={() => { close(); void navigate('files', folders[0] ? [folders[0]] : undefined); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="My libraries" aria-label="My libraries" aria-busy={routeName === 'libraries'} isActive={!!librariesCurrent} aria-current={librariesCurrent} onclick={() => { close(); void navigate('libraries'); }}><LibraryIcon /><span>My libraries</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" aria-busy={routeName === 'files'} isActive={filesCurrent} aria-current={filesCurrent ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={() => { close(); void navigate('files', folders[0] ? [folders[0]] : undefined); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Trash" aria-label="Trash" aria-busy={routeName === 'trash'} isActive={showTrash} aria-current={showTrash ? 'page' : undefined} onclick={() => { close(); void openTrash(); }}><TrashIcon /><span>Trash</span></Sidebar.MenuButton></Sidebar.MenuItem>
 
           </Sidebar.Menu></nav>
@@ -3050,7 +3054,7 @@
       </AppSidebar>
       <Sidebar.Inset class="min-w-0">
         <header class="app-header workspace-header">
-          <div class="workspace-location"><Sidebar.Trigger /><span class="header-divider"></span><span>{settingsView ? 'Settings' : accountView ? 'Account' : showTrash ? 'Trash' : librariesView ? 'My libraries' : 'Files'}</span></div>
+          <div class="workspace-location"><Sidebar.Trigger /><span class="header-divider shrink-0"></span><span class="truncate" title={filesView ? namedLibrary?.name : undefined}>{settingsView ? 'Settings' : accountView ? 'Account' : showTrash ? 'Trash' : librariesView ? 'My libraries' : (namedLibrary?.name ?? 'Files')}</span></div>
           <div class="header-actions">
             <HeaderIconButton label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} pressed={darkMode} onclick={toggleTheme}>{#if darkMode}<SunIcon />{:else}<MoonIcon />{/if}</HeaderIconButton>
             <HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>
@@ -3294,7 +3298,7 @@
               {/if}
             </div>
             <div class="search-toolbar">
-              <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || (restorationPending && !searchDuringRoute) || restorationFailed} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : folderPath[0]?.id !== folders[0]?.id ? 'Search this library by name' : 'Search by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
+              <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || (restorationPending && !searchDuringRoute) || restorationFailed} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : namedLibrary ? 'Search this library by name' : 'Search all libraries by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
                   oncompositionstart={searchCompositionStarted} oncompositionend={(event) => { searchComposing = false; searchInput = event.currentTarget.value; searchChanged(); }} />
                 {#if searchQuery}<Button variant="outline" type="button" disabled={bulkBusy || restorationPending || restorationFailed} onclick={clearSearchFromButton}>Clear search</Button>{/if}
               </div>

@@ -141,6 +141,40 @@ test('private libraries keep same-name folders and saved routes separate', { ann
     await expect(files(index === 0 ? 'sketch.txt' : 'survey.txt')).toHaveCount(0);
   }
 
+  const workspaceLocation = page.locator('.workspace-location > span:last-child');
+  await expect(workspaceLocation).toHaveText('Studio');
+  await expect(myLibraries).toHaveAttribute('aria-current', 'location');
+  await expect(page.getByRole('button', { name: 'Files', exact: true })).not.toHaveAttribute('aria-current');
+  for (const [action, filename] of [['Copy', 'survey.txt'], ['Move', 'sketch.txt']]) {
+    const [source, destination] = action === 'Copy' ? bookmarks : [...bookmarks].reverse();
+    const [sourceLibrary, destinationLibrary] = action === 'Copy' ? ['Field work', 'Studio'] : ['Studio', 'Field work'];
+    await page.goto(source);
+    await expect(files(filename)).toBeVisible();
+    await page.getByRole('button', { name: `Options for ${filename}`, exact: true }).click();
+    await page.getByRole('menuitem', { name: action, exact: true }).click();
+    const picker = page.getByRole('dialog', { name: `${action} ${filename}`, exact: true });
+    await expect(picker.getByRole('navigation', { name: `${action} destination path` })).toHaveText(sourceLibrary);
+    const chooseLibrary = picker.getByRole('button', { name: 'Choose a library', exact: true });
+    await expect(chooseLibrary).toBeEnabled();
+    await chooseLibrary.click();
+    const choices = picker.getByRole('group', { name: 'Destination libraries' });
+    await choices.getByRole('button', { name: destinationLibrary, exact: true }).click();
+    await picker.getByRole('group', { name: 'Destination folders' }).getByRole('button', { name: 'Projects', exact: true }).click();
+    const confirm = picker.getByRole('button', { name: `${action} here`, exact: true });
+    await expect(confirm).toBeEnabled();
+    await confirm.press('Enter');
+    await expect(picker).toBeHidden();
+
+    if (action === 'Copy') await expect(files(filename)).toBeVisible();
+    else await expect(files(filename)).toHaveCount(0);
+    await page.goto(destination);
+    await expect(files(filename)).toBeVisible();
+    await files(filename).click();
+    const preview = page.getByRole('dialog', { name: `Preview ${filename}`, exact: true });
+    await expect(preview).toContainText(sourceLibrary);
+    await preview.getByRole('button', { name: 'Close preview', exact: true }).click();
+  }
+
   await page.getByRole('button', { name: 'Log out', exact: true }).click();
   await signIn();
   await myLibraries.click();

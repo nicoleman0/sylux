@@ -179,8 +179,13 @@ pub fn find_sorted(
         location.reverse();
         let location_key = location
             .iter()
-            .filter(|part| !part.name.is_empty())
-            .map(|part| fold(&part.name))
+            .map(|part| {
+                fold(if part.name.is_empty() {
+                    "Files"
+                } else {
+                    &part.name
+                })
+            })
             .collect::<Vec<_>>()
             .join("\0");
         matches.push((
@@ -267,6 +272,45 @@ mod tests {
         let name = EntryName::parse(name).unwrap();
         db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id,owner,parent,name.display,name.key]).unwrap();
         id
+    }
+
+    #[test]
+    fn location_sort_uses_the_default_library_display_name() {
+        let mut db = database();
+        let tx = db.transaction().unwrap();
+        let studio = namespace::create_library(&tx, OWNER, "Studio").unwrap();
+        let alpha = insert(&tx, 0x10, OWNER, ROOT, "Alpha");
+        let zeta = insert(&tx, 0x11, OWNER, ROOT, "Zeta");
+        let projects = insert(&tx, 0x12, OWNER, &studio.id, "Projects");
+        for (index, parent) in [&alpha, &zeta, &projects].into_iter().enumerate() {
+            insert(&tx, 0x20 + index, OWNER, parent, "Match");
+        }
+        tx.commit().unwrap();
+
+        for (sort, expected) in [
+            (ResultSort::LocationAsc, [&alpha, &zeta, &projects]),
+            (ResultSort::LocationDesc, [&projects, &zeta, &alpha]),
+        ] {
+            for scope in [None, Some(ROOT)] {
+                let found = find_sorted(&db, OWNER, scope, "Match", sort).unwrap();
+                let parents: Vec<_> = found
+                    .hits
+                    .iter()
+                    .map(|hit| &hit.location.last().unwrap().id)
+                    .collect();
+                assert_eq!(parents, expected);
+            }
+        }
+        let named = find_sorted(
+            &db,
+            OWNER,
+            Some(&studio.id),
+            "Match",
+            ResultSort::LocationAsc,
+        )
+        .unwrap();
+        assert_eq!(named.hits.len(), 1);
+        assert_eq!(named.hits[0].location.last().unwrap().id, projects);
     }
 
     #[test]
