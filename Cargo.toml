@@ -22,6 +22,12 @@ default = []
 test-harness = []
 
 [[test]]
+name = "oidc_fixture"
+path = "tests/oidc_fixture.rs"
+harness = false
+required-features = ["test-harness"]
+
+[[test]]
 name = "harness_self"
 path = "tests/harness_self.rs"
 required-features = ["test-harness"]
@@ -206,6 +212,10 @@ futures-util = { version = "=0.3.34", default-features = false }
 crc32fast = { version = "=1.5.5", default-features = false }
 tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["std", "fmt", "json"] }
+huskarl = { version = "=0.11.11", default-features = false }
+hyper-rustls = { version = "=0.27.10", default-features = false, features = ["http1", "tls12"] }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["client-legacy", "http1", "tokio"] }
+url = { version = "=2.5.9", default-features = false, features = ["std"] }
 # Security-critical transitives: do not rely on a compatible but vulnerable floor.
 password-hash = { version = "=0.6.1", default-features = false }
 tokio-rustls = { version = "=0.26.6", default-features = false }

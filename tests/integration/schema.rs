@@ -827,7 +827,7 @@ fn valid_seed_passes_product_recovery_checks() {
 fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication() {
     use sylux::domain::namespace;
     use sylux::persistence::root;
-    for version in [1, 2, 3, 4, 5, 6] {
+    for version in [1, 2, 3, 4, 5, 6, 7] {
         for interrupted in [false, true] {
             let (owner, path) = fixture(&format!("legacy-v{version}-{interrupted}"));
             fs::remove_file(&path).unwrap();
@@ -894,6 +894,9 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                 )
                 .unwrap();
             }
+            if version >= 7 {
+                schema::migrate_library_publication(&db, None).unwrap();
+            }
             if interrupted {
                 use sha2::{Digest, Sha256};
                 let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
@@ -904,6 +907,7 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                     4 => schema::migrate_v4,
                     5 => schema::migrate_direct_grants,
                     6 => schema::migrate_library_publication,
+                    7 => schema::migrate_external_identity,
                     _ => unreachable!(),
                 };
                 migrate(&db, Some(hash.as_slice())).unwrap();
@@ -914,7 +918,8 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                 let (object, kind) = match version {
                     4 => ("dav_credential", "TABLE"),
                     5 => ("direct_grant_trash", "TRIGGER"),
-                    _ => ("library_publication_trash", "TRIGGER"),
+                    6 => ("library_publication_trash", "TRIGGER"),
+                    _ => ("external_identity_pending_handle", "INDEX"),
                 };
                 let create_sql: String = bound
                     .connection
@@ -1042,6 +1047,7 @@ fn library_migration_rolls_back_schema_and_version_on_failure() {
     schema::migrate_v4(&db, None).unwrap();
     schema::migrate_direct_grants(&db, None).unwrap();
     schema::migrate_library_publication(&db, None).unwrap();
+    schema::migrate_external_identity(&db, None).unwrap();
     assert_eq!(
         schema::apply_migrations(&db).unwrap(),
         schema::MigrationOutcome::AlreadyCurrent

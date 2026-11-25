@@ -38,7 +38,7 @@ pub struct Change {
     new_password: String,
 }
 
-fn valid_handle(handle: &str) -> bool {
+pub(super) fn valid_handle(handle: &str) -> bool {
     !handle.is_empty()
         && handle.len() <= 64
         && handle.bytes().enumerate().all(|(i, b)| {
@@ -88,7 +88,7 @@ pub(super) fn authorize(
     }
     Ok(id)
 }
-fn response(
+pub(super) fn response(
     result: Result<Result<(), StatusCode>, crate::persistence::sqlite::WorkerError>,
 ) -> Response {
     match result {
@@ -116,7 +116,7 @@ async fn preflight(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
     Ok(())
 }
-fn random_id() -> Result<String, StatusCode> {
+pub(super) fn random_id() -> Result<String, StatusCode> {
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
@@ -203,18 +203,23 @@ async fn change_authority(
         {
             return Err(StatusCode::BAD_REQUEST);
         }
-        let (role, enabled): (String, bool) = tx.query_row(
-            "SELECT role,enabled FROM account WHERE account_id=?1", [&target],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+        let (role, enabled, external): (String, bool, bool) = tx.query_row(
+            "SELECT role,enabled,credential_mode='external' FROM account WHERE account_id=?1", [&target],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).optional().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::NOT_FOUND)?;
         let (new_role, new_enabled, action) = match &change {
             AuthorityChange::Disable if enabled && actor != target =>
                 (role.as_str(), false, "account.disabled"),
-            AuthorityChange::Enable if !enabled && actor != target =>
+            AuthorityChange::Enable if !enabled && actor != target && (!external || tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_identity CROSS JOIN external_provider
+                               WHERE account_id=?1 AND state='active')",
+                [&target], |r| r.get::<_, bool>(0),
+            ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?) =>
                 (role.as_str(), true, "account.enabled"),
             AuthorityChange::Role(new_role) if enabled && new_role != &role
-                && !(actor == target && new_role == "user") =>
+                && !(actor == target && new_role == "user")
+                && !(external && new_role == "administrator") =>
                 (new_role.as_str(), true, if new_role == "administrator" { "account.promoted" } else { "account.demoted" }),
             _ => return Err(StatusCode::CONFLICT),
         };
@@ -284,7 +289,7 @@ pub async fn reset(
     response(state.workers.transact_result(move |tx| {
         let actor = authorize(tx, &cookie, csrf.as_ref(), true)?;
         if actor == target { return Err(StatusCode::CONFLICT); }
-        let changed = tx.execute("UPDATE account SET password_verifier=?1,credential_epoch=credential_epoch+1 WHERE account_id=?2 AND role='user' AND enabled=1", params![verifier,target]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let changed = tx.execute("UPDATE account SET password_verifier=?1,credential_epoch=credential_epoch+1 WHERE account_id=?2 AND role='user' AND enabled=1 AND credential_mode='local'", params![verifier,target]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if changed != 1 { return Err(StatusCode::NOT_FOUND); }
         tx.execute("UPDATE session SET revoked=1 WHERE account_id=?1", [&target]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         Ok(())
@@ -346,7 +351,7 @@ pub async fn change_password(
     response(state.workers.transact_result(move |tx| {
         let actor = authorize(tx, &cookie, csrf.as_ref(), false)?;
         if actor != id { return Err(StatusCode::UNAUTHORIZED); }
-        let changed = tx.execute("UPDATE account SET password_verifier=?1,credential_epoch=credential_epoch+1 WHERE account_id=?2 AND password_verifier=?3", params![verifier,id,old]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let changed = tx.execute("UPDATE account SET password_verifier=?1,credential_epoch=credential_epoch+1 WHERE account_id=?2 AND password_verifier=?3 AND credential_mode='local'", params![verifier,id,old]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if changed != 1 { return Err(StatusCode::CONFLICT); }
         tx.execute("UPDATE session SET revoked=1 WHERE account_id=?1", [&id]).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         Ok(())

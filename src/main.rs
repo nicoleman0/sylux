@@ -264,7 +264,7 @@ async fn serve_listener(
     {
         return Err("setup_authorization_invalid");
     }
-    let auth = AuthState::new_with_setup(
+    let mut auth = AuthState::new_with_setup(
         workers.clone(),
         configuration.public_origin.unwrap_or_else(|| {
             format!(
@@ -278,6 +278,9 @@ async fn serve_listener(
     .with_webdav(configuration.webdav)
     .with_storage_root(&configuration.root)
     .map_err(|_| "payload_storage_unavailable")?;
+    auth.disable_oidc()
+        .await
+        .map_err(|_| "external_identity_state_unavailable")?;
     let mut terminate = signal(SignalKind::terminate()).map_err(|_| "signal_setup_failed")?;
     let storage = auth.storage.clone().ok_or("payload_storage_unavailable")?;
     let cleanup = auth.start_cleanup();

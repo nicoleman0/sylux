@@ -69,14 +69,14 @@ pub(crate) fn now() -> i64 {
         .min(i64::MAX as u64) as i64
 }
 
-fn random_secret() -> Option<([u8; 32], String)> {
+pub(super) fn random_secret() -> Option<([u8; 32], String)> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).ok()?;
     let encoded = URL_SAFE_NO_PAD.encode(bytes);
     Some((bytes, encoded))
 }
 
-fn random_session_id() -> Option<String> {
+pub(super) fn random_session_id() -> Option<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).ok()?;
     Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -93,7 +93,7 @@ fn fail(status: StatusCode) -> Response {
     finish((status, "authentication_failed").into_response())
 }
 
-fn with_cookie(response: Response, value: &str, max_age: i64) -> Response {
+pub(super) fn with_cookie(response: Response, value: &str, max_age: i64) -> Response {
     let mut response = finish(response);
     let Ok(value) = HeaderValue::from_str(&secure_cookie(value, max_age)) else {
         return fail(StatusCode::INTERNAL_SERVER_ERROR);
@@ -108,7 +108,7 @@ fn account_by_handle(
 ) -> rusqlite::Result<Option<AccountRow>> {
     connection
         .query_row(
-            "SELECT account_id,handle,role,password_verifier,enabled,credential_epoch FROM account WHERE handle=?1",
+            "SELECT account_id,handle,role,password_verifier,enabled,credential_epoch FROM account WHERE handle=?1 AND credential_mode='local'",
             [handle],
             AccountRow::read,
         )
@@ -121,7 +121,7 @@ fn account_by_id(
 ) -> rusqlite::Result<Option<AccountRow>> {
     connection
         .query_row(
-            "SELECT account_id,handle,role,password_verifier,enabled,credential_epoch FROM account WHERE account_id=?1",
+            "SELECT account_id,handle,role,password_verifier,enabled,credential_epoch FROM account WHERE account_id=?1 AND credential_mode='local'",
             [account_id],
             AccountRow::read,
         )

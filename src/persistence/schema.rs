@@ -6,7 +6,7 @@ use super::{root::InstallationIdentity, sqlite};
 
 /// Versions this build understands and serves. A bound database reporting
 /// anything else refuses startup instead of migrating guesses.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 7;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 8;
 
 pub fn is_older_schema(version: i64) -> bool {
     (1..SUPPORTED_SCHEMA_VERSION).contains(&version)
@@ -148,6 +148,7 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
             migrate_v4(connection, None)?;
             migrate_direct_grants(connection, None)?;
             migrate_library_publication(connection, None)?;
+            migrate_external_identity(connection, None)?;
             Ok(MigrationOutcome::Applied)
         }
         _ => Err(SchemaError::Inconsistent("unsupported user_version")),
@@ -245,6 +246,25 @@ pub(super) fn verify_schema_at(connection: &Connection, version: i64) -> Result<
                     "library_publication_identity",
                     "library_publication_disable",
                     "library_publication_trash",
+                ]
+            } else {
+                &[]
+            },
+        ),
+        (
+            "table",
+            if version >= 8 {
+                &["external_provider", "external_identity"]
+            } else {
+                &[]
+            },
+        ),
+        (
+            "index",
+            if version >= 8 {
+                &[
+                    "external_identity_current_account",
+                    "external_identity_pending_handle",
                 ]
             } else {
                 &[]
@@ -389,6 +409,19 @@ pub fn migrate_library_publication(
         connection,
         7,
         include_str!("../../migrations/sqlite/0007_library_publication.sql"),
+        manifest_hash,
+    )
+}
+
+pub fn migrate_external_identity(
+    connection: &Connection,
+    manifest_hash: Option<&[u8]>,
+) -> Result<(), SchemaError> {
+    verify_schema_at(connection, 7)?;
+    migrate(
+        connection,
+        8,
+        include_str!("../../migrations/sqlite/0008_external_identity.sql"),
         manifest_hash,
     )
 }
