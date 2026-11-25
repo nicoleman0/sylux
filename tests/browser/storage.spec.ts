@@ -110,7 +110,7 @@ test('private libraries keep same-name folders and saved routes separate', { ann
   await signInMember();
   await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
   await myLibraries.click();
-  const libraries = page.getByRole('list', { name: 'Private libraries' });
+  const libraries = page.getByRole('list', { name: 'My libraries' });
   await expect(libraries.getByRole('link')).toHaveText(['Files']);
   const bookmarks: string[] = [];
   for (const [name, filename] of [['Field work', 'survey.txt'], ['Studio', 'sketch.txt']]) {
@@ -745,6 +745,169 @@ test('direct shares show only the live subtree and reconcile a lost restore resp
     await tab.goto(fileBookmark);
     await expect(tab.getByRole('alert')).toHaveText('This share is unavailable.');
     expect(ownerFolder).not.toBe(folderBookmark);
+  } finally {
+    await recipient.close();
+  }
+});
+
+test('owners publish and withdraw a library and readers follow its live contents', { annotation: { type: 'harness_case', description: 'storage_library_publication' } }, async () => {
+  test.setTimeout(65_000);
+  await signIn();
+  const owner = `publication-owner-${phase}`;
+  const member = `publication-reader-${phase}`;
+  const memberPassword = 'Disposable publication reader password';
+  const library = `Handbook ${phase}`;
+  const pdfName = `Team handbook ${phase}.pdf`;
+  const privateName = `Private handbook notes ${phase}`;
+  const pdfBytes = fs.readFileSync(path.resolve(__dirname, '../../web/tests/fixtures/three-pages.pdf'));
+  const button = (tab: Page, name: string) => tab.getByRole('button', { name, exact: true });
+
+  await button(page, 'Settings').click();
+  for (const handle of [owner, member]) {
+    await button(page, 'Create account').click();
+    const dialog = page.getByRole('dialog', { name: 'Create account', exact: true });
+    await dialog.getByLabel('Account name').fill(handle);
+    await dialog.getByLabel('Password', { exact: true }).fill(memberPassword);
+    await dialog.getByLabel('Confirm password').fill(memberPassword);
+    await dialog.getByRole('button', { name: 'Create account', exact: true }).press('Enter');
+    await expect(dialog).toBeHidden();
+  }
+  await button(page, 'Log out').click();
+  await page.getByLabel('Account name').fill(owner);
+  await page.getByLabel('Password', { exact: true }).fill(memberPassword);
+  await button(page, 'Sign in').click();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
+  await button(page, 'New folder').click();
+  await page.getByLabel('Folder name').fill(privateName);
+  await button(page, 'Create folder').press('Enter');
+  await button(page, `Open ${privateName}`).press('Enter');
+  await chooseUpload({ name: pdfName, mimeType: 'application/pdf', buffer: pdfBytes });
+  await expect(button(page, `Preview ${pdfName}`)).toBeVisible();
+  const sourceUrl = page.url();
+
+  await button(page, 'My libraries').click();
+  await button(page, 'New library').click();
+  await page.getByLabel('Library name').fill(library);
+  await button(page, 'Create library').press('Enter');
+  await expect(page.getByRole('dialog', { name: 'New library' })).toBeHidden();
+  const ownerShare = button(page, `Share ${library}`);
+  await ownerShare.press('Enter');
+  const share = page.getByRole('dialog', { name: new RegExp(`^(Share|Publish|Withdraw publication of) ${library}`) });
+  const publish = button(page, 'Publish library…');
+  await publish.press('Enter');
+  await expect(share.getByRole('heading')).toHaveText(`Publish ${library}?`);
+  await expect(share.getByText('Everyone signed in', { exact: false })).toBeVisible();
+  await expect(share.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(publish).toBeFocused();
+  await expect(share.getByText('This library is unpublished.')).toBeVisible();
+  await publish.press('Enter');
+  await button(page, 'Publish library').press('Enter');
+  await expect(share.getByRole('status')).toHaveText('Library published.');
+  await share.getByRole('button', { name: 'Close', exact: true }).last().click();
+  await expect(ownerShare).toBeFocused();
+  const ownerLibrary = page.getByRole('list', { name: 'My libraries', exact: true }).getByRole('link', { name: library, exact: true });
+  await ownerLibrary.press('Enter');
+  await expect(page.getByRole('heading', { name: library })).toBeVisible();
+  const destinationUrl = page.url();
+
+  const recipient = await storageContext();
+  try {
+    const tab = await recipient.newPage();
+    await tab.goto(origin);
+    await tab.getByLabel('Account name').fill(member);
+    await tab.getByLabel('Password', { exact: true }).fill(memberPassword);
+    await button(tab, 'Sign in').click();
+    await button(tab, 'Shared with all').press('Enter');
+    const shared = tab.getByRole('list', { name: 'Libraries shared with all' });
+    await shared.getByRole('link', { name: new RegExp(library) }).press('Enter');
+    await expect(tab.getByRole('heading', { name: library })).toBeVisible();
+    const folderBookmark = tab.url();
+    await expect(tab.getByText('This folder is empty.')).toBeVisible();
+    await expect(button(tab, 'New folder')).toHaveCount(0);
+    await expect(button(tab, `Share ${library}`)).toHaveCount(0);
+
+    await page.goto(sourceUrl);
+    const move = async () => {
+      await button(page, `Options for ${pdfName}`).click();
+      await page.getByRole('menuitem', { name: 'Move', exact: true }).click();
+      const picker = page.getByRole('dialog', { name: `Move ${pdfName}`, exact: true });
+      await picker.getByRole('button', { name: 'Choose a library', exact: true }).click();
+      await picker.getByRole('group', { name: 'Destination libraries' }).getByRole('button', { name: library }).click();
+      const moveHere = picker.getByRole('button', { name: 'Move here', exact: true });
+      await expect(moveHere).toBeEnabled();
+      await moveHere.press('Enter');
+    };
+    await move();
+    const confirmation = page.getByRole('dialog', { name: `Move ${pdfName}?` });
+    await expect(confirmation.getByText('Everyone signed in', { exact: false })).toBeVisible();
+    const cancel = confirmation.getByRole('button', { name: 'Cancel', exact: true });
+    await expect(cancel).toBeFocused();
+    await cancel.press('Enter');
+    await expect(confirmation).toBeHidden();
+    await button(tab, 'Refresh shared files').press('Enter');
+    await expect(tab.getByText('This folder is empty.')).toBeVisible();
+    const picker = page.getByRole('dialog', { name: `Move ${pdfName}`, exact: true });
+    const moveHere = picker.getByRole('button', { name: 'Move here', exact: true });
+    await expect(moveHere).toBeEnabled();
+    await moveHere.press('Enter');
+    await confirmation.getByRole('button', { name: 'Move and share' }).press('Enter');
+    await expect(button(page, `Preview ${pdfName}`)).toHaveCount(0);
+
+    await button(tab, 'Refresh shared files').press('Enter');
+    for (const width of [1280, 390]) {
+      await tab.setViewportSize({ width, height: 850 });
+      for (const scheme of ['light', 'dark'] as const) {
+        await tab.emulateMedia({ colorScheme: scheme });
+        await expect(tab.locator('html')).toHaveCSS('color-scheme', scheme);
+        await expect(tab.getByRole('link', { name: pdfName, exact: true })).toBeVisible();
+        expect(await tab.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      }
+    }
+    await tab.setViewportSize({ width: 1280, height: 850 });
+    await tab.getByRole('searchbox', { name: 'Search shared files' }).fill('Team handbook');
+    await button(tab, 'Search').press('Enter');
+    const results = tab.getByRole('list', { name: 'Shared search results' });
+    await results.getByRole('link', { name: new RegExp(pdfName) }).press('Enter');
+    const fileBookmark = tab.url();
+    const preview = tab.getByRole('dialog', { name: `Preview ${pdfName}` });
+    await expect(preview.locator('.page[data-page-number="1"] canvas').first()).toBeVisible({ timeout: 15_000 });
+    const download = tab.waitForEvent('download');
+    await button(tab, 'Download file').press('Enter');
+    expect(fs.readFileSync((await (await download).path())!)).toEqual(pdfBytes);
+    await button(tab, 'Close preview').press('Enter');
+    await expect(tab).toHaveURL(folderBookmark);
+
+    await page.goto(destinationUrl);
+    await button(page, `Options for ${pdfName}`).click();
+    await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    await button(page, 'Move to trash').press('Enter');
+    await expect(button(page, `Preview ${pdfName}`)).toHaveCount(0);
+    await button(page, 'Trash').click();
+    const restore = button(page, `Restore ${pdfName}`);
+    await restore.press('Enter');
+    const restoring = page.getByRole('dialog', { name: `Restore ${pdfName}?` });
+    await expect(restoring.getByText('Everyone signed in', { exact: false })).toBeVisible();
+    await restoring.getByRole('button', { name: 'Cancel', exact: true }).press('Enter');
+    await expect(restore).toBeVisible();
+    await tab.goto(fileBookmark);
+    await expect(tab.getByRole('alert')).toHaveText('This share is unavailable.');
+    await restore.press('Enter');
+    await restoring.getByRole('button', { name: 'Restore and share' }).press('Enter');
+    await expect(restore).toHaveCount(0);
+    await button(tab, 'Refresh shared files').press('Enter');
+    await expect(preview.locator('.page[data-page-number="1"] canvas').first()).toBeVisible({ timeout: 15_000 });
+
+    await button(page, 'My libraries').press('Enter');
+    await ownerShare.press('Enter');
+    await button(page, 'Withdraw publication…').press('Enter');
+    await expect(share.getByText('Any separate direct shares', { exact: false })).toBeVisible();
+    await button(page, 'Withdraw publication').press('Enter');
+    await expect(share.getByRole('status')).toHaveText('Publication withdrawn.');
+    await tab.goto(fileBookmark);
+    await expect(tab.getByRole('alert')).toHaveText('This share is unavailable.');
+    await tab.goto(folderBookmark);
+    await expect(tab.getByRole('alert')).toHaveText('This share is unavailable.');
   } finally {
     await recipient.close();
   }

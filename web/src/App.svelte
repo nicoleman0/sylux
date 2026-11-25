@@ -16,6 +16,7 @@
   import SettingsIcon from '@lucide/svelte/icons/settings';
   import TrashIcon from '@lucide/svelte/icons/trash-2';
   import UserRoundIcon from '@lucide/svelte/icons/user-round';
+  import UsersRoundIcon from '@lucide/svelte/icons/users-round';
   import LogOutIcon from '@lucide/svelte/icons/log-out';
   import EntryOptions from './lib/EntryOptions.svelte';
   import ShareLinks from './lib/ShareLinks.svelte';
@@ -40,7 +41,7 @@
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import XIcon from '@lucide/svelte/icons/x';
   import { ApiClient, HttpError, HttpTransport, MutationApi } from './lib/api';
-  import { sharingConfirmation, type SharingConfirmation } from './lib/direct-grants';
+  import { sharingConfirmation, sharingTitle, type SharingConfirmation } from './lib/direct-grants';
   import { modifiedTime } from './lib/modified-time';
   import { actionTargets, listIntent, moveIndex, shortcutHelp, shortcutsBlocked } from './lib/list-keys';
   import { compareDeleted, ListingApi, type Entry, type Folder, type DeletedEntry, type SearchHit, type FolderSort, type ResultSort, type RemovalPreview, type RemovalResult } from './lib/listing';
@@ -48,7 +49,7 @@
   import { TransferApi, identifyFile, saveRefused, type Replacement } from './lib/transfers';
   import { directoryFilesToUpload, filesToUpload, snapshotDesktopDrop, type UploadItem } from './lib/desktop-drop';
 
-  import { parseLocation, locationHash, savedContext, type BrowsingContext, type Destination, type Location, type AccountSort } from './lib/browsing-context';
+  import { isSharingDestination, type SharingDestination, parseLocation, locationHash, savedContext, type BrowsingContext, type Destination, type Location, type AccountSort } from './lib/browsing-context';
 
   import { MockTransport } from './lib/mock-transport';
 
@@ -105,7 +106,7 @@
   let accountView = $state(false);
   let settingsView = $state(false);
   let librariesView = $state(false);
-  let sharedView = $state(false);
+  let sharedView = $state<SharingDestination | null>(null);
   let sharedLocation = $state({ folder: '', file: undefined as string | undefined });
   let libraries = $state<Folder[]>([]);
   let librariesError = $state('');
@@ -175,7 +176,7 @@
 
   function browsingSnapshot(): BrowsingContext {
     return { version: 1, owner: user?.id ?? '',
-      destination: settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : librariesView ? 'libraries' : sharedView ? 'shared' : 'files',
+      destination: settingsView ? 'settings' : accountView ? 'account' : showTrash ? 'trash' : librariesView ? 'libraries' : sharedView ?? 'files',
       folder: sharedView ? sharedLocation.folder : librariesView ? '' : currentFolder.id,
       file: sharedView ? sharedLocation.file : undefined, query: searchQuery, sort: folderSort, searchSort, trashSort, accountSort,
       cursors: [...pageCursors], page: pageIndex, searchCursors: [...searchPageCursors], searchPage: searchPageIndex, scroll: window.scrollY };
@@ -242,7 +243,7 @@
     settingsView = destination === 'settings';
     showTrash = destination === 'trash';
     librariesView = destination === 'libraries';
-    sharedView = destination === 'shared';
+    sharedView = isSharingDestination(destination) ? destination : null;
   }
 
   function navigate(destination: Destination, path?: Folder[], shared?: { folder: string; file?: string }): Promise<boolean> {
@@ -252,7 +253,7 @@
     if (pendingRoute === hash) return Promise.resolve(false);
     const previous = parseLocation(window.location.hash);
     saveNavigation();
-    if (previous.destination !== destination || ((destination === 'files' || destination === 'shared') &&
+    if (previous.destination !== destination || ((destination === 'files' || isSharingDestination(destination)) &&
         (previous.folder !== next.folder || previous.file !== next.file || previous.query))) {
       window.history.pushState({ sylux: {
         ...next, version: 1, owner: user.id, cursors: [null], page: 0, searchCursors: [null], searchPage: 0, scroll: 0,
@@ -262,7 +263,7 @@
   }
 
   function navigateShared(folder = '', file?: string): void {
-    void navigate('shared', undefined, { folder, file });
+    void navigate(sharedView ?? 'shared', undefined, { folder, file });
   }
 
   async function restoreNavigation(): Promise<void> {
@@ -399,7 +400,7 @@
         }
         listingError = '';
         if (restarted) notice = query ? 'Files changed. Search results have been restarted.' : 'This folder changed. The listing has been restarted.';
-      } else if (destination === 'shared') {
+      } else if (isSharingDestination(destination)) {
         clearSearch();
         sharedLocation = { folder: location.folder, file: location.file };
       } else if (destination === 'libraries') {
@@ -1612,7 +1613,7 @@
       else if (!operation?.inProgress) textEdit.state.operation = null;
     }
     share = null; shareBusy = false; directShare = null; directShareBusy = ''; settleTreeSharing(false);
-    sharedView = false; sharedLocation = { folder: '', file: undefined };
+    sharedView = null; sharedLocation = { folder: '', file: undefined };
     webdavAvailable = false; webdavOpen = false; webdavTrigger = null;
     clearSearch();
     archiveBusy = false; archiveTargets = [];
@@ -1821,7 +1822,7 @@
   }
 
   type TreeSharingPrompt = {
-    action: 'move' | 'restore'; name: string; destination?: string; audience: SharingConfirmation; changed: boolean;
+    action: 'move' | 'restore'; item: Entry; destination?: string; audience: SharingConfirmation; changed: boolean;
   };
   let treeSharingPrompt = $state<TreeSharingPrompt | null>(null);
   let treeSharingAnswer: ((answer: boolean) => void) | undefined;
@@ -1849,7 +1850,7 @@
         if (!audience) throw error;
         if (generation !== sessionGeneration || navigation !== navigationRequest) return false;
         treeSharingFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        treeSharingPrompt = { action, name: item.name, destination, audience, changed: token !== undefined };
+        treeSharingPrompt = { action, item, destination, audience, changed: token !== undefined };
         const approved = await new Promise<boolean>(resolve => { treeSharingAnswer = resolve; });
         if (!approved) return false;
         token = audience.token;
@@ -3131,7 +3132,8 @@
         {#snippet navigation(close)}
           <nav aria-label="Files"><Sidebar.Menu>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="My libraries" aria-label="My libraries" aria-busy={routeName === 'libraries'} isActive={!!librariesCurrent} aria-current={librariesCurrent} onclick={() => { close(); void navigate('libraries'); }}><LibraryIcon /><span>My libraries</span></Sidebar.MenuButton></Sidebar.MenuItem>
-          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Shared with me" aria-label="Shared with me" isActive={sharedView} aria-current={sharedView ? 'page' : undefined} onclick={() => { close(); navigateShared(); }}><FolderOpenIcon /><span>Shared with me</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Shared with me" aria-label="Shared with me" isActive={sharedView === 'shared'} aria-current={sharedView === 'shared' ? 'page' : undefined} onclick={() => { close(); void navigate('shared'); }}><FolderOpenIcon /><span>Shared with me</span></Sidebar.MenuButton></Sidebar.MenuItem>
+          <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Shared with all" aria-label="Shared with all" isActive={sharedView === 'published'} aria-current={sharedView === 'published' ? 'page' : undefined} onclick={() => { close(); void navigate('published'); }}><UsersRoundIcon /><span>Shared with all</span></Sidebar.MenuButton></Sidebar.MenuItem>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Files" aria-label="Files" aria-busy={routeName === 'files'} isActive={filesCurrent} aria-current={filesCurrent ? 'page' : undefined} data-drop-target={folders[0]?.id} data-drop-active={dropTarget === folders[0]?.id} ondragover={(event) => folders[0] && dragOver(event, folders[0])} ondragleave={(event) => folders[0] && dragLeave(event, folders[0])} ondrop={(event) => folders[0] && dropEntry(event, folders[0])} onclick={() => { close(); void navigate('files', folders[0] ? [folders[0]] : undefined); }}><FolderIcon /><span>Files</span></Sidebar.MenuButton></Sidebar.MenuItem>
           <Sidebar.MenuItem><Sidebar.MenuButton tooltipContent="Trash" aria-label="Trash" aria-busy={routeName === 'trash'} isActive={showTrash} aria-current={showTrash ? 'page' : undefined} onclick={() => { close(); void openTrash(); }}><TrashIcon /><span>Trash</span></Sidebar.MenuButton></Sidebar.MenuItem>
 
@@ -3152,7 +3154,7 @@
       </AppSidebar>
       <Sidebar.Inset class="min-w-0">
         <header class="app-header workspace-header">
-          <div class="workspace-location"><Sidebar.Trigger /><span class="header-divider shrink-0"></span><span class="truncate" title={filesView ? namedLibrary?.name : undefined}>{settingsView ? 'Settings' : accountView ? 'Account' : showTrash ? 'Trash' : librariesView ? 'My libraries' : sharedView ? 'Shared with me' : (namedLibrary?.name ?? 'Files')}</span></div>
+          <div class="workspace-location"><Sidebar.Trigger /><span class="header-divider shrink-0"></span><span class="truncate" title={filesView ? namedLibrary?.name : undefined}>{settingsView ? 'Settings' : accountView ? 'Account' : showTrash ? 'Trash' : librariesView ? 'My libraries' : sharedView ? sharingTitle(sharedView) : (namedLibrary?.name ?? 'Files')}</span></div>
           <div class="header-actions">
             <HeaderIconButton label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} pressed={darkMode} onclick={toggleTheme}>{#if darkMode}<SunIcon />{:else}<MoonIcon />{/if}</HeaderIconButton>
             <HeaderIconButton label="Log out" disabled={loggingOut} onclick={signOut}><LogOutIcon /></HeaderIconButton>
@@ -3346,7 +3348,7 @@
             {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{/if}
           </section>
         {:else if sharedView}
-          <SharedWorkspace {client} location={sharedLocation} onnavigate={navigateShared} />
+          <SharedWorkspace {client} destination={sharedView} location={sharedLocation} onnavigate={navigateShared} />
         {:else if showTrash}
             {@const trashEmpty = !restorationPending && !trashLoading && !trashError && deletedItems.length === 0}
             <section class="trash-content grid gap-4" aria-labelledby="trash-heading" inert={retainingRoute} aria-busy={trashLoading || restorationPending}>
@@ -3573,12 +3575,18 @@
           if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus();
         }}>
         <Dialog.Header>
-          <Dialog.Title class="[overflow-wrap:anywhere]">{treeSharingPrompt?.action === 'restore' ? 'Restore' : 'Move'} {treeSharingPrompt?.name}?</Dialog.Title>
+          <Dialog.Title class="[overflow-wrap:anywhere]">{treeSharingPrompt?.action === 'restore' ? 'Restore' : 'Move'} {treeSharingPrompt?.item.name}?</Dialog.Title>
           <Dialog.Description>
             {#if treeSharingPrompt?.changed}Sharing changed. Check who will have access.{:else if treeSharingPrompt?.destination}Move to {treeSharingPrompt.destination}.{:else}This item will return to its original folder.{/if}
           </Dialog.Description>
         </Dialog.Header>
-        {#if treeSharingPrompt?.audience.new_recipients.length}
+        {#if treeSharingPrompt?.audience.exposes_to_all}
+          <p>Everyone signed in now or in the future will be able to open and download {treeSharingPrompt.item.kind === 'folder' ? 'files in this folder' : 'this file'}{treeSharingPrompt.action === 'restore' ? ' after restore' : ' in the new location'}.</p>
+        {/if}
+        {#if treeSharingPrompt?.audience.removes_access_for_all}
+          <p>Access through Shared with all will end. Separate direct shares may still apply.</p>
+        {/if}
+        {#if treeSharingPrompt?.audience.new_recipients.length && !treeSharingPrompt.audience.exposes_to_all}
           <div class="grid gap-1"><p>New access</p><ul class="list-disc pl-5 [overflow-wrap:anywhere]">
             {#each treeSharingPrompt.audience.new_recipients as handle (handle)}<li>{handle}</li>{/each}
           </ul></div>
@@ -3595,7 +3603,7 @@
         {/if}
         <Dialog.Footer>
           <Button id="cancel-tree-sharing" variant="outline" onclick={() => settleTreeSharing(false)}>Cancel</Button>
-          <Button onclick={() => settleTreeSharing(true)}>{treeSharingPrompt?.action === 'restore' ? 'Restore and share' : 'Confirm move'}</Button>
+          <Button onclick={() => settleTreeSharing(true)}>{treeSharingPrompt?.action === 'restore' ? 'Restore and share' : treeSharingPrompt?.audience.exposes_to_all ? 'Move and share' : 'Confirm move'}</Button>
         </Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
@@ -3662,7 +3670,7 @@
         <Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => authorityTarget = null}>Cancel</Button><Button disabled={accountBusy} aria-busy={accountBusy} onclick={changeAccountAuthority}>{accountBusy ? 'Updating…' : authorityTarget?.action === 'enable' ? 'Enable account' : authorityTarget?.account.role === 'user' ? 'Make administrator' : 'Make user'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
-    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. Direct shares to and from this account end permanently. Enabling the account again does not restore them.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} aria-busy={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
+    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. Direct shares to and from this account end, and their published libraries are withdrawn. Enabling the account again does not restore sharing.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} aria-busy={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
   {/if}
   {#if !user || loggingOut}{@render betaNotice(false)}{/if}
 </div>

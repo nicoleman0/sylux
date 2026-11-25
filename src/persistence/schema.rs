@@ -6,7 +6,7 @@ use super::{root::InstallationIdentity, sqlite};
 
 /// Versions this build understands and serves. A bound database reporting
 /// anything else refuses startup instead of migrating guesses.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 6;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 7;
 
 pub fn is_older_schema(version: i64) -> bool {
     (1..SUPPORTED_SCHEMA_VERSION).contains(&version)
@@ -147,6 +147,7 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
             migrate_v3(connection, None)?;
             migrate_v4(connection, None)?;
             migrate_direct_grants(connection, None)?;
+            migrate_library_publication(connection, None)?;
             Ok(MigrationOutcome::Applied)
         }
         _ => Err(SchemaError::Inconsistent("unsupported user_version")),
@@ -216,6 +217,34 @@ pub(super) fn verify_schema_at(connection: &Connection, version: i64) -> Result<
                     "direct_grant_identity",
                     "direct_grant_disable",
                     "direct_grant_trash",
+                ]
+            } else {
+                &[]
+            },
+        ),
+        (
+            "table",
+            if version >= 7 {
+                &["library_publication"]
+            } else {
+                &[]
+            },
+        ),
+        (
+            "index",
+            if version >= 7 {
+                &["library_publication_owner"]
+            } else {
+                &[]
+            },
+        ),
+        (
+            "trigger",
+            if version >= 7 {
+                &[
+                    "library_publication_identity",
+                    "library_publication_disable",
+                    "library_publication_trash",
                 ]
             } else {
                 &[]
@@ -347,6 +376,19 @@ pub fn migrate_direct_grants(
         connection,
         6,
         include_str!("../../migrations/sqlite/0006_direct_grants.sql"),
+        manifest_hash,
+    )
+}
+
+pub fn migrate_library_publication(
+    connection: &Connection,
+    manifest_hash: Option<&[u8]>,
+) -> Result<(), SchemaError> {
+    verify_schema_at(connection, 6)?;
+    migrate(
+        connection,
+        7,
+        include_str!("../../migrations/sqlite/0007_library_publication.sql"),
         manifest_hash,
     )
 }

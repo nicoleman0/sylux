@@ -7,6 +7,7 @@ pub(crate) mod copy;
 pub(crate) mod dav_credentials;
 pub(crate) mod direct_grants;
 pub mod ids;
+pub(crate) mod library_publication;
 pub mod mutation;
 pub mod names;
 pub mod namespace;

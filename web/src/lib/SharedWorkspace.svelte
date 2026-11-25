@@ -6,14 +6,16 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { HttpError, type ApiClient } from './api';
-  import { DirectSharingApi, type SharedRoot } from './direct-grants';
+  import type { SharingDestination } from './browsing-context';
+  import { DirectSharingApi, sharingTitle, type SharedRoot } from './direct-grants';
   import FilePreview from './FilePreview.svelte';
   import RefreshButton from './RefreshButton.svelte';
   import type { Entry, FileEntry, Folder, SearchHit } from './listing';
   import type { TextEditState } from './text-edit';
 
-  let { client, location, onnavigate }: {
+  let { client, destination, location, onnavigate }: {
     client: ApiClient;
+    destination: SharingDestination;
     location: { folder: string; file?: string };
     onnavigate: (folder?: string, file?: string) => void;
   } = $props();
@@ -32,6 +34,7 @@
   let request: AbortController | undefined;
   const editSession = new AbortController();
   let edit = $state<TextEditState>({ draft: null, operation: null, stale: false });
+  const title = $derived(sharingTitle(destination));
   const folder = $derived(path.at(-1));
   const pdf = $derived(file?.name.toLowerCase().endsWith('.pdf') ? file : null);
 
@@ -39,13 +42,14 @@
 
   $effect(() => {
     const target = location;
+    const scope = destination;
     untrack(() => {
       path = []; roots = []; entries = []; results = []; file = null; query = ''; queryInput = ''; next = null;
-      void load(target);
+      void load(target, null, scope);
     });
   });
 
-  async function load(target = location, cursor: string | null = null): Promise<void> {
+  async function load(target = location, cursor: string | null = null, scope = destination): Promise<void> {
     request?.abort();
     const controller = request = new AbortController();
     const { signal } = controller;
@@ -59,7 +63,7 @@
       } else if (search) {
         const [current, response] = await Promise.all([
           target.folder ? sharing.path(target.folder, signal) : null,
-          sharing.search(search, target.folder, cursor, signal),
+          sharing.search(scope, search, target.folder, cursor, signal),
         ]);
         if (!signal.aborted) {
           if (current) path = current.items;
@@ -77,7 +81,7 @@
           next = response[1].next_cursor;
         }
       } else {
-        const response = await sharing.incoming(signal);
+        const response = await sharing.incoming(scope, signal);
         if (!signal.aborted) roots = response.items;
       }
     } catch (failure) {
@@ -86,7 +90,7 @@
         path = []; roots = []; entries = []; results = []; file = null; next = null;
         error = 'This share is unavailable.';
       } else if (cursor && failure instanceof HttpError && (failure.status === 400 || failure.status === 409)) {
-        return load(target);
+        return load(target, null, scope);
       } else {
         error = 'Could not load shared files. Try again.';
       }
@@ -102,7 +106,7 @@
   }
 
   function link(folder?: string, file?: string): string {
-    return file ? `#shared/file/${encodeURIComponent(file)}` : folder ? `#shared/${encodeURIComponent(folder)}` : '#shared';
+    return file ? `#${destination}/file/${encodeURIComponent(file)}` : folder ? `#${destination}/${encodeURIComponent(folder)}` : `#${destination}`;
   }
 
   function follow(event: MouseEvent, folder?: string, file?: string): void {
@@ -135,14 +139,14 @@
   <div>
     {#if location.folder || location.file}
       <nav class="breadcrumb flex-wrap" aria-label="Shared folder path">
-        <a href={link()} onclick={follow}>Shared with me</a>
+        <a href={link()} onclick={follow}>{title}</a>
         {#each (file ? path : path.slice(0, -1)) as part (part.id)}
           <span aria-hidden="true">/</span><a href={link(part.id)} onclick={(event) => follow(event, part.id)}>{part.name}</a>
         {/each}
       </nav>
     {/if}
     <div class="flex items-center justify-between gap-3">
-      <h1 id="shared-title" tabindex="-1" class="min-w-0 [overflow-wrap:anywhere]">{file?.name ?? folder?.name ?? 'Shared with me'}</h1>
+      <h1 id="shared-title" tabindex="-1" class="min-w-0 [overflow-wrap:anywhere]">{file?.name ?? folder?.name ?? title}</h1>
       <RefreshButton label="Refresh shared files" busyLabel="Refreshing shared files…" keepFocus {busy} onclick={() => load()} />
     </div>
   </div>
@@ -169,11 +173,11 @@
         {#each entries as entry (entry.id)}{@render row(entry)}{/each}
       </ul>
     {:else if !query && !location.folder && roots.length}
-      <ul class="divide-y rounded-lg border" aria-label="Folders shared with me">
+      <ul class="divide-y rounded-lg border" aria-label={destination === 'published' ? 'Libraries shared with all' : 'Folders shared with me'}>
         {#each roots as root (root.entry.id)}{@render row(root.entry, `Shared by ${root.owner} · Read only`)}{/each}
       </ul>
     {:else if !busy}
-      <p>{query ? 'No matching files or folders.' : location.folder ? 'This folder is empty.' : 'No folders or libraries have been shared with you.'}</p>
+      <p>{query ? 'No matching files or folders.' : location.folder ? 'This folder is empty.' : destination === 'published' ? 'No libraries have been shared with all.' : 'No folders or libraries have been shared with you.'}</p>
     {/if}
   {/if}
   {#if next && !error}<Button variant="outline" class="justify-self-start" disabled={busy} onclick={() => load(location, next)}>Load more</Button>{/if}

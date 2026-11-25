@@ -295,7 +295,7 @@ pub async fn search(
     headers: HeaderMap,
     Query(q): Query<SearchQuery>,
 ) -> Response {
-    read_search(s, headers, q, false).await
+    read_search(s, headers, q, None).await
 }
 
 pub async fn shared_search(
@@ -303,10 +303,23 @@ pub async fn shared_search(
     headers: HeaderMap,
     Query(q): Query<SearchQuery>,
 ) -> Response {
-    private(read_search(s, headers, q, true).await)
+    private(read_search(s, headers, q, Some(direct_grants::IncomingScope::Direct)).await)
 }
 
-async fn read_search(s: AuthState, headers: HeaderMap, q: SearchQuery, shared: bool) -> Response {
+pub async fn published_search(
+    State(s): State<AuthState>,
+    headers: HeaderMap,
+    Query(q): Query<SearchQuery>,
+) -> Response {
+    private(read_search(s, headers, q, Some(direct_grants::IncomingScope::Published)).await)
+}
+
+async fn read_search(
+    s: AuthState,
+    headers: HeaderMap,
+    q: SearchQuery,
+    shared: Option<direct_grants::IncomingScope>,
+) -> Response {
     if q.q.is_empty() || q.q.len() > 255 || q.q.chars().any(char::is_control) {
         return error(StatusCode::BAD_REQUEST, "invalid_query");
     }
@@ -345,7 +358,7 @@ fn build_search(
     q: SearchQuery,
     limit: usize,
     key: [u8; 32],
-    shared: bool,
+    shared: Option<direct_grants::IncomingScope>,
 ) -> Result<serde_json::Value, Response> {
     let Some((current, _, _)) = authz::validate_session(
         db,
@@ -359,25 +372,20 @@ fn build_search(
         return Err(error(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
     let sort = result_sort(q.sort.as_deref())?;
-    let find = if shared {
-        domain_search::find_shared
-    } else {
-        domain_search::find_sorted
-    };
-    let found =
-        find(db, &account, q.folder_id.as_deref(), &q.q, sort).map_err(
-            |failure| match failure {
-                NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
-                _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-            },
-        )?;
-    // Keep existing root cursors valid and make older servers reject folder cursors.
-    let version = if shared {
-        4
-    } else if found.folder_id.is_some() {
-        3
-    } else {
-        2
+    let folder = q.folder_id.as_deref();
+    let found = match shared {
+        Some(scope) => domain_search::find_shared(db, &account, scope, folder, &q.q, sort),
+        None => domain_search::find_sorted(db, &account, folder, &q.q, sort),
+    }
+    .map_err(|failure| match failure {
+        NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
+        _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    })?;
+    let version = match shared {
+        Some(direct_grants::IncomingScope::Published) => 5,
+        Some(direct_grants::IncomingScope::Direct) => 4,
+        None if found.folder_id.is_some() => 3,
+        None => 2,
     };
     let offset = if let Some(token) = q.cursor {
         let Some(cursor) = search_cursor_decode(&key, &token) else {

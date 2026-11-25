@@ -204,6 +204,7 @@ fn namespace_db() -> Connection {
     sylux::persistence::schema::migrate_v3(&db, None).unwrap();
     sylux::persistence::schema::migrate_v4(&db, None).unwrap();
     sylux::persistence::schema::migrate_direct_grants(&db, None).unwrap();
+    sylux::persistence::schema::migrate_library_publication(&db, None).unwrap();
     db.execute(
         "INSERT INTO account(account_id,handle,role,enabled,credential_epoch) VALUES(?1,'fixture-owner','user',1,0)",
         [OWNER],

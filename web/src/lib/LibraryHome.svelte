@@ -66,7 +66,7 @@
 {:else}
   {#if notice && !pending}<p role="status" class="text-sm break-words">{notice}</p>{/if}
   {#if items.length}
-    <ul aria-label="Private libraries" class="divide-y rounded-lg border">
+    <ul aria-label="My libraries" class="divide-y rounded-lg border">
       {#each items as folder (folder.id)}
         <li class="flex items-center gap-2 pr-2"><a class="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-md px-3 py-2 font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
           href={`#files/${encodeURIComponent(folder.id)}`} onclick={(event) => openFromLink(event, folder)}>

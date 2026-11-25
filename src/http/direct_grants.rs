@@ -19,7 +19,7 @@ use super::{
     middleware::{decode_secret, origin_matches, session_cookie},
 };
 use crate::domain::{
-    authz, direct_grants,
+    authz, direct_grants, library_publication,
     namespace::{Entry, NamespaceError},
 };
 
@@ -68,8 +68,20 @@ async fn read(
 }
 
 pub(super) async fn incoming(State(state): State<AuthState>, headers: HeaderMap) -> Response {
-    read(state, headers, |db, actor| {
-        let items = direct_grants::incoming(db, actor).map_err(|_| NamespaceError::Sql)?;
+    incoming_for(state, headers, direct_grants::IncomingScope::Direct).await
+}
+
+pub(super) async fn published(State(state): State<AuthState>, headers: HeaderMap) -> Response {
+    incoming_for(state, headers, direct_grants::IncomingScope::Published).await
+}
+
+async fn incoming_for(
+    state: AuthState,
+    headers: HeaderMap,
+    scope: direct_grants::IncomingScope,
+) -> Response {
+    read(state, headers, move |db, actor| {
+        let items = direct_grants::incoming(db, actor, scope).map_err(|_| NamespaceError::Sql)?;
         Ok(Json(json!({ "items": items })).into_response())
     })
     .await
@@ -105,7 +117,8 @@ pub(super) async fn manage(
 ) -> Response {
     read(state, headers, move |db, actor| {
         let items = direct_grants::manage(db, actor, &id)?;
-        Ok(Json(json!({ "items": items })).into_response())
+        let publication_id = library_publication::active_id(db, actor, &id)?;
+        Ok(Json(json!({ "items": items, "publication_id": publication_id })).into_response())
     })
     .await
 }
@@ -191,12 +204,38 @@ pub(super) async fn revoke(
     .await
 }
 
+pub(super) async fn publish(
+    State(state): State<AuthState>,
+    Path(root): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    write(state, headers, move |tx, actor| {
+        let id = library_publication::publish(tx, actor, &root)?;
+        Ok(Json(json!({ "id": id })).into_response())
+    })
+    .await
+}
+
+pub(super) async fn withdraw(
+    State(state): State<AuthState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    write(state, headers, move |tx, actor| {
+        library_publication::withdraw(tx, actor, &id)?;
+        Ok(StatusCode::NO_CONTENT.into_response())
+    })
+    .await
+}
+
 #[derive(Serialize)]
 pub(super) struct Confirmation {
     token: String,
     new_recipients: std::collections::BTreeSet<String>,
     lost_recipients: std::collections::BTreeSet<String>,
     carried_recipients: std::collections::BTreeSet<String>,
+    exposes_to_all: bool,
+    removes_access_for_all: bool,
 }
 
 pub(super) enum ConfirmationError {
@@ -251,7 +290,7 @@ impl ConfirmTree<'_> {
             .map_err(|_| ConfirmationError::Sql)?;
         let key = self.key.ok_or(ConfirmationError::Sql)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| ConfirmationError::Sql)?;
-        mac.update(b"sylux:direct-grant-tree-confirmation:v1\0");
+        mac.update(b"sylux:sharing-tree-confirmation:v2\0");
         mac.update(&body);
         if let Some(signature) = self
             .token
@@ -266,6 +305,8 @@ impl ConfirmTree<'_> {
             new_recipients: impact.new_recipients,
             lost_recipients: impact.lost_recipients,
             carried_recipients: impact.carried_recipients,
+            exposes_to_all: impact.exposes_to_all,
+            removes_access_for_all: impact.removes_access_for_all,
         }))
     }
 }

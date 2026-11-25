@@ -827,7 +827,7 @@ fn valid_seed_passes_product_recovery_checks() {
 fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication() {
     use sylux::domain::namespace;
     use sylux::persistence::root;
-    for version in [1, 2, 3, 4, 5] {
+    for version in [1, 2, 3, 4, 5, 6] {
         for interrupted in [false, true] {
             let (owner, path) = fixture(&format!("legacy-v{version}-{interrupted}"));
             fs::remove_file(&path).unwrap();
@@ -886,6 +886,14 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                 )
                 .unwrap();
             }
+            if version >= 6 {
+                schema::migrate_direct_grants(&db, None).unwrap();
+                db.execute(
+                    "INSERT INTO direct_grant VALUES(?1,?2,?3,?4)",
+                    params![id(41), id(10), id(11), id(30)],
+                )
+                .unwrap();
+            }
             if interrupted {
                 use sha2::{Digest, Sha256};
                 let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
@@ -895,6 +903,7 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                     3 => schema::migrate_v3,
                     4 => schema::migrate_v4,
                     5 => schema::migrate_direct_grants,
+                    6 => schema::migrate_library_publication,
                     _ => unreachable!(),
                 };
                 migrate(&db, Some(hash.as_slice())).unwrap();
@@ -902,10 +911,10 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
             drop(db);
             let bound = root::open_bound_database(&product, BUSY).unwrap();
             if interrupted && version >= 4 {
-                let (object, kind) = if version == 4 {
-                    ("dav_credential", "TABLE")
-                } else {
-                    ("direct_grant_trash", "TRIGGER")
+                let (object, kind) = match version {
+                    4 => ("dav_credential", "TABLE"),
+                    5 => ("direct_grant_trash", "TRIGGER"),
+                    _ => ("library_publication_trash", "TRIGGER"),
                 };
                 let create_sql: String = bound
                     .connection
@@ -936,8 +945,22 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                     r.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(credentials, i64::from(version == 5));
-            if version == 5 {
+            assert_eq!(credentials, i64::from(version >= 5));
+            let grants: i64 = bound
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM direct_grant WHERE grant_id=?1 AND root_id=?2",
+                    params![id(41), id(30)],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(grants, i64::from(version >= 6));
+            let publications: i64 = bound
+                .connection
+                .query_row("SELECT count(*) FROM library_publication", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(publications, 0);
+            if version >= 5 {
                 let credential: (String, String, Vec<u8>, i64, i64) = bound.connection.query_row(
                     "SELECT account_id, name, verifier, credential_epoch, read_only FROM dav_credential WHERE credential_id=?1",
                     [id(40)],
@@ -1018,6 +1041,7 @@ fn library_migration_rolls_back_schema_and_version_on_failure() {
     schema::migrate_v3(&db, None).unwrap();
     schema::migrate_v4(&db, None).unwrap();
     schema::migrate_direct_grants(&db, None).unwrap();
+    schema::migrate_library_publication(&db, None).unwrap();
     assert_eq!(
         schema::apply_migrations(&db).unwrap(),
         schema::MigrationOutcome::AlreadyCurrent
@@ -1075,10 +1099,12 @@ fn unbound_v1_migration_fails_without_writing_a_partial_transition() {
 }
 
 #[test]
-fn reopening_current_schema_refuses_missing_direct_grant_index_or_trigger() {
+fn reopening_current_schema_refuses_missing_sharing_index_or_trigger() {
     for (kind, name) in [
         ("index", "direct_grant_recipient"),
         ("trigger", "direct_grant_trash"),
+        ("index", "library_publication_owner"),
+        ("trigger", "library_publication_trash"),
     ] {
         let (owner, path) = fixture(name);
         let db = sqlite::open_writer(&path, BUSY).unwrap();
@@ -1097,4 +1123,45 @@ fn reopening_current_schema_refuses_missing_direct_grant_index_or_trigger() {
         drop(db);
         cleanup(owner);
     }
+}
+
+#[test]
+fn library_publication_is_removed_by_root_trash_and_does_not_return_on_restore() {
+    let (fixture, path) = fixture("publication-trash");
+    let db = sqlite::open_writer(&path, BUSY).unwrap();
+    schema::apply_migrations(&db).unwrap();
+    let (owner, library, child, publication) = (id(10), id(20), id(30), id(40));
+    insert_account(&db, &owner, "library-owner", "user");
+    insert_root(&db, &library, &owner);
+    insert_child(&db, &child, &owner, &library, "folder", "Child", b"Child").unwrap();
+    assert!(
+        db.execute(
+            "INSERT INTO library_publication VALUES(?1,?2,?3)",
+            params![child, publication, owner]
+        )
+        .is_err()
+    );
+    db.execute(
+        "INSERT INTO library_publication VALUES(?1,?2,?3)",
+        params![library, publication, owner],
+    )
+    .unwrap();
+
+    let set_state = |entry: &str, state| {
+        db.execute(
+            "UPDATE entry SET state=?1 WHERE entry_id=?2",
+            params![state, entry],
+        )
+        .unwrap();
+        db.query_row("SELECT count(*) FROM library_publication", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(set_state(&child, "deleted"), 1);
+    assert_eq!(set_state(&child, "active"), 1);
+    assert_eq!(set_state(&library, "deleted"), 0);
+    assert_eq!(set_state(&library, "active"), 0);
+    drop(db);
+    cleanup(fixture);
 }
