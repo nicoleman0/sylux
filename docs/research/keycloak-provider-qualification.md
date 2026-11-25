@@ -35,6 +35,21 @@ changes. Secrets and certificates are generated per run. The runner discards
 provider logs and removes the container, network and temporary certificates
 on exit.
 
+## Sylux browser contract
+
+Run the production-enabled Sylux browser contract with:
+
+```sh
+npm --prefix web run build
+bash scripts/check-oidc.sh
+```
+
+It builds the regular Sylux binary and uses browser controls with the same
+image pin, a separate password-and-OTP flow and disposable storage. It also
+uses a separate local TLS fault provider for timing, token and database
+controls. See the [operator guide](../oidc.md) for the production settings.
+The observations below are the original password-only provider qualification.
+
 ## Profile and checks
 
 - One native-user realm with the default browser flow and a synthetic password.

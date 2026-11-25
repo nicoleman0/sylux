@@ -34,8 +34,8 @@
         <DropdownMenu.Item class="account-menu-item" onSelect={() => select('personal')}>Personal account settings</DropdownMenu.Item>
         <p class="px-3 py-2 text-xs text-muted-foreground">You cannot disable your own account or change your own role.{lastAdministrator ? ' This is the last enabled administrator.' : ''}</p>
       {:else if account.enabled}
-        {#if account.role === 'user'}<DropdownMenu.Item class="account-menu-item" onSelect={() => select('reset')}>Reset password</DropdownMenu.Item>{/if}
-        <DropdownMenu.Item class="account-menu-item" disabled={lastAdministrator} onSelect={() => select('role')}>{account.role === 'user' ? 'Make administrator' : 'Make user'}</DropdownMenu.Item>
+        {#if account.role === 'user' && account.credential_mode !== 'external'}<DropdownMenu.Item class="account-menu-item" onSelect={() => select('reset')}>Reset password</DropdownMenu.Item>{/if}
+        {#if account.credential_mode !== 'external'}<DropdownMenu.Item class="account-menu-item" disabled={lastAdministrator} onSelect={() => select('role')}>{account.role === 'user' ? 'Make administrator' : 'Make user'}</DropdownMenu.Item>{/if}
         <DropdownMenu.Item class="account-menu-item text-destructive" disabled={lastAdministrator} onSelect={() => select('disable')}>Disable</DropdownMenu.Item>
         {#if lastAdministrator}<p class="px-3 py-2 text-xs text-muted-foreground">Keep at least one enabled administrator.</p>{/if}
       {:else}

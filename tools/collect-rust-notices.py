@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Collect verbatim notices for resolved x86_64 Linux Rust dependencies."""
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -11,6 +12,16 @@ import tempfile
 
 TARGET = "x86_64-unknown-linux-gnu"
 NOTICE_PARTS = ("license", "copying", "notice", "copyright")
+HUSKARL_ARCHIVES = {
+    ("huskarl", "0.11.11"): "1fb0b1712f346c3c31fbd025f2c54ff85b105305e15c82537bb745b27c971133",
+    ("huskarl-core", "0.10.11"): "d813b281d25020dc232a6b965322da44b6bcc0a6fe3bbdec0953033596972afe",
+    ("huskarl-macros", "0.4.2"): "22c230a201c0301aa0979e67c8dfa2e86fdf94ad72dce4f129bf7f906e04ed2e",
+}
+HUSKARL_NOTICES = {
+    "LICENSE-APACHE": "635d5cf12047de0a8cb4840b3d6dcade5e2fe40ee752ba7a44edccd9cf9d9834",
+    "LICENSE-MIT": "6726decf596ec579749be46b5ed41337c9550e4b35f155095d267b4e5c40b283",
+}
+HUSKARL_NOTICE_DIR = Path(__file__).resolve().with_name("rust-notice-supplements") / "huskarl"
 
 
 class CollectionError(RuntimeError):
@@ -30,6 +41,30 @@ def _resolved_packages(metadata):
     active = {node.get("id") for node in resolve.get("nodes", [])}
     packages = [p for p in metadata.get("packages", []) if p.get("id") in active and p.get("source") is not None]
     return sorted(packages, key=lambda p: (p["name"], p["version"]))
+
+
+def _huskarl_notices(package, source, candidates, checksum):
+    name, version = package["name"], package["version"]
+    if (package["source"] != "registry+https://github.com/rust-lang/crates.io-index"
+            or package["license"] != "MIT OR Apache-2.0"):
+        raise CollectionError(f"Huskarl notice supplement source or license mismatch for {name} {version}")
+    if candidates:
+        raise CollectionError(f"remove the unused Huskarl notice supplement for {name} {version}")
+
+    # Cargo fetch retains the published archive beside the registry source cache.
+    registry_src = source.parent.parent
+    archive = registry_src.parent / "cache" / source.parent.name / f"{name}-{version}.crate"
+    if (registry_src.name != "src" or source.name != f"{name}-{version}"
+            or not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != checksum):
+        raise CollectionError(f"Huskarl notice supplement requires the pinned crate archive for {name} {version}")
+
+    notices = []
+    for filename, digest in HUSKARL_NOTICES.items():
+        path = HUSKARL_NOTICE_DIR / filename
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise CollectionError(f"Huskarl notice supplement is missing or changed: {filename}")
+        notices.append((Path(filename), path))
+    return notices
 
 
 def collect(metadata, output):
@@ -73,6 +108,9 @@ def collect(metadata, output):
                         continue
                     candidates.append((relative, resolved))
             candidates.sort(key=lambda item: item[0].as_posix())
+            checksum = HUSKARL_ARCHIVES.get((name, version))
+            if checksum is not None:
+                candidates = _huskarl_notices(package, source, candidates, checksum)
             if not candidates:
                 raise CollectionError(f"no LICENSE/COPYING/NOTICE/COPYRIGHT files found for {name} {version}")
 

@@ -1,7 +1,8 @@
 import type { ApiClient } from './api';
 
-export type User = { id: string; handle: string; role: 'administrator' | 'user' };
-export type Account = { account_id: string; handle: string; role: 'administrator' | 'user'; enabled: boolean };
+export type User = { id: string; handle: string; role: 'administrator' | 'user'; external?: boolean };
+export type Account = { account_id: string; handle: string; role: 'administrator' | 'user'; enabled: boolean; credential_mode?: 'local' | 'external' };
+export type OidcLink = { id: string; handle: string; pending: boolean; expires_at: number | null; generation: number };
 /** Logical file bytes; null means the server could not determine a category. */
 export type Usage = { files_bytes: number | null; trash_bytes: number | null };
 export type AllUsage = { volume: { available_bytes: number; total_bytes: number } | null; accounts: (Usage & { account_id: string })[] };
@@ -38,6 +39,29 @@ export class SessionApi {
     const result = await this.client.request<BackendUser>('/auth/local', { method: 'POST', body: { handle, password } });
     if (result.csrf_token) this.client.setCsrfToken(result.csrf_token);
     return { id: result.account_id, handle: result.handle, role: result.role };
+  }
+  async oidcEnabled(): Promise<boolean> {
+    return (await this.client.request<{ enabled: boolean }>('/auth/oidc/status')).enabled === true;
+  }
+  async externalSession(): Promise<{ user: User; csrfToken: string }> {
+    const result = await this.client.request<BackendUser>('/auth/oidc/session');
+    if (!result.csrf_token) throw new Error('Missing external session token');
+    return { user: { id: result.account_id, handle: result.handle, role: result.role, external: true }, csrfToken: result.csrf_token };
+  }
+  async startOidc(handle: string, conversion_password?: string): Promise<string> {
+    const result = await this.client.request<{ authorization_url: string }>('/auth/oidc/start', {
+      method: 'POST', body: { handle, conversion_password },
+    });
+    const url = new URL(result.authorization_url);
+    if (url.protocol !== 'https:') throw new Error('Invalid Keycloak sign-in URL');
+    return url.href;
+  }
+  oidcLinks(): Promise<OidcLink[]> { return this.client.request('/auth/oidc/approvals'); }
+  approveOidc(subject: string, handle: string, account_id?: string): Promise<void> {
+    return this.client.request('/auth/oidc/approvals', { method: 'POST', body: { subject, handle, account_id } });
+  }
+  revokeOidc({ id, pending, generation }: OidcLink): Promise<void> {
+    return this.client.request(`/auth/oidc/approvals/${id}/revoke`, { method: 'POST', body: { pending, generation } });
   }
   accounts(): Promise<Account[]> { return this.client.request('/accounts'); }
   createAccount(handle: string, password: string): Promise<void> { return this.client.request('/accounts', { method: 'POST', body: { handle, password } }); }

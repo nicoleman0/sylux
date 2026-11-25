@@ -11,6 +11,8 @@ pub mod entries;
 pub mod instance;
 pub mod middleware;
 pub mod mutations;
+pub(crate) mod oidc;
+pub use oidc::ProtocolError as OidcError;
 pub mod removals;
 pub mod setup;
 mod shares;
@@ -43,6 +45,7 @@ pub struct AuthState {
     pub workers: SqliteWorkers,
     pub origin: String,
     webdav: bool,
+    oidc: Option<Arc<oidc::Oidc>>,
     pub setup_authorization: String,
     pub limiter: PasswordLimiter,
     pub anonymous: Arc<Mutex<AnonymousSessions>>,
@@ -81,6 +84,7 @@ impl AuthState {
             workers,
             origin,
             webdav: false,
+            oidc: None,
             setup_authorization,
             limiter: PasswordLimiter::default(),
             anonymous: Arc::default(),
@@ -101,6 +105,10 @@ impl AuthState {
             #[cfg(feature = "test-harness")]
             copy_commit_hook: None,
         }
+    }
+
+    pub async fn configure_oidc(&mut self, path: &std::path::Path) -> Result<(), OidcError> {
+        oidc::configure(self, path).await
     }
 
     pub fn with_webdav(mut self, enabled: bool) -> Self {
@@ -273,6 +281,7 @@ pub fn router(state: AuthState) -> Router {
             axum::routing::any(|| async { axum::http::StatusCode::NOT_FOUND }),
         )
     };
-    app.layer(DefaultBodyLimit::max(64 * 1024))
+    oidc::routes(app)
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }

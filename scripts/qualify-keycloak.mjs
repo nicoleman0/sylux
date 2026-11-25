@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
+import { createHash, createHmac, createPublicKey, randomBytes, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, request as send } from 'node:https';
 import { once } from 'node:events';
 import { setTimeout as wait } from 'node:timers/promises';
 import { chromium } from '../web/node_modules/playwright/index.mjs';
 
-const [fixture, container, origin] = process.argv.slice(2);
+const [fixture, container, origin, syluxFixture] = process.argv.slice(2);
 const realm = 'qualification';
 const issuer = `${origin}/realms/${realm}`;
 const clientId = 'fixture-rp';
@@ -20,6 +20,9 @@ const now = () => Math.floor(Date.now() / 1000);
 const deadline = 5_000;
 const codeLifetime = 20;
 const tokenLifetime = 60;
+const otpPeriod = 5;
+const mfaFlow = 'sylux-required-mfa';
+const factors = new Map();
 let step = 'initialization';
 
 function check(condition, message) {
@@ -89,11 +92,23 @@ const clientAttributes = {
     'use.refresh.tokens': 'false',
 };
 
-async function provision(callback) {
+async function provision(callback, { mfa = false } = {}) {
+    const requirements = ['auth-username-password-form', 'auth-otp-form'];
+    const mfaSettings = mfa ? {
+        browserFlow: mfaFlow, otpPolicyType: 'totp', otpPolicyAlgorithm: 'HmacSHA1',
+        otpPolicyDigits: 6, otpPolicyPeriod: otpPeriod, otpPolicyLookAheadWindow: 1,
+        otpPolicyCodeReusable: false,
+        authenticationFlows: [{
+            alias: mfaFlow, providerId: 'basic-flow', topLevel: true, builtIn: false,
+            authenticationExecutions: requirements.map((authenticator, priority) => ({
+                authenticator, authenticatorFlow: false, requirement: 'REQUIRED', priority,
+            })),
+        }],
+    } : {};
     await ready(`${origin}/realms/master${discoveryPath}`);
     await admin('', {
         method: 'POST', status: 201, json: {
-            realm, enabled: true, sslRequired: 'all', editUsernameAllowed: true,
+            realm, enabled: true, sslRequired: 'all', editUsernameAllowed: true, ...mfaSettings,
             accessCodeLifespan: codeLifetime, accessTokenLifespan: tokenLifetime,
             clients: [{
                 clientId, protocol: 'openid-connect', publicClient: false,
@@ -108,6 +123,13 @@ async function provision(callback) {
     const effectiveRealm = await admin(`/${realm}`);
     check(effectiveRealm.accessCodeLifespan === codeLifetime &&
         effectiveRealm.accessTokenLifespan === tokenLifetime, 'Unexpected effective realm lifetimes');
+    if (mfa) {
+        const executions = await admin(`/${realm}/authentication/flows/${mfaFlow}/executions`);
+        check(effectiveRealm.browserFlow === mfaFlow && effectiveRealm.otpPolicyPeriod === otpPeriod &&
+            executions.length === requirements.length && executions.every((execution, index) =>
+                execution.providerId === requirements[index] && execution.requirement === 'REQUIRED'),
+        'Keycloak password and OTP flow is not required as configured');
+    }
     const [client] = await admin(`/${realm}/clients?clientId=${clientId}`);
     check(client?.standardFlowEnabled && client.publicClient === false &&
         client.clientAuthenticatorType === 'client-secret' && !client.directAccessGrantsEnabled &&
@@ -119,18 +141,32 @@ async function provision(callback) {
     'Unexpected effective relying-party configuration');
 }
 
-async function createUser(username) {
+async function createUser(username, { mfa = false } = {}) {
+    const credentials = [{ type: 'password', value: password, temporary: false }];
+    const factor = mfa ? { secret: random(), counter: -1 } : null;
+    if (factor) credentials.push({
+        type: 'otp', userLabel: 'Disposable authenticator',
+        secretData: JSON.stringify({ value: factor.secret }),
+        credentialData: JSON.stringify({ subType: 'totp', digits: 6, counter: 0,
+            period: otpPeriod, algorithm: 'HmacSHA1' }),
+    });
     const usersPath = `/${realm}/users`;
     await admin(usersPath, {
         method: 'POST', status: 201, json: {
             username, enabled: true, firstName: 'Fixture', lastName: 'User',
             email: `${username}@example.invalid`, emailVerified: true,
-            credentials: [{ type: 'password', value: password, temporary: false }],
+            credentials,
         },
     });
     const users = await admin(`${usersPath}?exact=true&username=${username}`);
     check(users.length === 1 && users[0].enabled, 'Fixture user unavailable');
-    return `${usersPath}/${encodeURIComponent(users[0].id)}`;
+    const path = `${usersPath}/${encodeURIComponent(users[0].id)}`;
+    if (factor) {
+        check((await admin(path + '/credentials')).some(({ type }) => type === 'otp'),
+            'Disposable OTP was not enrolled');
+        factors.set(username, factor);
+    }
+    return path;
 }
 
 async function discover() {
@@ -233,6 +269,43 @@ async function submit(page, username, requireUsername = false) {
     }
     await loginForm(page).fill(password);
     await page.locator('#kc-login').click();
+}
+
+function otpCode(secret, counter) {
+    const time = Buffer.alloc(8);
+    time.writeBigUInt64BE(BigInt(counter));
+    const digest = createHmac('sha1', secret).update(time).digest();
+    const offset = digest.at(-1) & 15;
+    return ((digest.readUInt32BE(offset) & 0x7fff_ffff) % 1_000_000).toString().padStart(6, '0');
+}
+
+async function submitFactor(page, username, valid = true) {
+    const form = page.locator('#kc-otp-login-form');
+    const action = await form.getAttribute('action');
+    check(new URL(action, page.url()).origin === origin, 'Unexpected OTP form destination');
+    const factor = factors.get(username);
+    check(!!factor, 'No disposable OTP for this user');
+    let code;
+    if (valid) {
+        if (Math.floor(now() / otpPeriod) <= factor.counter) {
+            await wait((factor.counter + 1) * otpPeriod * 1000 - Date.now() + 50);
+        }
+        factor.counter = Math.floor(now() / otpPeriod);
+        code = otpCode(factor.secret, factor.counter);
+    } else {
+        const counter = Math.floor(now() / otpPeriod);
+        const neighboring = new Set([-2, -1, 0, 1, 2].map((delta) => otpCode(factor.secret, counter + delta)));
+        code = ['000000', '111111', '222222', '333333', '444444', '555555'].find((value) => !neighboring.has(value));
+    }
+    await form.locator('#otp').fill(code);
+    await form.getByRole('button', { name: 'Sign In' }).click();
+}
+
+async function rotateClientSecret() {
+    const [client] = await admin(`/${realm}/clients?clientId=${clientId}`);
+    const credential = await admin(`/${realm}/clients/${client.id}/client-secret`, { method: 'POST' });
+    check(typeof credential?.value === 'string' && credential.value !== clientSecret, 'Keycloak did not rotate the client secret');
+    return credential.value;
 }
 
 async function start(page, provider, callback, fresh = true) {
@@ -411,7 +484,17 @@ async function main() {
         delete env.KC_BOOTSTRAP_ADMIN_CLIENT_SECRET;
         browser = await chromium.launch({ env, args: [`--ignore-certificate-errors-spki-list=${pin}`] });
         console.log(`Node ${process.version}, Chromium ${browser.version()}.`);
-        await run(browser, callback);
+        if (syluxFixture) {
+            const { qualifySylux } = await import('./qualify-sylux-oidc.mjs');
+            await qualifySylux(fixture, syluxFixture, browser, {
+                check, issuer, clientId, clientSecret, createUser, admin, container, provision, submit, submitFactor, rotateClientSecret,
+                renameFactor: (from, to) => { factors.set(to, factors.get(from)); factors.delete(from); },
+                ready: () => ready(issuer + discoveryPath),
+                step: (name) => { step = name; },
+            });
+        } else {
+            await run(browser, callback);
+        }
     } finally {
         try {
             await browser?.close();
@@ -427,6 +510,9 @@ try {
     // Playwright errors can contain callback URLs or form input. Emit only fixture-owned diagnostics.
     const detail = error.constructor === Error && !error.stack?.includes('node_modules') &&
         error.stack?.split('\n')[1]?.includes('at check (') ? ` ${error.message}` : '';
-    console.error(`Qualification failed during ${step}.${detail}`);
+    const locations = String(error.stack).split('\n')
+        .flatMap((line) => line.match(/qualify-(?:keycloak|sylux-oidc(?:-faults)?)\.mjs:\d+:\d+/g) ?? [])
+        .slice(0, 3).join(', ');
+    console.error(`Qualification failed during ${step}.${detail}${locations ? ` (${locations})` : ''}`);
     process.exitCode = 1;
 }

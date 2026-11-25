@@ -46,6 +46,22 @@ async fn main() -> ExitCode {
                 }
             }
             CommandKind::AdminVerifyPayloads => run_verify_payloads(&configuration),
+            CommandKind::AdminRemoveOidcProvider => {
+                match sylux::admin::remove_oidc_provider(&configuration.root) {
+                    Ok(removed) => {
+                        if removed {
+                            println!("oidc_provider_removed");
+                        } else {
+                            println!("oidc_provider_not_configured");
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(reason) => {
+                        eprintln!("sylux: {reason}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
             CommandKind::AdminBackup => {
                 match sylux::backup::create(
                     &configuration.root,
@@ -264,7 +280,7 @@ async fn serve_listener(
     {
         return Err("setup_authorization_invalid");
     }
-    let auth = AuthState::new_with_setup(
+    let mut auth = AuthState::new_with_setup(
         workers.clone(),
         configuration.public_origin.unwrap_or_else(|| {
             format!(
@@ -278,6 +294,11 @@ async fn serve_listener(
     .with_webdav(configuration.webdav)
     .with_storage_root(&configuration.root)
     .map_err(|_| "payload_storage_unavailable")?;
+    if let Some(path) = configuration.oidc_config.as_deref()
+        && let Err(error) = auth.configure_oidc(path).await
+    {
+        eprintln!("sylux: Keycloak sign-in unavailable ({})", error.reason());
+    }
     let mut terminate = signal(SignalKind::terminate()).map_err(|_| "signal_setup_failed")?;
     let storage = auth.storage.clone().ok_or("payload_storage_unavailable")?;
     let cleanup = auth.start_cleanup();

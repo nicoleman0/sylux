@@ -32,7 +32,7 @@ impl DavProof {
                 "SELECT a.account_id, c.read_only, c.verifier
                  FROM dav_credential c JOIN account a USING (account_id)
                  WHERE c.credential_id=?1 AND a.handle=?2 AND a.enabled=1
-                   AND a.credential_epoch=c.credential_epoch",
+                   AND a.credential_mode='local' AND a.credential_epoch=c.credential_epoch",
                 params![self.id, self.handle],
                 |r| {
                     Ok((

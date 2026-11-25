@@ -125,9 +125,11 @@ pub fn verify_payloads(
     Ok(report)
 }
 
-pub async fn reset_password_from_stdin(root_path: &Path, handle: &str) -> Result<(), &'static str> {
+fn open_recovery_database(
+    root_path: &Path,
+) -> Result<(ownership::OwnershipGuard, root::BoundDatabase), &'static str> {
     verify_recovery_owner(root_path, rustix::process::geteuid().as_raw())?;
-    let _guard = ownership::acquire_writer_lock(root_path).map_err(|error| match error {
+    let guard = ownership::acquire_writer_lock(root_path).map_err(|error| match error {
         ownership::OwnershipError::LockHeld => "service_running_stop_before_recovery",
         _ => "recovery_root_invalid",
     })?;
@@ -137,7 +139,7 @@ pub async fn reset_password_from_stdin(root_path: &Path, handle: &str) -> Result
     }
     root::verify_protected_material(root_path).map_err(|_| "recovery_binding_invalid")?;
     // Declared after ownership so every return closes SQLite before unlocking.
-    let mut bound = root::open_bound_database(root_path, DEFAULT_BUSY_TIMEOUT)
+    let bound = root::open_bound_database(root_path, DEFAULT_BUSY_TIMEOUT)
         .map_err(|_| "recovery_database_unavailable")?;
     root::verify_binding(&bound, root_path, &manifest).map_err(|_| "recovery_binding_invalid")?;
     let version: i64 = bound
@@ -149,6 +151,23 @@ pub async fn reset_password_from_stdin(root_path: &Path, handle: &str) -> Result
     }
     schema::verify_core_schema(&bound.connection).map_err(|_| "recovery_schema_invalid")?;
     schema::recovery_checks(&bound.connection).map_err(|_| "recovery_integrity_failed")?;
+    Ok((guard, bound))
+}
+
+pub fn remove_oidc_provider(root_path: &Path) -> Result<bool, &'static str> {
+    let (_guard, mut bound) = open_recovery_database(root_path)?;
+    let tx = bound
+        .connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| "oidc_removal_transaction_failed")?;
+    let removed = crate::http::oidc::remove_registration(&tx)
+        .map_err(|_| "oidc_removal_transaction_failed")?;
+    tx.commit().map_err(|_| "oidc_removal_commit_uncertain")?;
+    Ok(removed)
+}
+
+pub async fn reset_password_from_stdin(root_path: &Path, handle: &str) -> Result<(), &'static str> {
+    let (_guard, mut bound) = open_recovery_database(root_path)?;
     let setup_consumed: i64 = bound
         .connection
         .query_row(

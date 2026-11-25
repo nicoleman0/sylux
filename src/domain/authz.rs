@@ -152,14 +152,31 @@ pub fn validate_session(
     secret: &[u8],
     now: i64,
 ) -> Option<(String, String, String)> {
+    validate_session_result(connection, session_id, secret, now)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn validate_session_result(
+    connection: &Connection,
+    session_id: &str,
+    secret: &[u8],
+    now: i64,
+) -> rusqlite::Result<Option<(String, String, String)>> {
     let digest = verifier(secret);
     connection
         .query_row(
-            "SELECT a.account_id,a.handle,a.role FROM session s JOIN account a ON a.account_id=s.account_id WHERE s.session_id=?1 AND s.verifier=?2 AND s.revoked=0 AND a.enabled=1 AND s.credential_epoch=a.credential_epoch AND s.idle_expires_at>?3 AND s.absolute_expires_at>?3",
+            "SELECT a.account_id,a.handle,a.role FROM session s JOIN account a ON a.account_id=s.account_id WHERE s.session_id=?1 AND s.verifier=?2 AND s.revoked=0 AND a.enabled=1 AND s.credential_epoch=a.credential_epoch AND s.idle_expires_at>?3 AND s.absolute_expires_at>?3
+             AND ((a.credential_mode='local' AND s.external_identity_id IS NULL)
+               OR (a.credential_mode='external' AND a.role='user' AND EXISTS(
+                    SELECT 1 FROM external_identity x CROSS JOIN external_provider p
+                    WHERE x.identity_id=s.external_identity_id AND x.account_id=a.account_id
+                      AND x.state='active' AND x.generation=s.external_generation
+               )))",
             rusqlite::params![session_id, digest.as_slice(), now],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .ok()
+        .optional()
 }
 
 /// Validate session-bound CSRF material after validating that session in this transaction.

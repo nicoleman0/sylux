@@ -4,6 +4,7 @@ use super::{
         anonymous_cookie, decode_secret, origin_absent_or_matches, origin_matches, secure_cookie,
         session_cookie,
     },
+    oidc,
 };
 use axum::{
     Json,
@@ -69,14 +70,14 @@ pub(crate) fn now() -> i64 {
         .min(i64::MAX as u64) as i64
 }
 
-fn random_secret() -> Option<([u8; 32], String)> {
+pub(super) fn random_secret() -> Option<([u8; 32], String)> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).ok()?;
     let encoded = URL_SAFE_NO_PAD.encode(bytes);
     Some((bytes, encoded))
 }
 
-fn random_session_id() -> Option<String> {
+pub(super) fn random_session_id() -> Option<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).ok()?;
     Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -93,7 +94,7 @@ fn fail(status: StatusCode) -> Response {
     finish((status, "authentication_failed").into_response())
 }
 
-fn with_cookie(response: Response, value: &str, max_age: i64) -> Response {
+pub(super) fn with_cookie(response: Response, value: &str, max_age: i64) -> Response {
     let mut response = finish(response);
     let Ok(value) = HeaderValue::from_str(&secure_cookie(value, max_age)) else {
         return fail(StatusCode::INTERNAL_SERVER_ERROR);
@@ -108,7 +109,7 @@ fn account_by_handle(
 ) -> rusqlite::Result<Option<AccountRow>> {
     connection
         .query_row(
-            "SELECT account_id,handle,role,password_verifier,enabled,credential_epoch FROM account WHERE handle=?1",
+            "SELECT account_id,handle,role,password_verifier,enabled,credential_epoch FROM account WHERE handle=?1 AND credential_mode='local'",
             [handle],
             AccountRow::read,
         )
@@ -121,7 +122,7 @@ fn account_by_id(
 ) -> rusqlite::Result<Option<AccountRow>> {
     connection
         .query_row(
-            "SELECT account_id,handle,role,password_verifier,enabled,credential_epoch FROM account WHERE account_id=?1",
+            "SELECT account_id,handle,role,password_verifier,enabled,credential_epoch FROM account WHERE account_id=?1 AND credential_mode='local'",
             [account_id],
             AccountRow::read,
         )
@@ -243,8 +244,10 @@ pub async fn login(
     let expected_epoch = account.credential_epoch;
     let expected_verifier = account.password_verifier.clone();
     let session_id_for_insert = session_id.clone();
-    let insert_result = state.workers.transact(move |tx| {
-        let current = account_by_id(tx, &account_id)?;
+    let keycloak_attempt = state.oidc.clone().zip(oidc::attempt_binding(&headers));
+    let internal = StatusCode::INTERNAL_SERVER_ERROR;
+    let insert_result = state.workers.transact_result(move |tx| {
+        let current = account_by_id(tx, &account_id).map_err(|_| internal)?;
         let Some(current) = current.filter(|current| {
             current.enabled == 1
                 && current.credential_epoch == expected_epoch
@@ -257,13 +260,18 @@ pub async fn login(
             params![session_id_for_insert, current.account_id, current.credential_epoch,
                 session_verifier.as_slice(), csrf_verifier.as_slice(), now,
                 idle_expires, absolute_expires],
-        )?;
+        ).map_err(|_| internal)?;
+        // A callback already exchanging proof cannot see this response's session cookie.
+        if let Some((oidc, binding)) = keycloak_attempt {
+            oidc.cancel_attempt(binding)?;
+        }
         Ok(Some(current))
     }).await;
     let account = match insert_result {
-        Ok(Some(account)) => account,
-        Ok(None) => return fail(StatusCode::UNAUTHORIZED),
-        Err(_) => return fail(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(Ok(Some(account))) => account,
+        Ok(Ok(None)) => return fail(StatusCode::UNAUTHORIZED),
+        Ok(Err(status)) => return fail(status),
+        Err(_) => return fail(internal),
     };
     with_cookie(
         Json(serde_json::json!({
@@ -329,25 +337,36 @@ pub async fn logout(State(state): State<AuthState>, headers: HeaderMap) -> Respo
     drop(_guard);
     let session_id = cookie.session_id.clone();
     let secret = cookie.secret;
-    let revoked = state
-        .workers
-        .transact_result(move |tx| -> Result<(), StatusCode> {
-            if crate::domain::authz::validate_session(tx, &session_id, &secret, now()).is_none() {
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-            if !crate::domain::authz::csrf_matches(tx, &session_id, &csrf) {
-                return Err(StatusCode::FORBIDDEN);
-            }
-            let changed = tx.execute(
-            "UPDATE session SET revoked=1 WHERE session_id=?1 AND verifier=?2 AND revoked=0",
-            params![session_id, crate::domain::authz::verifier(&secret).as_slice()],
-        ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if changed != 1 {
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-            Ok(())
-        })
-        .await;
+    let revoked =
+        state
+            .workers
+            .transact_result(move |tx| -> Result<(), StatusCode> {
+                if crate::domain::authz::validate_session(tx, &session_id, &secret, now()).is_none()
+                {
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+                if !crate::domain::authz::csrf_matches(tx, &session_id, &csrf) {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                let (account, identity): (String, Option<String>) = tx.query_row(
+                "UPDATE session SET revoked=1 WHERE session_id=?1 AND verifier=?2 AND revoked=0
+                 RETURNING account_id, external_identity_id",
+                params![session_id, crate::domain::authz::verifier(&secret).as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::UNAUTHORIZED)?;
+                if let Some(identity) = identity {
+                    super::oidc::audit(
+                        tx,
+                        Some(&account),
+                        "oidc.session_revoked",
+                        Some(&account),
+                        &identity,
+                    )?;
+                }
+                Ok(())
+            })
+            .await;
     match revoked {
         Ok(Ok(())) => {}
         Ok(Err(status)) => return fail(status),

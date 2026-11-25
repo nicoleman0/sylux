@@ -33,6 +33,7 @@
   import CheckIcon from '@lucide/svelte/icons/check';
   import SortHeader from './lib/SortHeader.svelte';
   import RefreshButton from './lib/RefreshButton.svelte';
+  import OidcApprovals from './lib/OidcApprovals.svelte';
   import * as Alert from '$lib/components/ui/alert/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -61,6 +62,12 @@
   let transfers = new TransferApi(client, mutations);
   let view = $state<'login' | 'setup'>('login');
   let authBusy = $state(false);
+  let oidcEnabled = $state(false);
+  let oidcOpening = $state(false);
+  let conversionOpen = $state(false);
+  let conversionPassword = $state('');
+  let conversionError = $state('');
+  let conversionTrigger: HTMLElement | null = null;
   let darkMode = $state(false);
   let followsSystem = true;
 
@@ -93,12 +100,17 @@
     preference.addEventListener('change', onChange);
     void loadInstance();
     void loadAppearance();
+    void restoreExternalSession();
     const previousScrollRestoration = window.history.scrollRestoration;
     window.history.scrollRestoration = 'manual';
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) oidcOpening = false;
+    };
+    window.addEventListener('pageshow', onPageShow);
     window.addEventListener('scroll', scheduleScrollSave, { passive: true });
     window.addEventListener('pagehide', saveNavigation);
     window.addEventListener('popstate', restoreNavigation);
-    return () => { clearRouteFeedback(); preference.removeEventListener('change', onChange); window.removeEventListener('popstate', restoreNavigation); window.removeEventListener('scroll', scheduleScrollSave); if (scrollSaveTimer) clearTimeout(scrollSaveTimer); window.removeEventListener('pagehide', saveNavigation); window.history.scrollRestoration = previousScrollRestoration; };
+    return () => { clearRouteFeedback(); preference.removeEventListener('change', onChange); window.removeEventListener('popstate', restoreNavigation); window.removeEventListener('scroll', scheduleScrollSave); if (scrollSaveTimer) clearTimeout(scrollSaveTimer); window.removeEventListener('pagehide', saveNavigation); window.removeEventListener('pageshow', onPageShow); window.history.scrollRestoration = previousScrollRestoration; };
   });
   let user = $state<User | null>(null);
   let textEdit = $state<{ ownerId: string; state: TextEditState } | null>(null);
@@ -1442,7 +1454,7 @@
 
   async function signIn(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    if (authBusy || user || loggingOut) return;
+    if (authBusy || oidcOpening || user || loggingOut) return;
     authBusy = true;
     const authView = view;
     notice = '';
@@ -1462,28 +1474,91 @@
         notice = 'Setup complete. Sign in with the new account.';
         return;
       }
-      if (textEdit?.ownerId !== user.id) {
-        textEdit = { ownerId: user.id, state: { draft: null, operation: null, stale: false } };
-      }
-      textEditSession = new AbortController();
-      recoverRemoval();
-      recoverCopy();
-      client.setSessionExpiredHandler(() => expireSession(generation));
-      try {
-        const pending = transfers.restore(user.id);
-        if (pending) {
-          unresolvedUploadId = pending.id; unresolvedUploadName = pending.body.name;
-          uploadReplacement = !!pending.body.replacement;
-          uploadNotice = 'An unfinished upload is retained in this tab. Check its status to continue.';
-          resumeFile = null; resumeReady = false; finishReady = false; uploadExpired = false;
-        }
-      } catch (error) { uploadNotice = error instanceof Error ? error.message : 'Upload recovery could not be loaded.'; }
-      await restoreNavigation();
+      await openSession(user, generation);
     } catch {
       if (generation !== sessionGeneration) return;
       notice = authView === 'setup' ? 'Setup could not be completed. Check the authorization and account details, then try again.' : 'Sign-in could not be completed. Check the details and try again.';
       password = '';
     } finally { if (generation === sessionGeneration) authBusy = false; }
+  }
+
+  async function openSession(signedIn: User, generation: number): Promise<void> {
+    if (textEdit?.ownerId !== signedIn.id) {
+      textEdit = { ownerId: signedIn.id, state: { draft: null, operation: null, stale: false } };
+    }
+    textEditSession = new AbortController();
+    recoverRemoval();
+    recoverCopy();
+    client.setSessionExpiredHandler(() => expireSession(generation));
+    try {
+      const pending = transfers.restore(signedIn.id);
+      if (pending) {
+        unresolvedUploadId = pending.id; unresolvedUploadName = pending.body.name;
+        uploadReplacement = !!pending.body.replacement;
+        uploadNotice = 'An unfinished upload is retained in this tab. Check its status to continue.';
+        resumeFile = null; resumeReady = false; finishReady = false; uploadExpired = false;
+      }
+    } catch (error) { uploadNotice = error instanceof Error ? error.message : 'Upload recovery could not be loaded.'; }
+    await restoreNavigation();
+  }
+
+  async function restoreExternalSession(): Promise<void> {
+    const generation = sessionGeneration;
+    const url = new URL(window.location.href);
+    const outcome = url.searchParams.get('oidc');
+    if (outcome === 'failed' || outcome === 'unavailable') {
+      url.searchParams.delete('oidc');
+      window.history.replaceState(window.history.state, '', url);
+      notice = outcome === 'unavailable' ? 'Keycloak sign-in is unavailable. Try again later.'
+        : 'Keycloak sign-in could not be completed. Check your account name and approval, then try again.';
+    }
+    void session.oidcEnabled().then((enabled) => { oidcEnabled = enabled; }).catch(() => {});
+    try {
+      const restored = await session.externalSession();
+      if (generation !== sessionGeneration || authBusy || oidcOpening || user) return;
+      client.setCsrfToken(restored.csrfToken);
+      user = restored.user;
+      await openSession(restored.user, ++sessionGeneration);
+    } catch { /* Local sign-in is independent of the external session probe. */ }
+  }
+
+  async function startKeycloak(event?: SubmitEvent): Promise<void> {
+    event?.preventDefault();
+    if (oidcOpening || authBusy || !oidcEnabled || user?.external) return;
+    const converting = user !== null;
+    if (!converting && !/^[a-z0-9][a-z0-9._-]*$/.test(handle)) {
+      notice = 'Enter the Sylux account name your administrator approved.';
+      document.getElementById('handle')?.focus();
+      return;
+    }
+    oidcOpening = true;
+    notice = ''; conversionError = '';
+    const approvedHandle = user?.handle ?? handle;
+    const localProof = converting ? conversionPassword : undefined;
+    const generation = sessionGeneration;
+    password = ''; conversionPassword = '';
+    try {
+      if (!converting) client.setCsrfToken((await session.csrf()).csrfToken);
+      const url = await session.startOidc(approvedHandle, localProof);
+      if (generation === sessionGeneration) window.location.assign(url);
+    } catch (error) {
+      if (generation !== sessionGeneration) return;
+      const unavailable = error instanceof HttpError && [404, 503].includes(error.status);
+      const message = unavailable ? 'Keycloak sign-in is unavailable. Try again later.'
+        : converting ? 'Could not start the switch. Check your password and approval, then try again.'
+        : 'Could not start Keycloak sign-in. Check the account name and try again.';
+      if (converting) conversionError = message;
+      else notice = message;
+      oidcOpening = false;
+      await tick();
+      if (generation === sessionGeneration) document.getElementById(converting ? 'conversion-password' : 'keycloak-sign-in')?.focus();
+    }
+  }
+
+  function closeConversion(): void {
+    if (oidcOpening) return;
+    conversionOpen = false;
+    conversionPassword = ''; conversionError = '';
   }
 
   async function retryOwnUsage(): Promise<void> {
@@ -1588,7 +1663,7 @@
       else await session.changeRole(account.account_id, account.role === 'user' ? 'administrator' : 'user');
       if (generation !== sessionGeneration) return;
       authorityTarget = null;
-      accountNotice = action === 'enable' ? 'Account enabled. They can sign in with their current password.' : 'Role changed and sessions signed out. They can sign in again.';
+      accountNotice = action === 'enable' ? (account.credential_mode === 'external' ? 'Account enabled. They can sign in with Keycloak.' : 'Account enabled. They can sign in with their current password.') : 'Role changed and sessions signed out. They can sign in again.';
       await loadAccounts();
       if (generation === sessionGeneration) { await tick(); document.getElementById('accounts-heading')?.focus(); }
     } catch (error) { if (generation === sessionGeneration) accountNotice = accountChangeError(error); }
@@ -1644,7 +1719,7 @@
     trashRequest++; deletedItems = []; trashPageIndex = 0; trashPageCursors = [null]; trashNextCursor = null; trashHasMore = false; trashRetry = null; trashPaging = null; trashNotice = ''; showTrash = false; trashError = ''; trashTarget = null; trashBusy = false; trashLoading = false; restoringId = ''; restoringName = ''; namespaceUnknown = null; namespaceInspecting = false;
   }
   function clearAccountForms(): void {
-    changePasswordOpen = false; createAccountOpen = false; disableTarget = null; authorityTarget = null; instanceNameBusy = false; appearanceBusy = false; appearanceError = ''; instanceNotice = '';
+    changePasswordOpen = false; conversionOpen = false; conversionPassword = ''; conversionError = ''; oidcOpening = false; createAccountOpen = false; disableTarget = null; authorityTarget = null; instanceNameBusy = false; appearanceBusy = false; appearanceError = ''; instanceNotice = '';
     accountHandle = ''; clearCreateAccountSecrets(); currentPassword = ''; newPassword = '';
     resetId = ''; resetPassword = ''; accounts = []; accountNotice = ''; accountBusy = false; accountsLoading = false; accountsError = ''; accountsRequest++;
     ownUsage = null; ownUsageState = 'loading'; ownUsageRequest++; ownUsageRetrying = false; allUsage = null; allUsageState = 'loading'; allUsageRequest++;
@@ -3120,10 +3195,13 @@
           {#if view === 'setup'}<div class="grid gap-2"><Label for="setup-auth">One-use setup authorization</Label><p id="setup-help" class="text-muted-foreground text-sm">Read <code class="break-all">secrets/setup.authorization</code> in the initialized state directory, or ask your server operator.</p><Input aria-describedby="setup-help" id="setup-auth" type="password" bind:value={setupAuthorization} autocomplete="off" required /></div>{/if}
           <div class="grid gap-2"><Label for="handle">Account name</Label><Input id="handle" bind:value={handle} autocomplete="username" pattern={view === 'setup' ? '[a-z0-9][a-z0-9._-]*' : undefined} maxlength={64} required />{#if view === 'setup'}<p class="text-muted-foreground text-xs">Lowercase letters, numbers, dots, underscores or hyphens. Start with a letter or number.</p>{/if}</div>
           <div class="grid gap-2"><Label for="password">Password</Label><Input id="password" type="password" bind:value={password} autocomplete={view === 'setup' ? 'new-password' : 'current-password'} minlength={view === 'setup' ? 15 : undefined} maxlength={view === 'setup' ? 128 : undefined} required />{#if view === 'setup'}<p class="text-muted-foreground text-xs">Use 15 to 128 characters.</p>{/if}</div>
-          <Button type="submit" disabled={authBusy}>{authBusy ? (view === 'setup' ? 'Setting up…' : 'Signing in…') : (view === 'setup' ? 'Create administrator' : 'Sign in')}</Button>
+          <Button type="submit" disabled={authBusy || oidcOpening}>{authBusy ? (view === 'setup' ? 'Setting up…' : 'Signing in…') : (view === 'setup' ? 'Create administrator' : 'Sign in')}</Button>
         </form>
+        {#if view === 'login' && oidcEnabled}
+          <Button id="keycloak-sign-in" type="button" variant="outline" class="mt-3 w-full" disabled={authBusy || oidcOpening} aria-busy={oidcOpening} onclick={() => void startKeycloak()}>{oidcOpening ? 'Opening Keycloak…' : 'Sign in with Keycloak'}</Button>
+        {/if}
         {#if notice}<p class="form-notice" role="status">{notice}</p>{/if}
-        <Button class="setup-link" type="button" variant="link" disabled={authBusy} onclick={() => { view = view === 'setup' ? 'login' : 'setup'; notice = ''; }}>{view === 'setup' ? 'Back to sign in' : 'First-time setup'}</Button>
+        <Button class="setup-link" type="button" variant="link" disabled={authBusy || oidcOpening} onclick={() => { view = view === 'setup' ? 'login' : 'setup'; notice = ''; }}>{view === 'setup' ? 'Back to sign in' : 'First-time setup'}</Button>
       </section>
     </main>
   {:else}
@@ -3299,13 +3377,20 @@
             <section class="settings-section"><h2>Your account</h2><dl class="account-details"><dt>Account name</dt><dd>{user.handle}</dd><dt>Role</dt><dd>{user.role === 'administrator' ? 'Administrator' : 'User'}</dd></dl></section>
             <section class="settings-section" aria-labelledby="usage-heading" aria-busy={routeName === 'account' || ownUsageState === 'loading'}><h2 id="usage-heading" tabindex="-1">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{ownUsageState === 'loading' && pendingRoute && !routeFeedback ? '—' : usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{ownUsageState === 'loading' && pendingRoute && !routeFeedback ? '—' : usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p>{/if}{#if ownUsageState === 'error' || ownUsageRetrying}<RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" keepFocus busy={ownUsageRetrying} onclick={() => void retryOwnUsage()} />{/if}</section>
             <section class="settings-section account-setting-row"><div><h2>Public links</h2><p class="section-description">Review and revoke active download links.</p></div><Button variant="outline" onclick={(event) => { share = { entry: null, trigger: event.currentTarget }; }}>Shared links</Button></section>
-            {#if webdavAvailable}
+            {#if webdavAvailable && !user.external}
               <section class="settings-section account-setting-row">
                 <div><h2>WebDAV</h2><p class="section-description">Connect a desktop client to your private libraries.</p></div>
                 <Button type="button" variant="outline" onclick={(event) => { webdavTrigger = event.currentTarget; webdavOpen = true; }}>Manage app passwords</Button>
               </section>
             {/if}
+            {#if !user.external}
             <section class="settings-section account-setting-row"><div><h2>Password</h2><p class="section-description">Change the password you use to sign in.</p></div><Button variant="outline" onclick={(event) => { passwordDialogTrigger = event.currentTarget; accountNotice = ''; currentPassword = ''; newPassword = ''; changePasswordOpen = true; }}>Change password</Button></section>
+              {#if oidcEnabled && user.role === 'user'}
+                <section class="settings-section account-setting-row"><div><h2>Keycloak sign-in</h2><p class="section-description">Ask a Sylux administrator to approve the switch first.</p></div><Button variant="outline" onclick={(event) => { conversionTrigger = event.currentTarget; conversionOpen = true; }}>Switch to Keycloak</Button></section>
+              {/if}
+            {:else}
+              <section class="settings-section"><h2>Keycloak sign-in</h2><p class="section-description">Sign in again when your 15-minute session ends.</p></section>
+            {/if}
             <section class="settings-section account-setting-row"><div><h2>Session</h2><p class="section-description">Sign out of this browser.</p></div><Button variant="outline" disabled={loggingOut} onclick={signOut}>Sign out</Button></section>
             {#if accountNotice && !changePasswordOpen}<p role="status" class="form-notice">{accountNotice}</p>{/if}
           </section>
@@ -3333,6 +3418,7 @@
                 {/each}</div></div>
               </section>
               {#if accountNotice && !createAccountOpen && !resetId && !disableTarget && !authorityTarget}<p role="status" class="form-notice">{accountNotice}</p>{/if}
+              <OidcApprovals {session} {accounts} enabled={oidcEnabled} onrevoked={loadAccounts} />
             {:else if settingsTab === 'appearance'}
               <AppearanceSettings {client} {instanceName} dark={darkMode} bind:busy={appearanceBusy} bind:error={appearanceError} onsaved={value => { appearanceRequest++; appearanceLoading = false; appearance = value; appearanceLoadError = ''; }} />
             {:else}
@@ -3651,6 +3737,16 @@
       </Dialog.Content>
     </Dialog.Root>
 
+    <Dialog.Root open={conversionOpen} onOpenChange={(open) => { if (!open) closeConversion(); }}>
+      <Dialog.Content onEscapeKeydown={(event) => { if (oidcOpening) event.preventDefault(); }} onInteractOutside={(event) => { if (oidcOpening) event.preventDefault(); }} showCloseButton={!oidcOpening} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(conversionTrigger, 'account-title'); }}>
+        <Dialog.Header><Dialog.Title>Switch to Keycloak</Dialog.Title><Dialog.Description>After you sign in with Keycloak, Sylux removes this account’s local password, signs out other sessions and revokes its WebDAV app passwords. Your files and sharing stay in place.</Dialog.Description></Dialog.Header>
+        <form class="grid gap-4" onsubmit={startKeycloak}>
+          <div class="grid gap-2"><Label for="conversion-password">Current Sylux password</Label><Input id="conversion-password" type="password" autocomplete="current-password" bind:value={conversionPassword} disabled={oidcOpening} required /></div>
+          {#if conversionError}<p role="alert" class="form-notice">{conversionError}</p>{/if}
+          <Dialog.Footer><Button type="button" variant="outline" disabled={oidcOpening} onclick={closeConversion}>Cancel</Button><Button type="submit" disabled={oidcOpening} aria-busy={oidcOpening}>{oidcOpening ? 'Opening Keycloak…' : 'Continue to Keycloak'}</Button></Dialog.Footer>
+        </form>
+      </Dialog.Content>
+    </Dialog.Root>
     <Dialog.Root open={changePasswordOpen} onOpenChange={(open) => { if (!accountBusy) { changePasswordOpen = open; if (!open) { currentPassword = ''; newPassword = ''; accountNotice = ''; } } }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(passwordDialogTrigger, 'account-title'); }}><Dialog.Header><Dialog.Title>Change password</Dialog.Title><Dialog.Description>This signs out all your sessions. Use 15 to 128 characters.</Dialog.Description></Dialog.Header><form class="grid gap-4" onsubmit={changePassword}><div class="grid gap-2"><Label for="current-password">Current password</Label><Input id="current-password" type="password" autocomplete="current-password" bind:value={currentPassword} disabled={accountBusy} required /></div><div class="grid gap-2"><Label for="new-password">New password</Label><Input id="new-password" type="password" autocomplete="new-password" minlength={15} maxlength={128} bind:value={newPassword} disabled={accountBusy} required /></div>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={accountBusy} onclick={() => { changePasswordOpen = false; currentPassword = ''; newPassword = ''; accountNotice = ''; }}>Cancel</Button><Button type="submit" disabled={accountBusy}>{accountBusy ? 'Changing…' : 'Change password'}</Button></Dialog.Footer></form></Dialog.Content></Dialog.Root>
     <Dialog.Root open={createAccountOpen} onOpenChange={(open) => { if (!accountBusy) { createAccountOpen = open; if (!open) clearCreateAccountSecrets(); } }}>
       <Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title>Create account</Dialog.Title><Dialog.Description>Use 15 to 128 characters for the password. Share it through a private channel.</Dialog.Description></Dialog.Header><form class="grid gap-4" aria-busy={accountBusy} onsubmit={createAccount}><div class="grid gap-2"><Label for="account-handle">Account name</Label><Input id="account-handle" bind:value={accountHandle} pattern="[a-z0-9][a-z0-9._-]*" maxlength={64} disabled={accountBusy} required /><p class="text-muted-foreground text-xs">Lowercase letters, numbers, dots, underscores or hyphens.</p></div><div class="grid gap-2"><Label for="account-password">Password</Label><div class="flex items-center gap-2"><Input id="account-password" class="min-w-0" type={accountPasswordVisible ? 'text' : 'password'} autocomplete="new-password" minlength={15} maxlength={128} bind:value={accountPassword} oninput={() => accountPasswordError = ''} disabled={accountBusy} required /><Button type="button" variant="outline" class="shrink-0" aria-controls="account-password" aria-pressed={accountPasswordVisible} disabled={accountBusy} onclick={() => accountPasswordVisible = !accountPasswordVisible}>{accountPasswordVisible ? 'Hide password' : 'Show password'}</Button></div></div><div class="grid gap-2"><Label for="account-password-confirmation">Confirm password</Label><div class="flex items-center gap-2"><Input id="account-password-confirmation" class="min-w-0" type={accountPasswordConfirmationVisible ? 'text' : 'password'} autocomplete="new-password" minlength={15} maxlength={128} bind:value={accountPasswordConfirmation} oninput={() => accountPasswordError = ''} aria-invalid={!!accountPasswordError} aria-describedby={accountPasswordError ? 'account-password-error' : undefined} disabled={accountBusy} required /><Button type="button" variant="outline" class="shrink-0" aria-controls="account-password-confirmation" aria-pressed={accountPasswordConfirmationVisible} disabled={accountBusy} onclick={() => accountPasswordConfirmationVisible = !accountPasswordConfirmationVisible}>{accountPasswordConfirmationVisible ? 'Hide confirmation' : 'Show confirmation'}</Button></div></div>{#if accountPasswordError}<p id="account-password-error" role="alert">{accountPasswordError}</p>{/if}{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={accountBusy} onclick={() => { createAccountOpen = false; clearCreateAccountSecrets(); }}>Cancel</Button><Button type="submit" disabled={accountBusy} aria-busy={accountBusy}>{accountBusy ? 'Creating…' : 'Create account'}</Button></Dialog.Footer></form></Dialog.Content>
@@ -3661,7 +3757,7 @@
         <Dialog.Header>
           <Dialog.Title class="pr-8 break-words">{authorityTarget?.action === 'enable' ? `Enable ${authorityTarget.account.handle}?` : `Make ${authorityTarget?.account.handle} ${authorityTarget?.account.role === 'user' ? 'an administrator' : 'a user'}?`}</Dialog.Title>
           <Dialog.Description>
-            {#if authorityTarget?.action === 'enable'}They can sign in with their current password. Old sessions stay signed out. Their role and private files stay the same.
+            {#if authorityTarget?.action === 'enable'}They can sign in {authorityTarget.account.credential_mode === 'external' ? 'with Keycloak' : 'with their current password'}. Old sessions stay signed out.
             {:else if authorityTarget?.account.role === 'user'}They can manage accounts and instance settings. Other accounts’ files stay private. This signs out all their sessions.
             {:else}They will lose access to account and instance settings. Their private files stay available. This signs out all their sessions.{/if}
           </Dialog.Description>

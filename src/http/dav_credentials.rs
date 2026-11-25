@@ -85,7 +85,7 @@ pub(super) async fn create(
         let inserted = tx.execute(
             "INSERT INTO dav_credential(credential_id, account_id, name, verifier, credential_epoch, read_only)
              SELECT ?1, account_id, ?2, ?3, credential_epoch, ?4 FROM account
-             WHERE account_id=?5 AND (SELECT count(*) FROM dav_credential WHERE account_id=?5)<32
+             WHERE account_id=?5 AND credential_mode='local' AND (SELECT count(*) FROM dav_credential WHERE account_id=?5)<32
              ON CONFLICT(account_id, name) DO NOTHING",
             params![id, name, verifier.as_slice(), read_only, owner],
         ).map_err(db_error)?;
