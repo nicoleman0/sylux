@@ -1,0 +1,29 @@
+name: Packaged Docker upgrade rehearsal
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/docker-upgrade-rehearsal.yml
+      - scripts/rehearse-docker-upgrade.*
+      - scripts/install-sylux.sh
+      - docs/docker-beta.md
+      - docs/docker-upgrade-rehearsal.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    name: Populated beta.9 to beta.10 on Ubuntu 24.04 x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Rehearse upgrade from published packages
+        run: scripts/rehearse-docker-upgrade.sh upgrade
+      - name: Remove the disposable fixture
+        if: always()
+        run: scripts/rehearse-docker-upgrade.sh cleanup
