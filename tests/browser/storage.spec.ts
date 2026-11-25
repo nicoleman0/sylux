@@ -86,6 +86,74 @@ test.beforeEach(async () => {
 test.afterEach(async () => { await context?.close(); });
 test.afterAll(async () => { await browser?.close(); });
 
+test('private libraries keep same-name folders and saved routes separate', { annotation: { type: 'harness_case', description: 'storage_private_libraries' } }, async () => {
+  await signIn();
+  const handle = `library-owner-${phase}`;
+  const memberPassword = 'Private library fixture password';
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  const account = page.getByRole('dialog', { name: 'Create account', exact: true });
+  await account.getByLabel('Account name').fill(handle);
+  await account.getByLabel('Password', { exact: true }).fill(memberPassword);
+  await account.getByLabel('Confirm password', { exact: true }).fill(memberPassword);
+  await account.getByRole('button', { name: 'Create account', exact: true }).click();
+  await expect(account).toBeHidden();
+
+  async function signInMember() {
+    await page.getByLabel('Account name').fill(handle);
+    await page.getByLabel('Password', { exact: true }).fill(memberPassword);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  }
+  const myLibraries = page.getByRole('button', { name: 'My libraries', exact: true });
+  const files = (filename: string) => page.getByRole('button', { name: `Preview ${filename}`, exact: true });
+  await page.getByRole('button', { name: 'Log out', exact: true }).click();
+  await signInMember();
+  await expect(page.getByRole('heading', { name: 'Files', level: 1 })).toBeVisible();
+  await myLibraries.click();
+  const libraries = page.getByRole('list', { name: 'Private libraries' });
+  await expect(libraries.getByRole('link')).toHaveText(['Files']);
+  const bookmarks: string[] = [];
+  for (const [name, filename] of [['Field work', 'survey.txt'], ['Studio', 'sketch.txt']]) {
+    await page.getByRole('button', { name: 'New library', exact: true }).press('Enter');
+    const dialog = page.getByRole('dialog', { name: 'New library' });
+    await dialog.getByLabel('Library name').fill(name);
+    await dialog.getByRole('button', { name: 'Create library' }).press('Enter');
+    await expect(dialog).toBeHidden();
+    await libraries.getByRole('link', { name, exact: true }).press('Enter');
+    await expect(page.getByRole('heading', { name, exact: true })).toBeFocused();
+    await page.getByRole('button', { name: 'New folder', exact: true }).click();
+    await page.getByLabel('Folder name', { exact: true }).fill('Projects');
+    await page.getByRole('button', { name: 'Create folder', exact: true }).click();
+    await page.getByRole('button', { name: 'Open Projects', exact: true }).press('Enter');
+    await chooseUpload({ name: filename, mimeType: 'text/plain', buffer: Buffer.from(name) });
+    await expect(files(filename)).toBeVisible();
+    bookmarks.push(page.url());
+    await myLibraries.click();
+  }
+  await expect(libraries.getByRole('link')).toHaveText(['Files', 'Field work', 'Studio']);
+  expect(bookmarks[0]).not.toBe(bookmarks[1]);
+  for (const [index, filename] of ['survey.txt', 'sketch.txt'].entries()) {
+    await page.goto(bookmarks[index]);
+    await expect(files(filename)).toBeVisible();
+    await page.reload();
+    await signInMember();
+    await expect(files(filename)).toBeVisible();
+    await expect(files(index === 0 ? 'sketch.txt' : 'survey.txt')).toHaveCount(0);
+  }
+
+  await page.getByRole('button', { name: 'Log out', exact: true }).click();
+  await signIn();
+  await myLibraries.click();
+  await expect(libraries.getByRole('link')).toHaveText(['Files']);
+  await page.getByRole('button', { name: 'Files', exact: true }).click();
+  await page.getByLabel('Search files and folders').fill('survey.txt');
+  await expect(page.getByText('No matching files or folders.')).toBeVisible();
+  for (const bookmark of bookmarks) {
+    await page.goto(bookmark);
+    await expect(page.getByRole('alert')).toContainText('This folder is unavailable');
+  }
+});
+
 test('desktop and narrow viewport keep folder browsing and upload controls usable', { annotation: { type: 'harness_case', description: 'storage_responsive_controls' } }, async () => {
   await signIn();
   await expect(page.getByRole('navigation', { name: 'Files', exact: true })).toBeVisible();

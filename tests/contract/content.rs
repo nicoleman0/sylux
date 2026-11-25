@@ -12,14 +12,14 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    os::unix::fs::DirBuilderExt,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use sylux::{
     domain::authz::verifier,
     http::{self, AuthState},
     persistence::{
-        root,
+        root, schema,
         sqlite::{self, SqliteWorkers, WorkerConfig},
     },
 };
@@ -45,6 +45,10 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(case: &str) -> Self {
+        Self::start(case, None).await
+    }
+
+    async fn start(case: &str, legacy: Option<&LegacyLinks>) -> Self {
         let parent = std::env::temp_dir()
             .canonicalize()
             .unwrap()
@@ -53,13 +57,53 @@ impl Fixture {
         let root = FixtureRoot::create(&parent, "content", case).unwrap();
         let product = root.path().join("product");
         fs::DirBuilder::new().mode(0o700).create(&product).unwrap();
-        root::initialize_empty_root(&product, BUSY).unwrap();
+        let initialized = root::initialize_empty_root(&product, BUSY).unwrap();
         let tls = TlsFiles::generate(&root, "tls").unwrap();
         let ca = fs::read(&tls.ca_der).unwrap();
         let db_path = product.join("metadata/sylux.sqlite3");
+        let legacy_identity = legacy.map(|_| {
+            let mut identity = initialized.identity;
+            identity.schema_version = 3;
+            fs::write(
+                product.join(root::MANIFEST_NAME),
+                serde_json::to_vec(&identity).unwrap(),
+            )
+            .unwrap();
+            fs::remove_file(&db_path).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&db_path)
+                .unwrap();
+            identity
+        });
         let connection = sqlite::open_writer(&db_path, BUSY).unwrap();
+        if let Some(identity) = &legacy_identity {
+            connection.execute_batch(schema::MIGRATION_0001_S1).unwrap();
+            schema::migrate_v1(&connection, None).unwrap();
+            schema::migrate_v2(&connection, None).unwrap();
+            schema::insert_installation_row(&connection, identity, [0; 32]).unwrap();
+        }
         seed(&connection);
         seed_file(&connection, &product);
+        let connection = if let Some(links) = legacy {
+            links.seed(&connection);
+            drop(connection);
+            let bound = root::open_bound_database(&product, BUSY).unwrap();
+            let identity = legacy_identity.as_ref().unwrap();
+            let upgraded = root::upgrade_binding(&bound, &product, identity).unwrap();
+            assert_eq!(upgraded.schema_version, 4);
+            drop(bound);
+            let rebound = root::open_bound_database(&product, BUSY).unwrap();
+            assert_eq!(
+                root::upgrade_binding(&rebound, &product, &upgraded).unwrap(),
+                upgraded
+            );
+            rebound.connection
+        } else {
+            connection
+        };
         let workers = SqliteWorkers::from_writer(
             connection,
             &db_path,
@@ -357,6 +401,71 @@ async fn a08_missing_precondition_and_out_of_slice_methods_are_not_content_reads
 const SHARE_FILE: &str = "00000000000000000000000000000301";
 const SHARE_PARENT: &str = "00000000000000000000000000000303";
 const SHARE_ORIGIN: &str = "https://127.0.0.1";
+const LEGACY_REVISION: &str = "00000000000000000000000000000302";
+const LEGACY_NESTED: &str = "00000000000000000000000000000304";
+
+struct LegacyLinks {
+    now: i64,
+}
+
+impl LegacyLinks {
+    fn path(marker: u8) -> String {
+        format!("/share/{}", URL_SAFE_NO_PAD.encode([marker; 32]))
+    }
+
+    fn seed(&self, db: &Connection) {
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        for (owner, root, parent, nested) in [
+            (OWNER, ROOT, SHARE_PARENT, LEGACY_NESTED),
+            (
+                OTHER,
+                OTHER_ROOT,
+                "00000000000000000000000000000305",
+                "00000000000000000000000000000306",
+            ),
+        ] {
+            for (id, under, name) in [(parent, root, "Projects"), (nested, parent, "Nested")] {
+                db.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version) VALUES(?1,?2,?3,'folder',?4,?5,1)", params![id, owner, under, name, name.as_bytes()]).unwrap();
+            }
+        }
+        db.execute(
+            "UPDATE entry SET parent_id=?1 WHERE entry_id=?2",
+            params![LEGACY_NESTED, SHARE_FILE],
+        )
+        .unwrap();
+        let file = "00000000000000000000000000000307";
+        let revision = "00000000000000000000000000000308";
+        let parent = "00000000000000000000000000000306";
+        db.execute(
+            "INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version)
+             VALUES(?1,?2,?3,'file','second.bin',CAST('second.bin' AS BLOB),1)",
+            params![file, OTHER, parent],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO revision(revision_id, entry_id, blob_id, length, sha256, committed_at, actor_account_id)
+             SELECT ?1, ?2, blob_id, length, sha256, committed_at, ?3 FROM revision WHERE revision_id=?4",
+            params![revision, file, OTHER, LEGACY_REVISION],
+        ).unwrap();
+        db.execute(
+            "UPDATE entry SET current_revision_id=?1 WHERE entry_id=?2",
+            params![revision, file],
+        )
+        .unwrap();
+        for (marker, created) in [(1_u8, self.now), (2, self.now - 86401), (3, self.now)] {
+            db.execute("INSERT INTO share_link(share_id,verifier,owner_account_id,entry_id,revision_id,created_at,expires_at)
+                VALUES(?1,?2,?3,?4,?5,?6,?7)", params![format!("{marker:032x}"), verifier(&[marker; 32]).as_slice(), OWNER, SHARE_FILE, LEGACY_REVISION, created, created+86400]).unwrap();
+        }
+        db.execute(
+            "DELETE FROM share_link WHERE share_id=?1",
+            [format!("{:032x}", 3)],
+        )
+        .unwrap();
+    }
+}
 
 fn mutation_headers(csrf: &[u8; 32]) -> [(&'static str, String); 3] {
     [
@@ -397,6 +506,87 @@ async fn assert_share_missing(f: &Fixture, path: &str) {
     assert_eq!(headers["cache-control"], "no-store");
     assert_eq!(headers["referrer-policy"], "no-referrer");
     assert_eq!(body, br#"{"code":"share_not_found"}"#);
+}
+
+#[tokio::test]
+async fn schema_three_upgrade_preserves_saved_private_and_public_file_urls() {
+    let legacy = LegacyLinks {
+        now: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64,
+    };
+    let f = Fixture::start("syl-110-existing-links", Some(&legacy)).await;
+    let owner = Some(auth(SESSION, SECRET));
+    let other = Some(auth(OTHER_SESSION, OTHER_SECRET));
+    let parse = |body: &[u8]| serde_json::from_slice::<serde_json::Value>(body).unwrap();
+    for (actor, root) in [(owner, ROOT), (other, OTHER_ROOT)] {
+        let (status, _, body) = f.request("GET", "/libraries", actor, &[]).await;
+        assert_eq!(status, 200);
+        let body = parse(&body);
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["id"], root);
+    }
+    let folder_path = format!("/folders/{LEGACY_NESTED}/path");
+    let (status, _, body) = f.request("GET", &folder_path, owner, &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        parse(&body)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|part| part["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [ROOT, SHARE_PARENT, LEGACY_NESTED]
+    );
+    let children = format!("/folders/{LEGACY_NESTED}/children");
+    let (status, _, body) = f.request("GET", &children, owner, &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(parse(&body)["items"][0]["id"], SHARE_FILE);
+    let saved_content = format!("/entries/{SHARE_FILE}/content");
+    let (status, headers, download) = f.request("GET", &saved_content, owner, &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers["etag"],
+        sylux::domain::upload::revision_etag(LEGACY_REVISION)
+    );
+    assert_eq!(download, b"synthetic\0content\xff\x80");
+    assert_eq!(f.request("GET", &saved_content, other, &[]).await.0, 404);
+    assert_eq!(f.request("GET", &folder_path, other, &[]).await.0, 404);
+    assert_eq!(f.request("GET", &saved_content, None, &[]).await.0, 401);
+    assert_eq!(f.request("GET", &children, None, &[]).await.0, 401);
+    let (status, headers, public) = f.request("GET", &LegacyLinks::path(1), None, &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(public, download);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_share_missing(&f, &LegacyLinks::path(2)).await;
+    assert_share_missing(&f, &LegacyLinks::path(3)).await;
+    assert_share_missing(&f, &format!("/share/{LEGACY_NESTED}")).await;
+    let (status, _, body) = f.request("GET", "/share-links", owner, &[]).await;
+    assert_eq!(status, 200);
+    let body = parse(&body);
+    let links = body.as_array().unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0]["entry_id"], SHARE_FILE);
+    assert_eq!(links[0]["expires_at"], legacy.now + 86400);
+    let (owner, entry, revision): (String, String, String) = f
+        .workers
+        .as_ref()
+        .unwrap()
+        .read(|db| {
+            db.query_row(
+                "SELECT owner_account_id,entry_id,revision_id FROM share_link WHERE share_id=?1",
+                [format!("{:032x}", 1)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (owner.as_str(), entry.as_str(), revision.as_str()),
+        (OWNER, SHARE_FILE, LEGACY_REVISION)
+    );
+    f.close().await;
 }
 
 #[tokio::test]

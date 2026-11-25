@@ -1,13 +1,13 @@
 import type { FolderSort, ResultSort } from './listing';
 
-export type Destination = 'files' | 'trash' | 'account' | 'settings';
+export type Destination = 'files' | 'libraries' | 'trash' | 'account' | 'settings';
 export type AccountSort = 'name_asc' | 'name_desc' | 'role_asc' | 'role_desc' | 'status_asc' | 'status_desc';
 export type Location = { destination: Destination; folder: string; query: string; sort: FolderSort; searchSort?: ResultSort; trashSort?: ResultSort; accountSort?: AccountSort };
 export type BrowsingContext = Location & { version: 1; owner: string; cursors: (string | null)[]; page: number; searchCursors: (string | null)[]; searchPage: number; scroll: number };
 const sorts: FolderSort[] = ['name_asc', 'name_desc', 'size_asc', 'size_desc', 'modified_asc', 'modified_desc'];
 const resultSorts = [...sorts, 'location_asc', 'location_desc'];
 const accountSorts = ['name_asc', 'name_desc', 'role_asc', 'role_desc', 'status_asc', 'status_desc'];
-const destinations = ['files', 'trash', 'account', 'settings'];
+const destinations = ['files', 'libraries', 'trash', 'account', 'settings'];
 const validQuery = (query: string) => new TextEncoder().encode(query).length <= 255 && !/\p{Cc}/u.test(query);
 
 export function parseLocation(hash: string): Location {

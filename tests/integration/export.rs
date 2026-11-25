@@ -162,6 +162,38 @@ fn nested_unicode_empty_and_current_revision_only_with_strict_source_isolation()
     assert_eq!(before, inventory(&c.source));
 }
 #[test]
+fn export_keeps_equal_paths_in_separate_libraries() {
+    let mut c = Case::new();
+    let studio = {
+        let mut db = c.db();
+        let tx = db.transaction().unwrap();
+        let library = sylux::domain::namespace::create_library(&tx, OWNER, "Studio").unwrap();
+        tx.commit().unwrap();
+        library.id
+    };
+    for (library, body) in [
+        (ROOT, b"original".as_slice()),
+        (&studio, b"studio".as_slice()),
+    ] {
+        let folder = c.folder(library, "Projects");
+        c.file(&folder, "notes.txt", body);
+    }
+    let result = c.run();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap().trim(),
+        "export_complete files=2"
+    );
+    assert_eq!(
+        fs::read(c.target.join("Files/Projects/notes.txt")).unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        fs::read(c.target.join("Studio/Projects/notes.txt")).unwrap(),
+        b"studio"
+    );
+}
+#[test]
 fn nonempty_and_overlap_are_refused_without_overwrite() {
     let c = Case::new();
     fs::create_dir(&c.target).unwrap();

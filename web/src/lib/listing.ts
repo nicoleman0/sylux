@@ -5,7 +5,7 @@ export type FileEntry = { id: string; parent_id: string; name: string; kind: 'fi
 export type Entry = Folder | FileEntry;
 export type FolderSort = 'name_asc' | 'name_desc' | 'size_asc' | 'size_desc' | 'modified_asc' | 'modified_desc';
 export type ResultSort = FolderSort | 'location_asc' | 'location_desc';
-export type DeletedEntry = Entry & { original_path: string[]; needs_reference?: boolean };
+export type DeletedEntry = Entry & { original_path: string[]; library_name?: string; needs_reference?: boolean };
 export type RemovalSelection = { kind: 'all' } | { kind: 'selected'; items: { id: string; etag: string }[] };
 export type RemovalPreview = { confirmation: string; count: number };
 export type RemovalResult = { operation_id: string; state: 'committed'; count: number; cleanup: 'pending' | 'complete' };
@@ -22,7 +22,7 @@ export function compareDeleted(left: DeletedEntry, right: DeletedEntry, sort: Re
   const tie = () => name || compare(left.id, right.id);
   if (sort.startsWith('name_')) return name * (sort === 'name_desc' ? -1 : 1) || compare(left.id, right.id);
   if (sort.startsWith('location_')) {
-    const path = (item: DeletedEntry) => item.original_path.map(part => part.normalize('NFC')).join('\0');
+    const path = (item: DeletedEntry) => [item.library_name ?? 'Files', ...item.original_path].map(part => part.normalize('NFC')).join('\0');
     return compare(path(left), path(right)) * (sort === 'location_desc' ? -1 : 1) || tie();
   }
   if (left.kind !== right.kind) return left.kind === 'folder' ? -1 : 1;
@@ -41,6 +41,13 @@ export type ArchiveTicket = { url: string; name: string; entry_count: number };
 
 export class ListingApi {
   constructor(private readonly client: ApiClient) {}
+
+  libraries(signal?: AbortSignal): Promise<{ items: Folder[] }> {
+    return this.client.request('/libraries', { signal });
+  }
+  createLibrary(name: string): Promise<Folder> {
+    return this.client.request('/libraries', { method: 'POST', body: { name } });
+  }
 
   async roots(cursor?: string | null, sort: FolderSort = 'name_asc', signal?: AbortSignal): Promise<RootListing> {
     const roots = await this.client.request<RootListing>(`/folders/children?limit=100&sort=${sort}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
@@ -103,6 +110,7 @@ export class ListingApi {
     for (const item of page.items) {
       if (!item || !text(item.id) || !text(item.name) || !text(item.etag) || !text(item.parent_id) ||
         !['file', 'folder'].includes(item.kind) || !Array.isArray(item.original_path) || !item.original_path.every(text) ||
+        (item.library_name !== undefined && !text(item.library_name)) ||
         (item.needs_reference !== undefined && typeof item.needs_reference !== 'boolean') ||
         !numeric(item.size, true) || !numeric(item.modified_at, false)) throw new Error('Invalid Trash entry response');
     }

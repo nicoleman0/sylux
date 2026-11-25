@@ -2,6 +2,31 @@ import { chooseFolderSort, folderSortHeader } from './fixtures/folder-sort';
 import { expect, test, type Page } from '@playwright/test';
 import type { Entry, Folder } from '../src/lib/listing';
 import { parseLocation, savedContext } from '../src/lib/browsing-context';
+import { mockPrivateLibraries, signInLibraryOwner } from './fixtures/private-libraries';
+
+test('saved folder URLs and browser history keep identically named folders in their own libraries', async ({ page }) => {
+  await mockPrivateLibraries(page);
+  await page.goto('/#libraries');
+  await signInLibraryOwner(page);
+  const libraryNav = page.getByRole('button', { name: 'My libraries', exact: true });
+  const open = async (library: string, file: string) => {
+    await page.getByRole('link', { name: library, exact: true }).press('Enter');
+    await page.getByRole('button', { name: 'Open Projects', exact: true }).press('Enter');
+    await expect(page.getByRole('button', { name: `Preview ${file}`, exact: true })).toBeVisible();
+    return page.url();
+  };
+  const first = await open('Field work', 'survey.txt');
+  await libraryNav.click();
+  const second = await open('Studio', 'sketch.txt');
+  expect(second).not.toBe(first);
+  await page.reload();
+  await signInLibraryOwner(page);
+  await expect(page.getByRole('button', { name: 'Preview sketch.txt' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview survey.txt' })).toHaveCount(0);
+  await page.goto(first);
+  await expect(page.getByRole('button', { name: 'Preview survey.txt' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview sketch.txt' })).toHaveCount(0);
+});
 
 const root: Folder = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
 const child: Folder = { id: 'projects', parent_id: 'root', name: 'Projects', kind: 'folder', etag: '"projects:1"' };

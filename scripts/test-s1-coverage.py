@@ -40,6 +40,7 @@ BROWSER_CASES = {
     "storage_upload_download_roundtrip", "storage_delayed_upload_browsing", "storage_upload_cancel",
     "storage_lost_commit_response", "storage_pdf_preview", "storage_upload_resume", "storage_public_share",
     "storage_text_edit_roundtrip", "storage_text_edit_conflict", "storage_text_edit_retry",
+    "storage_private_libraries",
 }
 
 

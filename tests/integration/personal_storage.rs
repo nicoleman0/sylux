@@ -748,7 +748,7 @@ async fn moving_a_subtree_enforces_the_depth_limit_without_partial_changes() {
                 [],
                 |row| row.get(0),
             )?;
-            let root = namespace::private_root(tx, &owner).unwrap();
+            let root = namespace::root_entry(tx, &owner).unwrap().id;
             let source = namespace::create_folder(tx, &owner, &root, "Subtree").unwrap();
             namespace::create_folder(tx, &owner, &source.id, "Child").unwrap();
             let mut parent = root.clone();

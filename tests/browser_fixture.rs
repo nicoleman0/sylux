@@ -56,6 +56,7 @@ fn safe_reporter_events(log: &str) -> Vec<Value> {
         "storage_text_edit_roundtrip",
         "storage_text_edit_conflict",
         "storage_text_edit_retry",
+        "storage_private_libraries",
         "unregistered",
     ];
     const NETWORK_ERRORS: &[&str] = &[
