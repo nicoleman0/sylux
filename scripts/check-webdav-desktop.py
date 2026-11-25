@@ -61,6 +61,25 @@ def eventually(label, operation, seconds=12):
     raise RuntimeError(f"Timed out: {label}")
 
 
+def wait_ready(fixture, child, seconds=12):
+    end = time.monotonic() + seconds
+    last = "no response"
+    while time.monotonic() < end:
+        if child.poll() is not None:
+            raise RuntimeError(f"Sylux exited before readiness (exit code {child.returncode}; last: {last})")
+        try:
+            status = fixture.request("GET", "/readyz")[0]
+            if status == 204:
+                return
+            last = f"HTTP {status}"
+        except ssl.SSLError:
+            last = "TLS error"
+        except (OSError, http.client.HTTPException):
+            last = "connection or HTTP error"
+        time.sleep(0.15)
+    raise RuntimeError(f"Timed out: Sylux ready over loopback TLS (last: {last})")
+
+
 def create_tls(directory):
     cert = directory / "ca.crt"
     ca_key = directory / "ca.key"
@@ -333,13 +352,8 @@ def main(binary):
         run(binary, "init", "--root", root)
         with trusted_ca(cert), process(binary, "serve", "--root", root, "--webdav",
                                        "--listen", f"127.0.0.1:{port}", "--tls-key", key_file,
-                                       "--tls-cert", leaf, "--public-origin", fixture.origin):
-            def ready():
-                try:
-                    return fixture.request("GET", "/readyz")[0] == 200
-                except OSError:
-                    return False
-            eventually("Sylux ready over loopback TLS", ready)
+                                       "--tls-cert", leaf, "--public-origin", fixture.origin) as server:
+            wait_ready(fixture, server)
             password, credential_id = fixture.bootstrap((root / "secrets/setup.authorization").read_text())
             fixture.dav_expect("seed-file", "PUT", "/dav/Files/seed.bin", 201, SEED)
             fixture.dav_expect("seed-destination", "MKCOL", "/dav/Files/Destination/", 201)
