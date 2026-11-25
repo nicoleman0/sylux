@@ -1,5 +1,5 @@
 {
-  "sync_commit": "f6d5c2c8cc2c8100a114e0eb33e90bd3655c254b",
+  "sync_commit": "b3c5d33e29282906417c8103030e8430a5e63747",
   "files": {
     "src/http/accounts.rs": "d351de22b9685db5970017bf4362ecd3132066f54613f9db819a8022b57e1ddb",
     "src/domain/authz.rs": "eb849c7bada269a283ba0ae4441a8732e32ede270c33bdad3bd45f6653db2f8c",

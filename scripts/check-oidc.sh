@@ -9,7 +9,7 @@ server=$(cargo build --locked --bin sylux --message-format=json |
         for await (const line of createInterface({ input: process.stdin })) {
             const event = JSON.parse(line);
             if (event.reason === "compiler-message") process.stderr.write(event.message.rendered ?? "");
-            if (event.reason === "compiler-artifact" && event.target.name === "sylux") executable = event.executable;
+            if (event.reason === "compiler-artifact" && event.target.name === "sylux" && event.target.kind.includes("bin")) executable = event.executable;
         }
         if (!executable) throw new Error("Cargo did not build the Sylux executable");
         console.log(executable);

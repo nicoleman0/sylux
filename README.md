@@ -35,7 +35,7 @@ This inventory describes the current source tree. A merged capability is not nec
 
 Optional [WebDAV access](docs/webdav.md) lets desktop clients work with private libraries using revocable app passwords. See the guide for setup and method limits.
 
-Optional [Keycloak sign-in](docs/oidc.md) uses administrator-approved links and keeps a separate local administrator sign-in. See [sharing](docs/sharing.md) for public single-file links.
+Optional [Keycloak sign-in](docs/oidc.md) uses administrator-approved links and keeps a separate local administrator sign-in. Public folder links remain planned. See [sharing](docs/sharing.md) for public single-file links.
 
 ## Operating footprint
 

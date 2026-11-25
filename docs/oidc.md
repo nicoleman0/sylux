@@ -11,7 +11,11 @@ its password works before enabling Keycloak.
 1. Serve the realm at its canonical HTTPS issuer, for example
    `https://id.example.org/realms/files`. Use a URL reachable by Sylux and
    its users' browsers. Sylux uses the realm's own discovery, authorization,
-   token and signing-key endpoints at that same origin.
+   token and signing-key endpoints at that same origin. Discovery must be at
+   `<issuer>/.well-known/openid-configuration` and advertise the exact issuer
+   and endpoints below `<issuer>/protocol/openid-connect/` ending in `auth`,
+   `token` and `certs`. It must advertise support for the authorization
+   response `iss` parameter.
 2. Create an OpenID Connect client with **Client authentication** and
    **Standard flow** enabled. Register the literal redirect URI
    `https://files.example.org/auth/oidc/callback`. Require PKCE `S256`,
@@ -68,7 +72,9 @@ Append these arguments to the current `sylux serve` command and restart.
 
 For the [Docker installation](docker-beta.md), this `compose.override.yaml`
 extends the default service. Use `/run/sylux/oidc/` paths in JSON and UID
-10001 for the secret file. Keep the existing volume and TLS mounts.
+10001 for the secret file. Keep the existing volume and TLS mounts. The
+example replaces the service command. Carry over any existing flags, such as
+`--webdav`.
 
 ```yaml
 services:
@@ -94,7 +100,8 @@ services:
 A host or proxy must serve Sylux's password sign-in without a Keycloak gate.
 Configure access logs to omit the query string on the callback route.
 
-Without the flag, new Keycloak sign-ins are off. A missing or invalid
+Without the flag, Keycloak-only accounts cannot sign in until the flag returns.
+Existing sessions can run until their fixed deadline. A missing or invalid
 configuration file, unreadable secret or CA, or changed registration logs a
 short diagnostic and leaves local sign-in available. A provider that cannot
 be contacted denies new sign-ins. None of these cases removes the registration,

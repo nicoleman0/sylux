@@ -3418,7 +3418,7 @@
                 {/each}</div></div>
               </section>
               {#if accountNotice && !createAccountOpen && !resetId && !disableTarget && !authorityTarget}<p role="status" class="form-notice">{accountNotice}</p>{/if}
-              {#if oidcEnabled}<OidcApprovals {session} {accounts} onrevoked={loadAccounts} />{/if}
+              <OidcApprovals {session} {accounts} enabled={oidcEnabled} onrevoked={loadAccounts} />
             {:else if settingsTab === 'appearance'}
               <AppearanceSettings {client} {instanceName} dark={darkMode} bind:busy={appearanceBusy} bind:error={appearanceError} onsaved={value => { appearanceRequest++; appearanceLoading = false; appearance = value; appearanceLoadError = ''; }} />
             {:else}

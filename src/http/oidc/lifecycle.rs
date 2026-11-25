@@ -35,10 +35,10 @@ pub(super) async fn register(
     Ok(())
 }
 
-pub(crate) fn remove_registration(db: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+pub(crate) fn remove_registration(db: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
     let removed = db.execute("DELETE FROM external_provider WHERE singleton=1", [])?;
     if removed == 0 {
-        return Ok(());
+        return Ok(false);
     }
     let time = now();
     db.execute(
@@ -65,7 +65,7 @@ pub(crate) fn remove_registration(db: &rusqlite::Transaction<'_>) -> rusqlite::R
         "INSERT INTO event(action,occurred_at,outcome) VALUES('oidc.provider_removed',?1,'ok')",
         [time],
     )?;
-    Ok(())
+    Ok(true)
 }
 
 pub(super) fn registration_matches(

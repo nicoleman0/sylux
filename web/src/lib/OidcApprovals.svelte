@@ -8,9 +8,10 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Label } from '$lib/components/ui/label/index.js';
 
-  let { session, accounts, onrevoked }: {
+  let { session, accounts, enabled, onrevoked }: {
     session: SessionApi;
     accounts: Account[];
+    enabled: boolean;
     onrevoked: () => Promise<void>;
   } = $props();
 
@@ -26,10 +27,13 @@
   let handle = $state('');
   let selectedId = $state('');
   let verified = $state(false);
-  let heading: HTMLHeadingElement | null = null;
+  let heading = $state<HTMLHeadingElement | null>(null);
   let trigger: HTMLElement | null = null;
   const eligible = $derived(accounts.filter((account) => account.role === 'user' &&
     (account.credential_mode === 'external' ? !account.enabled : account.enabled)));
+
+  const selectedAccount = $derived(eligible.find((account) => account.account_id === selectedId));
+  const staleSelection = $derived(selectedId !== '' && !selectedAccount);
 
   onMount(() => { void load(); });
 
@@ -68,9 +72,9 @@
 
   async function approve(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    if (busy || !verified) return;
+    if (busy || !enabled || !verified || staleSelection) return;
     busy = true; error = '';
-    const account = eligible.find((item) => item.account_id === selectedId);
+    const account = selectedAccount;
     try {
       await session.approveOidc(subject.trim(), account?.handle ?? handle, account?.account_id);
       approving = false;
@@ -89,26 +93,31 @@
     const link = revoking;
     busy = true; error = '';
     try {
-      await session.revokeOidc(link);
+      try {
+        await session.revokeOidc(link);
+      } catch {
+        error = 'Could not revoke Keycloak access. Refresh the list before trying again.';
+        return;
+      }
       links = links.filter((item) => item.id !== link.id);
       revoking = null;
       notice = link.pending ? 'Approval canceled.' : 'Keycloak access revoked.';
       await Promise.all([load(), onrevoked()]);
       await tick();
       heading?.focus();
-    } catch { error = 'Could not revoke Keycloak access. Refresh the list before trying again.'; }
-    finally { busy = false; }
+    } finally { busy = false; }
   }
 
   function preventWhileBusy(event: Event): void { if (busy) event.preventDefault(); }
 </script>
 
+{#if enabled || links.length || loadError || notice}
 <section class="settings-section" aria-labelledby="oidc-approvals-heading">
   <div class="flex flex-wrap items-start justify-between gap-2">
     <h2 id="oidc-approvals-heading" tabindex="-1" bind:this={heading}>Keycloak sign-in</h2>
     <div class="flex flex-wrap gap-2">
       <RefreshButton label="Refresh Keycloak links" busyLabel="Refreshing…" keepFocus busy={loading} disabled={busy} onclick={() => { if (!loading && !busy) { notice = ''; void load(); } }} />
-      <Button size="sm" disabled={busy} onclick={openApproval}>Approve sign-in</Button>
+      {#if enabled}<Button size="sm" disabled={busy} onclick={openApproval}>Approve sign-in</Button>{/if}
     </div>
   </div>
   {#if notice}<p class="form-notice" role="status">{notice}</p>{/if}
@@ -132,6 +141,7 @@
     {/if}
   </div>
 </section>
+{/if}
 
 <Dialog.Root open={approving} onOpenChange={(open) => { if (!open) close(); }}>
   <Dialog.Content onEscapeKeydown={preventWhileBusy} onInteractOutside={preventWhileBusy} showCloseButton={!busy} onCloseAutoFocus={restoreFocus}>
@@ -145,13 +155,15 @@
         <Label for="oidc-account">Sylux account</Label>
         <select id="oidc-account" class="min-h-10 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-2 focus-visible:outline-ring" bind:value={selectedId} disabled={busy}>
           <option value="">New account</option>
+          {#if staleSelection}<option value={selectedId} disabled>Account no longer eligible</option>{/if}
           {#each eligible as account (account.account_id)}<option value={account.account_id}>{account.handle}</option>{/each}
         </select>
       </div>
       {#if !selectedId}<div class="grid gap-2"><Label for="oidc-handle">New account name</Label><Input id="oidc-handle" bind:value={handle} pattern={'[a-z0-9][a-z0-9._\\-]*'} title="Start with a lowercase letter or digit. Use lowercase letters, digits, dots, underscores or hyphens." maxlength={64} disabled={busy} required /></div>{/if}
       <label class="flex items-center gap-2 text-sm"><input type="checkbox" bind:checked={verified} disabled={busy} required />I verified the person and their Keycloak subject.</label>
-      {#if error}<p role="alert" class="form-notice">{error}</p>{/if}
-      <Dialog.Footer><Button type="button" variant="outline" disabled={busy} onclick={close}>Cancel</Button><Button type="submit" disabled={busy || !verified} aria-busy={busy}>{busy ? 'Approving…' : 'Approve sign-in'}</Button></Dialog.Footer>
+      {#if staleSelection}<p role="alert" class="form-notice">The selected account can no longer be linked. Select another account.</p>
+      {:else if error}<p role="alert" class="form-notice">{error}</p>{/if}
+      <Dialog.Footer><Button type="button" variant="outline" disabled={busy} onclick={close}>Cancel</Button><Button type="submit" disabled={busy || !enabled || !verified || staleSelection} aria-busy={busy}>{busy ? 'Approving…' : 'Approve sign-in'}</Button></Dialog.Footer>
     </form>
   </Dialog.Content>
 </Dialog.Root>

@@ -48,8 +48,12 @@ async fn main() -> ExitCode {
             CommandKind::AdminVerifyPayloads => run_verify_payloads(&configuration),
             CommandKind::AdminRemoveOidcProvider => {
                 match sylux::admin::remove_oidc_provider(&configuration.root) {
-                    Ok(()) => {
-                        println!("oidc_provider_removed");
+                    Ok(removed) => {
+                        if removed {
+                            println!("oidc_provider_removed");
+                        } else {
+                            println!("oidc_provider_not_configured");
+                        }
                         ExitCode::SUCCESS
                     }
                     Err(reason) => {

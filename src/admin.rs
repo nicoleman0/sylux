@@ -154,14 +154,16 @@ fn open_recovery_database(
     Ok((guard, bound))
 }
 
-pub fn remove_oidc_provider(root_path: &Path) -> Result<(), &'static str> {
+pub fn remove_oidc_provider(root_path: &Path) -> Result<bool, &'static str> {
     let (_guard, mut bound) = open_recovery_database(root_path)?;
     let tx = bound
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| "oidc_removal_transaction_failed")?;
-    crate::http::oidc::remove_registration(&tx).map_err(|_| "oidc_removal_transaction_failed")?;
-    tx.commit().map_err(|_| "oidc_removal_commit_uncertain")
+    let removed = crate::http::oidc::remove_registration(&tx)
+        .map_err(|_| "oidc_removal_transaction_failed")?;
+    tx.commit().map_err(|_| "oidc_removal_commit_uncertain")?;
+    Ok(removed)
 }
 
 pub async fn reset_password_from_stdin(root_path: &Path, handle: &str) -> Result<(), &'static str> {

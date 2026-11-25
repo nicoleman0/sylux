@@ -163,10 +163,10 @@ export async function qualifySylux(fixture, executable, browser, provider) {
     async function screenshot(page, name) {
         if (env.SYLUX_OIDC_EVIDENCE) await page.screenshot({ path: `${env.SYLUX_OIDC_EVIDENCE}/${name}.png`, animations: 'disabled' });
     }
-    async function localUi(page, handle) {
+    async function localUi(page, handle, password = localPassword) {
         await page.goto(origin);
         await page.getByLabel('Account name').fill(handle);
-        await page.getByLabel('Password', { exact: true }).fill(localPassword);
+        await page.getByLabel('Password', { exact: true }).fill(password);
         await page.getByRole('button', { name: 'Sign in', exact: true }).click();
         await page.getByRole('button', { name: 'Toggle Sidebar' }).waitFor();
     }
@@ -438,7 +438,7 @@ export async function qualifySylux(fixture, executable, browser, provider) {
                 try {
                     await Promise.race([switchGate.entered, wait(3000, undefined, { ref: false })
                         .then(() => check(false, 'Account-switch exchange did not reach the token endpoint'))]);
-                    signedIn = await local(switching, 'rescue');
+                    signedIn = await local(switching, 'rescue', 200, recoveryPassword);
                 } finally {
                     switchGate.release();
                 }
@@ -535,11 +535,43 @@ export async function qualifySylux(fixture, executable, browser, provider) {
             console.log('L4 real deadline: a retained browser binding was denied before exchange after five minutes. Timely signed proof still passed.');
             console.log('Local TLS faults: wrong callback issuer, state swapped between browsers, unsigned token and future iat denied. Valid signed callbacks passed before and after the faults.');
             console.log('Local fault provider: discovery limits and redirects, strict token validation, replay, atomic audit rollback, concurrent activation, and held exchange versus disable/re-enable and approver demotion.');
+            console.log('M1 held exchange: local sign-in committed while the token request was held; the callback was denied and the local account stayed signed in.');
+
+            step('L2 and L8 Settings can revoke an active link without configured proofs');
+            await stop();
+            await start({ configured: false });
+            const offlineAdmin = await context({ colorScheme: 'dark', viewport: { width: 390, height: 844 } });
+            const offlinePage = await offlineAdmin.newPage();
+            await localUi(offlinePage, 'rescue', recoveryPassword);
+            await offlinePage.getByRole('button', { name: 'Toggle Sidebar' }).click();
+            await offlinePage.getByRole('button', { name: 'Settings', exact: true }).click();
+            const section = offlinePage.getByRole('region', { name: 'Keycloak sign-in' });
+            const revokeButton = section.getByRole('button', { name: 'Revoke link for fault-user' });
+            await revokeButton.waitFor();
+            check(await section.getByRole('button', { name: 'Approve sign-in' }).count() === 0,
+                'Settings offered approval with proofs disabled');
+            await screenshot(offlinePage, 'oidc-disabled-links-narrow-dark');
+            await revokeButton.click();
+            await offlinePage.route(origin + '/auth/oidc/approvals', (route) => route.abort(), { times: 1 });
+            await offlinePage.getByRole('dialog', { name: 'Revoke Keycloak access for fault-user?' })
+                .getByRole('button', { name: 'Revoke access', exact: true }).click();
+            await section.getByText('Keycloak access revoked.', { exact: true }).waitFor();
+            await section.getByText('Could not load Keycloak links.', { exact: false }).waitFor();
+            await section.getByRole('button', { name: 'Refresh Keycloak links' }).click();
+            await revokeButton.waitFor({ state: 'hidden' });
+            check(!(await json(adminContext, 'GET', '/auth/oidc/approvals', 200)).some((link) => link.id === identity),
+                'Revoked link is still active');
+            console.log('L2/L8 Settings: active link listed and revoked with proofs disabled, approval hidden, and failed refresh visible with successful retry.');
         } finally {
             await mock.close();
         }
     }
     try {
+        step('L1 offline provider removal with no registration');
+        const noProvider = spawnRemoval();
+        check(noProvider.status === 0 && noProvider.stdout.trim() === 'oidc_provider_not_configured',
+            'No-op removal did not identify the missing provider');
+
         step('disposable Sylux and provider initialization');
         await start();
         await provider.provision(origin + callbackPath, { mfa: true });
@@ -591,10 +623,41 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         await expectBytes(davClient, davPath, liveFile.bytes, davHeaders);
 
         step('L1 and L2 exact approval and conversion');
+        await api(adminContext, 'POST', '/accounts', 204, {
+            csrf: adminCsrf, data: { handle: 'selection-fixture', password: localPassword },
+        });
+        const selectionId = (await json(adminContext, 'GET', '/accounts', 200))
+            .find((account) => account.handle === 'selection-fixture').account_id;
         const adminUi = await context({ colorScheme: 'light', viewport: { width: 1280, height: 900 } });
         const adminPage = await adminUi.newPage();
         await localUi(adminPage, 'rescue');
         await adminPage.getByRole('button', { name: 'Settings', exact: true }).click();
+        const approvalSection = adminPage.getByRole('region', { name: 'Keycloak sign-in' });
+        await approvalSection.getByRole('button', { name: 'Approve sign-in' }).waitFor();
+        await adminPage.getByRole('row', { name: 'selection-fixture' }).waitFor();
+        step('L8 account refresh cannot turn an existing-account selection into a new account');
+        const reload = Promise.withResolvers();
+        await adminPage.route(origin + '/accounts', async (route) => {
+            await reload.promise;
+            await route.continue();
+        }, { times: 1 });
+        await adminPage.getByRole('button', { name: 'Refresh', exact: true }).click();
+        try {
+            await approvalSection.getByRole('button', { name: 'Approve sign-in' }).click();
+            const dialog = adminPage.getByRole('dialog', { name: 'Approve Keycloak sign-in' });
+            await dialog.getByLabel('Keycloak subject', { exact: true }).fill('selection-fixture-subject');
+            await dialog.getByLabel('New account name').fill('wrong-target');
+            await dialog.getByLabel('Sylux account').selectOption({ label: 'selection-fixture' });
+            await dialog.getByRole('checkbox').check();
+            await api(adminContext, 'POST', `/accounts/${selectionId}/disable`, 204, { csrf: adminCsrf });
+            reload.resolve();
+            await dialog.getByText('The selected account can no longer be linked.', { exact: false }).waitFor();
+            check(await dialog.getByRole('button', { name: 'Approve sign-in' }).isDisabled() &&
+                await dialog.getByLabel('New account name').count() === 0, 'Stale selection fell back to a hidden new-account handle');
+            await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+        } finally {
+            reload.resolve();
+        }
         await approveUi(adminPage, ownerSubject, 'alice', true);
         const links = await json(adminContext, 'GET', '/auth/oidc/approvals', 200);
         const identity = links.find((item) => item.handle === 'alice' && item.pending)?.id;
@@ -653,6 +716,7 @@ export async function qualifySylux(fixture, executable, browser, provider) {
         check((await json(switchControl, 'GET', '/me', 200)).account_id === peer.account_id,
             'Rejected callback replaced the live local session');
 
+        console.log('M1 real Keycloak: a revoked cookie could sign in as the same owner and read exact bytes; its old cookie stayed revoked, and a live local cookie blocked an account switch.');
         const external = await me(ownerContext);
         const staleApproval = links.find((item) => item.id === identity);
         await api(adminContext, 'POST', `/auth/oidc/approvals/${identity}/revoke`, 409,
