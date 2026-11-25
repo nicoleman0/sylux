@@ -3,6 +3,7 @@
 use crate::{
     domain::{
         authz::validate_session,
+        dav_credentials::DavGrant,
         ids::{MutationScope, MutationTicket, ScopedMutationId},
         mutation::{CommittedResult, MutationResult},
     },
@@ -209,6 +210,29 @@ impl MutationCoordinator {
         validate_session(connection, &ticket.session_id, &ticket.secret, now)
             .filter(|(account_id, _, _)| account_id == &ticket.account_id)
             .ok_or(AdmissionError::InvalidSession)
+    }
+
+    pub(crate) async fn transact_dav<T, E>(
+        &self,
+        grant: DavGrant,
+        unavailable: E,
+        unauthorized: E,
+        operation: impl for<'db> FnOnce(&Transaction<'db>, &str) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: Copy + Send + 'static,
+    {
+        self.workers()
+            .map_err(|_| unavailable)?
+            .transact_result(move |tx| {
+                if !grant.can_write(tx).map_err(|_| unavailable)? {
+                    return Err(unauthorized);
+                }
+                operation(tx, &grant.account_id)
+            })
+            .await
+            .map_err(|_| unavailable)?
     }
 
     /// Authenticate and create a scoped admission atomically. The caller must

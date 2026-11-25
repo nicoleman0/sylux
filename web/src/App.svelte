@@ -7,6 +7,7 @@
   import DirectShareDialog from '$lib/DirectShareDialog.svelte';
   import SharedWorkspace from '$lib/SharedWorkspace.svelte';
   import FolderOpenIcon from '@lucide/svelte/icons/folder-open';
+  import WebDavPasswords from '$lib/WebDavPasswords.svelte';
   import BrandLogo from '$lib/BrandLogo.svelte';
   import { appearanceStyle, defaultAppearanceSurfaces, defaultAppearance, readAppearance, type Appearance } from '$lib/appearance';
   import { onMount, tick, untrack } from 'svelte';
@@ -1612,6 +1613,7 @@
     }
     share = null; shareBusy = false; directShare = null; directShareBusy = ''; settleTreeSharing(false);
     sharedView = false; sharedLocation = { folder: '', file: undefined };
+    webdavAvailable = false; webdavOpen = false; webdavTrigger = null;
     clearSearch();
     archiveBusy = false; archiveTargets = [];
     actionNotice = ''; compactUnresolvedUpload = false;
@@ -2405,6 +2407,9 @@
   let share = $state<{ entry: Entry | null; trigger: HTMLElement } | null>(null);
   let directShare = $state<{ folder: Folder; trigger: HTMLElement } | null>(null);
   let directShareBusy = $state('');
+  let webdavAvailable = $state(false);
+  let webdavOpen = $state(false);
+  let webdavTrigger: HTMLElement | null = null;
   let shareBusy = $state(false);
 
   function closeShare(): void {
@@ -3292,6 +3297,12 @@
             <section class="settings-section"><h2>Your account</h2><dl class="account-details"><dt>Account name</dt><dd>{user.handle}</dd><dt>Role</dt><dd>{user.role === 'administrator' ? 'Administrator' : 'User'}</dd></dl></section>
             <section class="settings-section" aria-labelledby="usage-heading" aria-busy={routeName === 'account' || ownUsageState === 'loading'}><h2 id="usage-heading" tabindex="-1">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{ownUsageState === 'loading' && pendingRoute && !routeFeedback ? '—' : usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{ownUsageState === 'loading' && pendingRoute && !routeFeedback ? '—' : usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p>{/if}{#if ownUsageState === 'error' || ownUsageRetrying}<RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" keepFocus busy={ownUsageRetrying} onclick={() => void retryOwnUsage()} />{/if}</section>
             <section class="settings-section account-setting-row"><div><h2>Public links</h2><p class="section-description">Review and revoke active download links.</p></div><Button variant="outline" onclick={(event) => { share = { entry: null, trigger: event.currentTarget }; }}>Shared links</Button></section>
+            {#if webdavAvailable}
+              <section class="settings-section account-setting-row">
+                <div><h2>WebDAV</h2><p class="section-description">Connect a desktop client to your private libraries.</p></div>
+                <Button type="button" variant="outline" onclick={(event) => { webdavTrigger = event.currentTarget; webdavOpen = true; }}>Manage app passwords</Button>
+              </section>
+            {/if}
             <section class="settings-section account-setting-row"><div><h2>Password</h2><p class="section-description">Change the password you use to sign in.</p></div><Button variant="outline" onclick={(event) => { passwordDialogTrigger = event.currentTarget; accountNotice = ''; currentPassword = ''; newPassword = ''; changePasswordOpen = true; }}>Change password</Button></section>
             <section class="settings-section account-setting-row"><div><h2>Session</h2><p class="section-description">Sign out of this browser.</p></div><Button variant="outline" disabled={loggingOut} onclick={signOut}>Sign out</Button></section>
             {#if accountNotice && !changePasswordOpen}<p role="status" class="form-notice">{accountNotice}</p>{/if}
@@ -3484,6 +3495,11 @@
         <form class="grid gap-6" aria-busy={folderBusy} onsubmit={createFolder}><div class="grid gap-2"><Label for="new-folder">Folder name</Label><Input id="new-folder" bind:ref={folderInput} bind:value={folderName} disabled={folderBusy} maxlength={255} aria-invalid={!!folderError} aria-describedby={folderError ? 'folder-error' : undefined} required /></div>{#if folderError}<p id="folder-error" role="alert">{folderError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={folderBusy} onclick={() => createOpen = false}>Cancel</Button><Button type="submit" disabled={folderBusy}>{folderBusy ? 'Creating…' : 'Create folder'}</Button></Dialog.Footer></form>
       </Dialog.Content>
     </Dialog.Root>
+    {#key user.id}
+      <WebDavPasswords {client} handle={user.handle} active={accountView}
+        bind:available={webdavAvailable} bind:open={webdavOpen}
+        onrestorefocus={() => restoreFocus(webdavTrigger, 'account-title')} />
+    {/key}
     {#if share}<ShareLinks {client} entry={share.entry} bind:busy={shareBusy} onclose={closeShare} />{/if}
     {#if directShare}<DirectShareDialog {client} folder={directShare.folder} bind:busy={directShareBusy} onclose={closeDirectShare} />{/if}
 

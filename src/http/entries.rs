@@ -950,6 +950,7 @@ pub async fn move_entry(
                 &id,
                 &input.parent_id,
                 &tag,
+                None,
                 |source, destination| {
                     ConfirmTree {
                         key: key.as_ref(),

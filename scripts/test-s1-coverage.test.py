@@ -102,6 +102,7 @@ class CoverageControls(unittest.TestCase):
             "storage_lost_commit_response", "storage_pdf_preview", "storage_upload_resume", "storage_public_share",
             "storage_text_edit_roundtrip", "storage_text_edit_conflict", "storage_text_edit_retry",
             "storage_private_libraries",
+            "storage_webdav_changes",
         }
         engine_files = {}
         for phase in ["initial", "restart"]:

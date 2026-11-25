@@ -827,7 +827,7 @@ fn valid_seed_passes_product_recovery_checks() {
 fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication() {
     use sylux::domain::namespace;
     use sylux::persistence::root;
-    for version in [1, 2, 3, 4] {
+    for version in [1, 2, 3, 4, 5] {
         for interrupted in [false, true] {
             let (owner, path) = fixture(&format!("legacy-v{version}-{interrupted}"));
             fs::remove_file(&path).unwrap();
@@ -875,8 +875,16 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
             if version >= 3 {
                 schema::migrate_v2(&db, None).unwrap();
             }
-            if version == 4 {
+            if version >= 4 {
                 schema::migrate_v3(&db, None).unwrap();
+            }
+            if version >= 5 {
+                schema::migrate_v4(&db, None).unwrap();
+                db.execute(
+                    "INSERT INTO dav_credential VALUES (?1, ?2, 'Desktop', ?3, 0, 1)",
+                    params![id(40), id(10), digest()],
+                )
+                .unwrap();
             }
             if interrupted {
                 use sha2::{Digest, Sha256};
@@ -885,17 +893,61 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                     1 => schema::migrate_v1,
                     2 => schema::migrate_v2,
                     3 => schema::migrate_v3,
-                    4 => schema::migrate_direct_grants,
+                    4 => schema::migrate_v4,
+                    5 => schema::migrate_direct_grants,
                     _ => unreachable!(),
                 };
                 migrate(&db, Some(hash.as_slice())).unwrap();
             }
             drop(db);
             let bound = root::open_bound_database(&product, BUSY).unwrap();
+            if interrupted && version >= 4 {
+                let (object, kind) = if version == 4 {
+                    ("dav_credential", "TABLE")
+                } else {
+                    ("direct_grant_trash", "TRIGGER")
+                };
+                let create_sql: String = bound
+                    .connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_schema WHERE name=?1",
+                        [object],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                bound
+                    .connection
+                    .execute_batch(&format!("DROP {kind} {object}"))
+                    .unwrap();
+                assert!(matches!(
+                    root::upgrade_binding(&bound, &product, &legacy),
+                    Err(root::BindingError::DatabaseInvalid("schema_invalid"))
+                ));
+                assert_eq!(root::read_manifest(&product).unwrap(), legacy);
+                bound.connection.execute_batch(&create_sql).unwrap();
+            }
             let upgraded = root::upgrade_binding(&bound, &product, &legacy).unwrap();
             assert_eq!(upgraded.schema_version, schema::SUPPORTED_SCHEMA_VERSION);
             assert_eq!(root::read_manifest(&product).unwrap(), upgraded);
             root::verify_binding(&bound, &product, &upgraded).unwrap();
+            let credentials = bound
+                .connection
+                .query_row("SELECT count(*) FROM dav_credential", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap();
+            assert_eq!(credentials, i64::from(version == 5));
+            if version == 5 {
+                let credential: (String, String, Vec<u8>, i64, i64) = bound.connection.query_row(
+                    "SELECT account_id, name, verifier, credential_epoch, read_only FROM dav_credential WHERE credential_id=?1",
+                    [id(40)],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                ).unwrap();
+                assert_eq!(
+                    credential,
+                    (id(10), "Desktop".into(), digest().to_vec(), 0, 1)
+                );
+            }
             assert_eq!(
                 bound
                     .connection
@@ -964,6 +1016,7 @@ fn library_migration_rolls_back_schema_and_version_on_failure() {
     );
     db.execute_batch("DROP INDEX entry_library_name").unwrap();
     schema::migrate_v3(&db, None).unwrap();
+    schema::migrate_v4(&db, None).unwrap();
     schema::migrate_direct_grants(&db, None).unwrap();
     assert_eq!(
         schema::apply_migrations(&db).unwrap(),
@@ -1019,4 +1072,29 @@ fn unbound_v1_migration_fails_without_writing_a_partial_transition() {
     );
     drop(db);
     cleanup(owner);
+}
+
+#[test]
+fn reopening_current_schema_refuses_missing_direct_grant_index_or_trigger() {
+    for (kind, name) in [
+        ("index", "direct_grant_recipient"),
+        ("trigger", "direct_grant_trash"),
+    ] {
+        let (owner, path) = fixture(name);
+        let db = sqlite::open_writer(&path, BUSY).unwrap();
+        assert_eq!(
+            schema::apply_migrations(&db).unwrap(),
+            schema::MigrationOutcome::Applied
+        );
+        db.execute_batch(&format!("DROP {kind} {name}")).unwrap();
+        drop(db);
+
+        let db = sqlite::open_writer(&path, BUSY).unwrap();
+        assert!(matches!(
+            schema::apply_migrations(&db),
+            Err(schema::SchemaError::MissingObject(object)) if object == format!("{kind} {name}")
+        ));
+        drop(db);
+        cleanup(owner);
+    }
 }

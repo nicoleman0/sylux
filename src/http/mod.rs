@@ -4,6 +4,8 @@ pub mod assets;
 pub mod auth;
 pub mod content;
 mod copies;
+mod dav;
+mod dav_credentials;
 mod direct_grants;
 pub mod entries;
 pub mod instance;
@@ -40,6 +42,7 @@ pub type AnonymousSessions = HashMap<[u8; 32], AnonymousSession>;
 pub struct AuthState {
     pub workers: SqliteWorkers,
     pub origin: String,
+    webdav: bool,
     pub setup_authorization: String,
     pub limiter: PasswordLimiter,
     pub anonymous: Arc<Mutex<AnonymousSessions>>,
@@ -77,6 +80,7 @@ impl AuthState {
         Self {
             workers,
             origin,
+            webdav: false,
             setup_authorization,
             limiter: PasswordLimiter::default(),
             anonymous: Arc::default(),
@@ -97,6 +101,11 @@ impl AuthState {
             #[cfg(feature = "test-harness")]
             copy_commit_hook: None,
         }
+    }
+
+    pub fn with_webdav(mut self, enabled: bool) -> Self {
+        self.webdav = enabled;
+        self
     }
 
     pub fn with_storage_root(
@@ -132,7 +141,7 @@ impl AuthState {
 }
 
 pub fn router(state: AuthState) -> Router {
-    Router::new()
+    let app = Router::new()
         .route("/shared", get(direct_grants::incoming))
         .route("/shared/folders/{id}/path", get(direct_grants::path))
         .route(
@@ -232,6 +241,28 @@ pub fn router(state: AuthState) -> Router {
             "/entries/{id}/content",
             get(content::get).head(content::head),
         )
-        .layer(DefaultBodyLimit::max(64 * 1024))
+        .route("/dav", axum::routing::any(dav::request))
+        .route("/dav/", axum::routing::any(dav::request))
+        .route("/dav/{*path}", axum::routing::any(dav::request));
+    let app = if state.webdav {
+        app.route(
+            "/me/webdav",
+            get(dav_credentials::list).post(dav_credentials::create),
+        )
+        .route(
+            "/me/webdav/{id}",
+            axum::routing::delete(dav_credentials::revoke),
+        )
+    } else {
+        app.route(
+            "/me/webdav",
+            axum::routing::any(|| async { axum::http::StatusCode::NOT_FOUND }),
+        )
+        .route(
+            "/me/webdav/{id}",
+            axum::routing::any(|| async { axum::http::StatusCode::NOT_FOUND }),
+        )
+    };
+    app.layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
