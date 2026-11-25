@@ -94,6 +94,7 @@ impl UploadCancelTestBarrier {
 #[cfg(feature = "test-harness")]
 #[derive(Default)]
 pub struct UploadCommitTestBarrier {
+    lose_result: std::sync::atomic::AtomicBool,
     armed: std::sync::atomic::AtomicBool,
     paused: tokio::sync::Notify,
     release: tokio::sync::Notify,
@@ -101,6 +102,17 @@ pub struct UploadCommitTestBarrier {
 
 #[cfg(feature = "test-harness")]
 impl UploadCommitTestBarrier {
+    pub fn lose_next_committed_result(&self) {
+        self.lose_result
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn result_loss_pending(&self) -> bool {
+        self.lose_result.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn discard_committed_result(&self) -> bool {
+        self.lose_result
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
     pub fn arm(&self) {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -363,17 +375,44 @@ impl WriteAccess {
         Ok(())
     }
 
-    fn check_path(&self, db: &Connection, ticket: &VerifiedUploadTicket) -> Result<(), Response> {
-        if let Self::Dav { grant, parent_path } = self {
-            dav::check_upload_path(
+    fn check_parent(&self, db: &Connection, ticket: &VerifiedUploadTicket) -> Result<(), Response> {
+        match self {
+            Self::Browser { .. } => check_parent(db, ticket),
+            Self::Dav { grant, parent_path } => dav::check_upload_path(
                 db,
                 &grant.account_id,
                 parent_path,
                 &ticket.admission.parent_id,
             )
-            .map_err(|status| error(status, "upload_path_changed"))?;
+            .map_err(|status| error(status, "upload_path_changed")),
         }
-        Ok(())
+    }
+
+    fn check_destination(
+        &self,
+        db: &Connection,
+        ticket: &VerifiedUploadTicket,
+        name_key: &[u8],
+    ) -> Result<(), Response> {
+        check_destination(db, &ticket.account_id, &ticket.admission, name_key).map_err(|response| {
+            if self.is_dav() && response.status() == StatusCode::CONFLICT {
+                StatusCode::PRECONDITION_FAILED.into_response()
+            } else {
+                response
+            }
+        })
+    }
+
+    fn check_dav_destination(
+        &self,
+        db: &Connection,
+        ticket: &VerifiedUploadTicket,
+    ) -> Result<(), Response> {
+        let name_key = ticket
+            .admission
+            .name_key()
+            .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid_name"))?;
+        self.check_destination(db, ticket, &name_key)
     }
 
     fn is_dav(&self) -> bool {
@@ -565,11 +604,10 @@ async fn admit_upload(
                 }
                 return Ok(Err(error(StatusCode::SERVICE_UNAVAILABLE, "upload_state_unavailable")));
             }
-            if let Err(response) = access.check_path(transaction, &ticket_for_insert)
-                .and_then(|()| check_parent(transaction, &ticket_for_insert)) {
+            if let Err(response) = access.check_parent(transaction, &ticket_for_insert) {
                 return Ok(Err(response));
             }
-            if let Err(response) = check_destination(transaction, &ticket_for_insert.account_id, &ticket_for_insert.admission, &name_key) {
+            if let Err(response) = access.check_destination(transaction, &ticket_for_insert, &name_key) {
                 return Ok(Err(response));
             }
             transaction.execute(
@@ -697,10 +735,7 @@ fn activate_attempt(
     access: &WriteAccess,
     coordinator: &MutationCoordinator,
 ) -> rusqlite::Result<Result<Attempt, Response>> {
-    if let Err(response) = access
-        .revalidate(transaction, coordinator, now())
-        .and_then(|()| access.check_path(transaction, ticket))
-    {
+    if let Err(response) = access.revalidate(transaction, coordinator, now()) {
         return Ok(Err(response));
     }
     if recovery_epoch(transaction).map_err(|_| rusqlite::Error::InvalidQuery)?
@@ -722,7 +757,12 @@ fn activate_attempt(
     if state.as_deref() != Some("admitted") {
         return Ok(Err(error(StatusCode::CONFLICT, "upload_not_staging")));
     }
-    if let Err(response) = check_parent(transaction, ticket) {
+    if let Err(response) = access.check_parent(transaction, ticket) {
+        return Ok(Err(response));
+    }
+    if access.is_dav()
+        && let Err(response) = access.check_dav_destination(transaction, ticket)
+    {
         return Ok(Err(response));
     }
     let active: Option<i64> = transaction
@@ -829,7 +869,16 @@ fn finish_attempt(
     access: &WriteAccess,
     coordinator: &MutationCoordinator,
 ) -> rusqlite::Result<Result<(), Response>> {
-    if let Err(response) = access.revalidate(transaction, coordinator, now()) {
+    let validation = access
+        .revalidate(transaction, coordinator, now())
+        .and_then(|()| {
+            if access.is_dav() {
+                access.check_parent(transaction, ticket)?;
+                access.check_dav_destination(transaction, ticket)?;
+            }
+            Ok(())
+        });
+    if let Err(response) = validation {
         if access.is_dav() {
             reject_dav_attempt(transaction, ticket)?;
             if let WorkerOutcome::Published(published) | WorkerOutcome::Canceled(Some(published)) =
@@ -1316,7 +1365,6 @@ async fn commit_upload(
     let name_key_for_tx = name_key.clone();
     let result = state.workers.transact_result(move |transaction| -> Result<(i64, Vec<u8>), Response> {
             access.revalidate(transaction, &coordinator, committed_at)?;
-            access.check_path(transaction, &ticket_for_tx)?;
             if recovery_epoch(transaction).map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "installation_unavailable"))? != ticket_for_tx.recovery_epoch {
                 return Err(error(StatusCode::UNAUTHORIZED, "stale_mutation_ticket"));
             }
@@ -1335,8 +1383,8 @@ async fn commit_upload(
             {
                 return Err(error(StatusCode::CONFLICT, "commit_fingerprint_mismatch"));
             }
-            check_parent(transaction, &ticket_for_tx)?;
-            check_destination(transaction, &ticket_for_tx.account_id, &ticket_for_tx.admission, &name_key_for_tx)?;
+            access.check_parent(transaction, &ticket_for_tx)?;
+            access.check_destination(transaction, &ticket_for_tx, &name_key_for_tx)?;
             let staging_path: String = transaction.query_row(
                 "SELECT staging_path FROM upload_attempt WHERE mutation_id=?1 AND completed_sha256=?2 AND completed_length=?3 ORDER BY attempt_no DESC LIMIT 1",
                 params![ticket_for_tx.mutation_id,stored_digest,stored_length],
@@ -1404,6 +1452,18 @@ async fn commit_upload(
             ).map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "mutation_result_commit_failed"))?;
             Ok((stored_length, stored_digest))
         }).await;
+    #[cfg(feature = "test-harness")]
+    let result = match result {
+        Ok(Ok(_))
+            if state
+                .upload_commit_test_barrier
+                .as_ref()
+                .is_some_and(|barrier| barrier.discard_committed_result()) =>
+        {
+            Err(crate::persistence::sqlite::WorkerError::InvalidResponse)
+        }
+        result => result,
+    };
     let (length, stored_digest) = match result {
         Ok(Ok(result)) => result,
         Ok(Err(response)) => return response,

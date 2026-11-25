@@ -68,9 +68,18 @@ def create_tls(directory):
     csr = directory / "leaf.csr"
     leaf = directory / "leaf.crt"
     extensions = directory / "leaf.ext"
-    extensions.write_text("subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n")
+    extensions.write_text(
+        "subjectAltName=IP:127.0.0.1\n"
+        "basicConstraints=critical,CA:FALSE\n"
+        "extendedKeyUsage=serverAuth\n"
+        "subjectKeyIdentifier=hash\n"
+        "authorityKeyIdentifier=keyid:always\n"
+    )
     run("openssl", "req", "-new", "-x509", "-nodes", "-days", "2", "-newkey", "rsa:2048",
         "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+        "-addext", "subjectKeyIdentifier=hash",
+        "-addext", "authorityKeyIdentifier=keyid:always",
         "-subj", "/CN=Sylux disposable desktop CA", "-keyout", ca_key, "-out", cert)
     run("openssl", "req", "-new", "-nodes", "-newkey", "rsa:2048",
         "-subj", "/CN=127.0.0.1", "-keyout", key, "-out", csr)
@@ -147,10 +156,12 @@ class Fixture:
 
     def wait_for_bytes(self, label, target, expected):
         def test():
-            status, _, payload = self.request("GET", target, headers={"Authorization": self.dav})
-            return status == 200 and payload == expected
-        eventually(label, test)
+            status, headers, payload = self.request("GET", target, headers={"Authorization": self.dav})
+            if status == 200 and payload == expected:
+                return get_header(headers, "etag")
+        etag = eventually(label, test)
         record("http", step=label, method="GET", status=200, sha256=hashlib.sha256(expected).hexdigest())
+        return etag
 
 
 def get_header(headers, name):
@@ -252,7 +263,7 @@ def desktop(fixture, directory, app_password):
         navigate(fixture.mount)
         eventually("Thunar return to Files", lambda: control_named("seed.bin"))
         key("ctrl+v")
-        fixture.wait_for_bytes("uploaded", "/dav/Files/upload.bin", UPLOAD)
+        uploaded_etag = fixture.wait_for_bytes("uploaded", "/dav/Files/upload.bin", UPLOAD)
         record("gui", step="upload", action="select, copy, location bar, paste")
 
         eventually("Thunar uploaded file row", lambda: control_named("upload.bin"))
@@ -262,7 +273,8 @@ def desktop(fixture, directory, app_password):
         key("ctrl+a")
         type_text("renamed.bin")
         key("Return")
-        fixture.wait_for_bytes("renamed", "/dav/Files/renamed.bin", UPLOAD)
+        if fixture.wait_for_bytes("renamed", "/dav/Files/renamed.bin", UPLOAD) != uploaded_etag:
+            raise RuntimeError("Thunar rename changed the file revision")
         fixture.dav_expect("renamed-source-gone", "GET", "/dav/Files/upload.bin", 404)
         record("gui", step="rename", action="select, F2, enter name")
 
@@ -273,9 +285,14 @@ def desktop(fixture, directory, app_password):
         eventually("Thunar destination folder", lambda: control_named("Destination", pyatspi.ROLE_FRAME))
         key("ctrl+v")
         target = "/dav/Files/Destination/renamed.bin"
-        fixture.wait_for_bytes("moved", target, UPLOAD)
+        if fixture.wait_for_bytes("moved", target, UPLOAD) != uploaded_etag:
+            raise RuntimeError("Thunar move changed the file revision")
         fixture.dav_expect("moved-source-gone", "GET", "/dav/Files/renamed.bin", 404)
         record("gui", step="move", action="select, cut, location bar, paste")
+
+        _, body = fixture.expect("trash-before-delete", "GET", "/trash", 200, headers=fixture.browser_headers())
+        if json.loads(body)["items"]:
+            raise RuntimeError("Thunar rename or move put an item in Sylux Trash")
 
         eventually("Thunar moved file row", lambda: control_named("renamed.bin"))
         select("renamed.bin")

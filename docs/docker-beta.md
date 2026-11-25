@@ -135,6 +135,18 @@ ssh -N -L 127.0.0.1:3000:127.0.0.1:3000 operator@private-host
 
 The SSH host must be reachable privately and the browser must trust the TLS certificate for `127.0.0.1`. A mobile client needs an SSH app that provides a local forward to its browser, plus certificate trust on that device. This route was tested only from a separate container network namespace, not a physical desktop or phone. If forwarding is unavailable, use a reviewed private reverse proxy with a matching hostname certificate and a configured `--public-origin`; that deployment is outside this Compose example.
 
+### Enable WebDAV
+
+For the stock configuration, create `compose.override.yaml` next to `compose.yaml`:
+
+```yaml
+services:
+  sylux:
+    command: ["serve", "--root", "/var/lib/sylux", "--listen", "127.0.0.1:3000", "--tls-cert", "/run/sylux/tls/cert.pem", "--tls-key", "/run/sylux/tls/key.pem", "--webdav"]
+```
+
+For a customized service, keep its full command and append `--webdav`. Apply the change with `docker compose config -q && docker compose up -d`. See [WebDAV setup and compatibility](webdav.md) for client access.
+
 ## Restrict share access before restoring
 
 Before restoring, restrict recipient access at the proxy or network. An unexpired share link revoked after the snapshot can become usable again. Keep recipient access restricted through owner review and revocation: each owner can inspect and revoke their own links, but there is no administrator-wide inventory. If owners cannot review, retain the restriction.
@@ -216,8 +228,6 @@ power loss, production storage, or upgrades.
 ## 4. Stop, back up, and restore
 
 Use `docker compose stop` for a clean stop and `docker compose up -d` to start again. `docker compose ps` shows whether it is running. Keep the data directory when replacing a container.
-For optional desktop access, see [WebDAV setup and compatibility](webdav.md).
-
 
 For a consistent archive, stop the service first. Choose a **separate mounted filesystem** for `/mnt/backup`; keep its archive private because it contains account data and file contents:
 

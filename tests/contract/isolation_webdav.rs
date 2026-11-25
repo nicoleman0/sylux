@@ -750,3 +750,136 @@ async fn webdav_lost_put_response_does_not_duplicate_a_publication() {
     assert_eq!(published, 1);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn webdav_in_flight_put_allows_a_sibling_but_rejects_a_destination_collision() {
+    use super::common::server::tls_connect;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let fixture = Fixture::with_webdav(true).await;
+    let (_, credential) = fixture.credential(0, "Concurrent writes", false).await;
+    let auth = [credential];
+    let address = fixture.server.as_ref().unwrap().address();
+    let slow = "/dav/Files/slow.bin";
+    let fast = "/dav/Files/fast.bin";
+
+    for (target, concurrent_target, expected) in [
+        (slow, fast, 201),
+        ("/dav/Files/collision.bin", "/dav/Files/collision.bin", 412),
+    ] {
+        let mut socket = tls_connect(address, &fixture.ca, "127.0.0.1")
+            .await
+            .unwrap();
+        let request = format!(
+            "PUT {target} HTTP/1.1\r\nHost: {address}\r\n{}: {}\r\nConnection: close\r\nContent-Length: 8\r\n\r\nslow",
+            auth[0].0, auth[0].1
+        );
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let workers = fixture.workers.as_ref().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let active = workers
+                    .read(|db| {
+                        db.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM upload_attempt WHERE writer_active=1)",
+                            [],
+                            |row| row.get::<_, bool>(0),
+                        )
+                    })
+                    .await
+                    .unwrap();
+                if active {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fixture
+                .request("PUT", concurrent_target, None, &auth, "fast bytes")
+                .await
+                .0,
+            201
+        );
+        socket.write_all(b"body").await.unwrap();
+        let mut reply = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            reply.starts_with(format!("HTTP/1.1 {expected} ").as_bytes()),
+            "{:?}",
+            String::from_utf8_lossy(&reply)
+        );
+        let (status, _, bytes) = fixture
+            .request("GET", concurrent_target, None, &auth, "")
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(bytes, b"fast bytes");
+    }
+
+    let (status, _, bytes) = fixture.request("GET", slow, None, &auth, "").await;
+    assert_eq!(status, 200);
+    assert_eq!(bytes, b"slowbody");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn webdav_settles_a_committed_put_when_the_sqlite_result_is_lost() {
+    use sylux::domain::upload::revision_etag;
+
+    let fixture = Fixture::with_webdav(true).await;
+    let (_, credential) = fixture.credential(0, "Lost commit result", false).await;
+    let auth = [credential];
+    let path = "/dav/Files/lost-commit-result.bin";
+
+    fixture.upload_commit.lose_next_committed_result();
+    let (status, committed, _) = fixture
+        .request("PUT", path, None, &auth, "original bytes")
+        .await;
+    assert!(!fixture.upload_commit.result_loss_pending());
+    assert_eq!(status, 201);
+    assert_eq!(
+        fixture.request("PUT", path, None, &auth, "retry").await.0,
+        412
+    );
+    let (status, downloaded, bytes) = fixture.request("GET", path, None, &auth, "").await;
+    assert_eq!(status, 200);
+    assert_eq!(bytes, b"original bytes");
+
+    let results = fixture
+        .workers
+        .as_ref()
+        .unwrap()
+        .read(|db| {
+            let mut statement = db.prepare(
+                "SELECT r.revision_id, m.state, m.result_revision_id
+             FROM revision r JOIN entry e ON e.entry_id=r.entry_id
+             LEFT JOIN mutation m ON m.result_revision_id=r.revision_id
+             WHERE e.owner_account_id=?1 AND e.original_name='lost-commit-result.bin'",
+            )?;
+            statement
+                .query_map([OWNER], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+        .unwrap();
+    let [(revision, state, result)] = results.as_slice() else {
+        panic!("expected exactly one published revision, got {results:?}");
+    };
+    assert_eq!(state, "committed");
+    assert_eq!(revision, result);
+    assert_eq!(committed["etag"], revision_etag(revision));
+    assert_eq!(downloaded["etag"], committed["etag"]);
+    fixture.close().await;
+}
