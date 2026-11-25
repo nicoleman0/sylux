@@ -234,6 +234,7 @@ class Thunar:
         self.registry = registry
         self.window = None
         self.pid = None
+        self.child = None
 
     def app(self):
         if self.pid is None:
@@ -254,6 +255,8 @@ class Thunar:
 
     def wait(self, stage, operation):
         def probe():
+            if self.child is not None and self.child.poll() is not None:
+                raise RuntimeError(f"Thunar exited before {stage} (exit code {self.child.returncode})")
             try:
                 return operation()
             except GLib.Error:
@@ -359,7 +362,7 @@ def desktop(fixture, directory, app_password):
     with contextlib.ExitStack() as processes:
         processes.enter_context(process("openbox"))
         thunar.wait("Openbox X11 desktop", lambda: x11("get_desktop"))
-        processes.enter_context(process("thunar", "--new-window", str(downloads)))
+        thunar.child = processes.enter_context(process("thunar", str(downloads)))
         thunar.attach(downloads.name)
         key("ctrl+2")
         thunar.wait("Thunar detailed list view", lambda: thunar.control(pyatspi.ROLE_TABLE))
