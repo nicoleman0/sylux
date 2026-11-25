@@ -57,21 +57,40 @@
 
   async function revoke(grant: DirectGrant): Promise<void> {
     if (busy || !loaded) return;
+    const trigger = document.activeElement;
+    const restoreFocus = trigger?.getAttribute('aria-label') === `Revoke access for ${grant.handle}`;
     busy = grant.id; error = ''; notice = '';
-    let focusLost = false;
     try {
       await sharing.revoke(grant.id, controller.signal);
       if (controller.signal.aborted) return;
-      focusLost = document.activeElement?.getAttribute('aria-label') === `Revoke access for ${grant.handle}`;
       grants = grants.filter(item => item.id !== grant.id);
       notice = `Revoked access for ${grant.handle}.`;
-    } catch {
+    } catch (failure) {
       if (controller.signal.aborted) return;
-      loaded = false; error = 'Could not confirm revocation. Refresh access before trying again.';
+      if (!(failure instanceof HttpError) || failure.status === 404 || failure.status >= 500) {
+        try {
+          const response = await sharing.grants(folder.id, controller.signal);
+          if (controller.signal.aborted) return;
+          grants = response.items;
+          notice = grants.some(item => item.handle === grant.handle)
+            ? `${grant.handle} still has direct access to this folder.`
+            : `${grant.handle} has no direct access to this folder.`;
+        } catch {
+          if (controller.signal.aborted) return;
+          loaded = false;
+        }
+      } else {
+        loaded = false;
+      }
+      if (!loaded) error = 'Could not confirm revocation. Refresh access before trying again.';
     } finally { busy = ''; }
-    if (focusLost) {
+    if (restoreFocus) {
       await tick();
-      document.getElementById('direct-share-handle')?.focus();
+      if (!controller.signal.aborted && (document.activeElement === document.body || document.activeElement === trigger)) {
+        const retry = loaded ? grants.find(item => item.id === grant.id) : undefined;
+        if (retry && trigger instanceof HTMLElement) trigger.focus();
+        else document.getElementById(loaded ? 'direct-share-handle' : 'direct-share-refresh')?.focus();
+      }
     }
   }
 </script>
@@ -97,7 +116,7 @@
           {#each grants as item (item.id)}
             <li class="flex min-h-11 items-center justify-between gap-3 py-1">
               <span class="min-w-0 [overflow-wrap:anywhere]">{item.handle}<span class="block text-xs text-muted-foreground">Read only</span></span>
-              <Button variant="ghost" size="sm" disabled={!!busy} aria-busy={busy === item.id} aria-label={`Revoke access for ${item.handle}`} onclick={() => revoke(item)}>{busy === item.id ? 'Revoking…' : 'Revoke'}</Button>
+              <Button variant="ghost" size="sm" aria-disabled={!!busy} aria-busy={busy === item.id} aria-label={`Revoke access for ${item.handle}`} onclick={() => revoke(item)}>{busy === item.id ? 'Revoking…' : 'Revoke'}</Button>
             </li>
           {/each}
         </ul>
@@ -108,7 +127,7 @@
     {#if error}<p role="alert">{error}</p>{/if}
     {#if notice}<p role="status" class="[overflow-wrap:anywhere]">{notice}</p>{/if}
     <Dialog.Footer>
-      {#if !loaded && error}<Button variant="outline" disabled={!!busy} onclick={load}>Refresh access</Button>{/if}
+      {#if !loaded && error}<Button id="direct-share-refresh" variant="outline" disabled={!!busy} onclick={load}>Refresh access</Button>{/if}
       <Button variant="outline" disabled={!!busy} onclick={onclose}>Close</Button>
     </Dialog.Footer>
   </Dialog.Content>

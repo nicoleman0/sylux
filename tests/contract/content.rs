@@ -35,6 +35,7 @@ const SECRET: &[u8; 32] = b"s1-owner-secret-0123456789abcdef";
 const OTHER_SECRET: &[u8; 32] = b"s1-other-secret-0123456789abcdef";
 const CSRF: &[u8; 32] = b"s1-owner-csrf-0123456789abcdef!!";
 const OTHER_CSRF: &[u8; 32] = b"s1-other-csrf-0123456789abcdef!!";
+const BINARY_FILE: (&str, &[u8]) = ("unsafe <name>.bin", b"synthetic\0content\xff\x80");
 const BUSY: Duration = Duration::from_millis(375);
 
 struct Fixture {
@@ -45,10 +46,10 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(case: &str) -> Self {
-        Self::start(case, None).await
+        Self::start(case, None, BINARY_FILE).await
     }
 
-    async fn start(case: &str, legacy: Option<&LegacyLinks>) -> Self {
+    async fn start(case: &str, legacy: Option<&LegacyLinks>, file: (&str, &[u8])) -> Self {
         let parent = std::env::temp_dir()
             .canonicalize()
             .unwrap()
@@ -86,7 +87,7 @@ impl Fixture {
             schema::insert_installation_row(&connection, identity, [0; 32]).unwrap();
         }
         seed(&connection);
-        seed_file(&connection, &product);
+        seed_file(&connection, &product, file);
         let connection = if let Some(links) = legacy {
             links.seed(&connection);
             drop(connection);
@@ -224,8 +225,9 @@ fn seed(c: &Connection) {
         c.execute("INSERT INTO session(session_id,account_id,credential_epoch,verifier,csrf_verifier,created_at,idle_expires_at,absolute_expires_at,revoked) VALUES(?1,?2,0,?3,?4,?5,?6,?7,0)",params![sid,account,verifier(secret).as_slice(),verifier(csrf).as_slice(),now,now+3600,now+7200]).unwrap();
     }
 }
-fn seed_file(c: &Connection, product: &std::path::Path) {
-    let bytes = b"synthetic\0content\xff\x80";
+fn seed_file(c: &Connection, product: &std::path::Path, (name, bytes): (&str, &[u8])) {
+    let name_key = sylux::domain::names::EntryName::parse(name).unwrap();
+
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     let blob_id = "abcdef0123456789abcdef0123456789";
     let attempt_id = "1234567890abcdef1234567890abcdef";
@@ -250,7 +252,7 @@ fn seed_file(c: &Connection, product: &std::path::Path) {
         ],
     )
     .unwrap();
-    tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version,current_revision_id,generation) VALUES('00000000000000000000000000000301',?1,?2,'file','unsafe <name>.bin',x'756e73616665203c6e616d653e2e62696e',1,NULL,1)", params![OWNER, ROOT]).unwrap();
+    tx.execute("INSERT INTO entry(entry_id,owner_account_id,parent_id,kind,original_name,name_key,name_key_version,current_revision_id,generation) VALUES('00000000000000000000000000000301',?1,?2,'file',?3,?4,1,NULL,1)", params![OWNER, ROOT, name, name_key.key]).unwrap();
     tx.execute("INSERT INTO revision(revision_id,entry_id,blob_id,length,sha256,committed_at,actor_account_id) VALUES('00000000000000000000000000000302','00000000000000000000000000000301',?1,?2,?3,?4,?5)", params![published.blob_id, bytes.len() as i64, digest.as_slice(), now, OWNER]).unwrap();
     tx.execute("UPDATE entry SET current_revision_id='00000000000000000000000000000302' WHERE entry_id='00000000000000000000000000000301'", []).unwrap();
     tx.commit().unwrap();
@@ -658,14 +660,42 @@ async fn direct_grant_read_surface_is_live_independent_and_owner_write_only() {
     assert_eq!(f.share_grant(&shared, "other").await, folder_grant);
     let (status, discover) = f.share_get("/shared", GRANT_RECIPIENT_ACTOR).await;
     assert_eq!(status, 200);
-    assert_eq!(discover["items"].as_array().unwrap().len(), 2);
-    assert_eq!(discover["items"][0]["entry"]["parent_id"], Value::Null);
+    let roots = discover["items"].as_array().unwrap();
+    assert_eq!(roots.len(), 2);
+    for root in [ROOT, shared.as_str()] {
+        assert!(
+            roots
+                .iter()
+                .any(|item| item["entry"]["id"] == root && item["entry"]["parent_id"].is_null())
+        );
+    }
     assert_eq!(
         f.share_get("/shared", GRANT_ADMIN_ACTOR).await.1["items"],
         json!([])
     );
-    f.share_revoke(&library_grant).await;
     let folder_url = format!("/shared/folders/{nested}/path");
+    let (status, overlapping_path) = f.share_get(&folder_url, GRANT_RECIPIENT_ACTOR).await;
+    assert_eq!(status, 200);
+    let ids: Vec<_> = overlapping_path["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [ROOT, private.as_str(), shared.as_str(), nested.as_str()]
+    );
+    let (status, overlapping_search) = f
+        .share_get("/shared/search?q=unsafe", GRANT_RECIPIENT_ACTOR)
+        .await;
+    assert_eq!(status, 200);
+    let hits = overlapping_search["items"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["entry"]["id"], SHARE_FILE);
+    assert_eq!(hits[0]["location"], overlapping_path["items"]);
+
+    f.share_revoke(&library_grant).await;
     let file_url = format!("/shared/entries/{SHARE_FILE}");
     let bytes_url = format!("{file_url}/content");
     let (status, path) = f.share_get(&folder_url, GRANT_RECIPIENT_ACTOR).await;
@@ -718,7 +748,20 @@ async fn direct_grant_read_surface_is_live_independent_and_owner_write_only() {
     assert_eq!(headers["referrer-policy"], "no-referrer");
     assert_eq!(bytes, b"synthetic\0content\xff\x80");
     let content_tag = headers["etag"].clone();
-    assert_eq!(f.request("HEAD", &bytes_url, recipient, &[]).await.0, 200);
+    let children_url = format!("/shared/folders/{nested}/children");
+    for (method, url) in [
+        ("GET", "/shared"),
+        ("GET", folder_url.as_str()),
+        ("GET", children_url.as_str()),
+        ("GET", "/shared/search?q=unsafe"),
+        ("GET", file_url.as_str()),
+        ("HEAD", bytes_url.as_str()),
+    ] {
+        let (status, headers, _) = f.request(method, url, recipient, &[]).await;
+        assert_eq!(status, 200, "{method} {url}");
+        assert_eq!(headers["cache-control"], "no-store", "{method} {url}");
+        assert_eq!(headers["referrer-policy"], "no-referrer", "{method} {url}");
+    }
     assert_eq!(
         f.request(
             "GET",
@@ -750,6 +793,17 @@ async fn direct_grant_read_surface_is_live_independent_and_owner_write_only() {
         .0,
         404
     );
+    let (status, reply) = f
+        .share_request(
+            "POST",
+            &format!("/folders/{nested}/children"),
+            GRANT_RECIPIENT_ACTOR,
+            json!({"name":"New folder"}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 404, "{reply}");
     for (method, path, body) in [
         (
             "PATCH",
@@ -875,6 +929,175 @@ async fn direct_grant_read_surface_is_live_independent_and_owner_write_only() {
             json!([])
         );
     }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn direct_grant_listing_and_search_paginate_with_isolated_cursors() {
+    use serde_json::json;
+
+    let f = Fixture::new("direct-grant-cursors").await;
+    f.seed_grant_admin().await;
+    let shared = f.share_folder(ROOT, "Project").await;
+    let first = f.share_folder(&shared, "Report A").await;
+    let second = f.share_folder(&shared, "Report B").await;
+    f.share_grant(&shared, "other").await;
+    f.share_grant(&shared, "unrelated-admin").await;
+
+    for (private, shared_url, other_scope, id_field) in [
+        (
+            format!("/folders/{shared}/children?limit=1"),
+            format!("/shared/folders/{shared}/children?limit=1"),
+            format!("/shared/folders/{first}/children?limit=1"),
+            "/id",
+        ),
+        (
+            format!("/entries/search?q=Report&folder_id={shared}&limit=1"),
+            format!("/shared/search?q=Report&folder_id={shared}&limit=1"),
+            format!("/shared/search?q=Report&folder_id={first}&limit=1"),
+            "/entry/id",
+        ),
+    ] {
+        let (status, page) = f.share_get(&shared_url, GRANT_RECIPIENT_ACTOR).await;
+        assert_eq!(status, 200, "{shared_url}");
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0].pointer(id_field).unwrap(), &json!(first));
+        assert_eq!(page["has_more"], true);
+        let shared_cursor = page["next_cursor"].as_str().unwrap();
+        let (status, next) = f
+            .share_get(
+                &format!("{shared_url}&cursor={shared_cursor}"),
+                GRANT_RECIPIENT_ACTOR,
+            )
+            .await;
+        assert_eq!(status, 200, "{next}");
+        assert_eq!(next["items"].as_array().unwrap().len(), 1);
+        assert_eq!(next["items"][0].pointer(id_field).unwrap(), &json!(second));
+        assert_eq!(next["has_more"], false);
+        assert!(next["next_cursor"].is_null());
+
+        let (status, page) = f.share_get(&private, GRANT_OWNER_ACTOR).await;
+        assert_eq!(status, 200, "{page}");
+        let private_cursor = page["next_cursor"].as_str().unwrap();
+        // Cross-route requests also change actor, so pin both token versions independently.
+        for (cursor, version) in [(private_cursor, 3), (shared_cursor, 4)] {
+            let (payload, _) = cursor.split_once('.').unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+            assert_eq!(payload["version"], version);
+        }
+        for (url, cursor, actor) in [
+            (&private, shared_cursor, GRANT_OWNER_ACTOR),
+            (&shared_url, private_cursor, GRANT_RECIPIENT_ACTOR),
+            (&shared_url, shared_cursor, GRANT_ADMIN_ACTOR),
+            (&other_scope, shared_cursor, GRANT_RECIPIENT_ACTOR),
+        ] {
+            let (status, reply) = f.share_get(&format!("{url}&cursor={cursor}"), actor).await;
+            assert_eq!(status, 400, "{url}: {reply}");
+            assert_eq!(reply["code"], "invalid_cursor");
+        }
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn direct_grant_does_not_authorize_upload_admission_or_text_edit() {
+    use serde_json::json;
+    use sylux::domain::upload::{folder_etag, hex, revision_etag};
+
+    let f = Fixture::start("direct-grant-text", None, ("report.txt", b"Original text")).await;
+    f.share_grant(ROOT, "other").await;
+    let (status, file) = f
+        .share_get(
+            &format!("/shared/entries/{SHARE_FILE}"),
+            GRANT_RECIPIENT_ACTOR,
+        )
+        .await;
+    assert_eq!(status, 200);
+    let revision_id = "00000000000000000000000000000302";
+    let recipient = Some(auth(OTHER_SESSION, OTHER_SECRET));
+    let (status, headers, _) = f
+        .request(
+            "HEAD",
+            &format!("/shared/entries/{SHARE_FILE}/content"),
+            recipient,
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(headers["etag"], revision_etag(revision_id));
+
+    let mut admission = json!({
+        "parent_id": ROOT,
+        "parent_etag": folder_etag(ROOT, 1),
+        "name": "new.txt",
+        "length": b"Changed text".len(),
+        "sha256": hex(&Sha256::digest(b"Changed text")),
+    });
+    let mut ticket_body = admission.clone();
+    ticket_body["scope"] = json!("upload_create");
+    let (status, ticket) = f
+        .share_request(
+            "POST",
+            "/mutation-tickets",
+            GRANT_RECIPIENT_ACTOR,
+            ticket_body,
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 201, "{ticket}");
+    let mut headers = mutation_headers(OTHER_CSRF).to_vec();
+    headers.push(("If-None-Match", "*".to_owned()));
+    headers.push((
+        "X-Mutation-ID",
+        ticket["ticket"].as_str().unwrap().to_owned(),
+    ));
+    let (status, _, reply) = f
+        .request_with_body(
+            "POST",
+            "/uploads",
+            recipient,
+            &headers,
+            admission.to_string().as_bytes(),
+        )
+        .await;
+    assert_eq!(status, 404);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&reply).unwrap()["code"],
+        "parent_not_found"
+    );
+
+    admission["scope"] = json!("upload_create");
+    admission["name"] = json!("report.txt");
+    admission["replacement"] = json!({
+        "entry_id": SHARE_FILE,
+        "etag": file["entry"]["etag"],
+        "text_revision": revision_id,
+    });
+    let (status, reply) = f
+        .share_request(
+            "POST",
+            "/mutation-tickets",
+            GRANT_RECIPIENT_ACTOR,
+            admission.clone(),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 404, "{reply}");
+    assert_eq!(reply["code"], "entry_not_found");
+    let (status, reply) = f
+        .share_request(
+            "POST",
+            "/mutation-tickets",
+            GRANT_OWNER_ACTOR,
+            admission,
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 201, "{reply}");
     f.close().await;
 }
 
@@ -1162,6 +1385,17 @@ async fn direct_grant_tree_changes_recheck_confirmation_and_permanently_revoke_t
     let (_, trash) = f.share_get("/trash", GRANT_OWNER_ACTOR).await;
     let deleted_tag = trash["items"][0]["etag"].as_str();
     let restore = format!("/trash/{SHARE_FILE}/restore");
+    let (status, denied) = f
+        .share_request(
+            "POST",
+            &restore,
+            GRANT_RECIPIENT_ACTOR,
+            Value::Null,
+            deleted_tag,
+            None,
+        )
+        .await;
+    assert_eq!(status, 404, "{denied}");
     let (status, preview) = f
         .share_request(
             "POST",
@@ -1319,7 +1553,7 @@ async fn schema_three_upgrade_preserves_saved_private_and_public_file_urls() {
             .unwrap()
             .as_secs() as i64,
     };
-    let f = Fixture::start("syl-110-existing-links", Some(&legacy)).await;
+    let f = Fixture::start("syl-110-existing-links", Some(&legacy), BINARY_FILE).await;
     let owner = Some(auth(SESSION, SECRET));
     let other = Some(auth(OTHER_SESSION, OTHER_SECRET));
     let parse = |body: &[u8]| serde_json::from_slice::<serde_json::Value>(body).unwrap();

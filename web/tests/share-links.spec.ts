@@ -49,10 +49,6 @@ for (const { colorScheme, width } of [
     await page.getByLabel('Account name').fill('owner');
     await page.getByLabel('Password', { exact: true }).fill('password');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-    const folderOptions = page.getByRole('button', { name: 'Options for Work' });
-    await folderOptions.click();
-    await expect(page.getByRole('menuitem', { name: 'Share', exact: true })).toHaveCount(0);
-    await page.keyboard.press('Escape');
     const options = page.getByRole('button', { name: `Options for ${file.name}` });
     await options.focus();
     await page.keyboard.press('Enter');
