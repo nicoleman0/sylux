@@ -35,6 +35,21 @@ changes. Secrets and certificates are generated per run. The runner discards
 provider logs and removes the container, network and temporary certificates
 on exit.
 
+## Sylux browser contract
+
+The disposable Sylux contract uses the same pinned container and an isolated
+TLS browser. Build `oidc_fixture` with the `test-harness` feature, then pass the
+absolute executable path from Cargo to `scripts/qualify-keycloak.sh`:
+
+```sh
+cargo test --locked --features test-harness --test oidc_fixture --no-run
+bash scripts/qualify-keycloak.sh /absolute/path/to/oidc_fixture
+```
+
+This exercises real provider sign-in and a local TLS fault provider. The test
+policy and password-only realm are fixture inputs. Production enablement and
+operator policy require separate approval.
+
 ## Profile and checks
 
 - One native-user realm with the default browser flow and a synthetic password.

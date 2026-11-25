@@ -26,6 +26,12 @@ cleanup() {
         echo "Cleanup failed for fixture network $name" >&2
         status=1
     fi
+    if [[ -n "${sylux_fixture:-}" ]]; then
+        if ! rm -rf -- "$fixture/sylux" "$fixture/sylux-oidc.json"; then
+            echo 'Cleanup failed for disposable Sylux storage.' >&2
+            status=1
+        fi
+    fi
     if ! rm -f -- "$fixture/"{ca.key,ca.pem,ca.srl,leaf.csr,leaf.ext} \
         "$fixture/tls/"{leaf.key,leaf.pem} || ! rmdir "$fixture/tls" "$fixture"; then
         echo 'Cleanup failed for fixture files.' >&2
@@ -51,7 +57,7 @@ cat > "$fixture/leaf.ext" <<'EXT'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=IP:127.0.0.1
+subjectAltName=IP:127.0.0.1,DNS:localhost
 EXT
 openssl x509 -req -in "$fixture/leaf.csr" -CA "$fixture/ca.pem" -CAkey "$fixture/ca.key" \
     -CAcreateserial -out "$fixture/tls/leaf.pem" -days 1 -sha256 -extfile "$fixture/leaf.ext" >/dev/null 2>&1
@@ -82,5 +88,7 @@ if [[ $(docker port "$container" 8443/tcp) != "$binding" ]]; then
     echo 'Expected the configured IPv4 loopback binding.' >&2
     exit 1
 fi
+sylux_fixture=${1:-}
 env -u DEBUG -u PWDEBUG -u NODE_DEBUG -u NODE_DEBUG_NATIVE \
-    node "$root/scripts/qualify-keycloak.mjs" "$fixture" "$container" "https://$binding"
+    NODE_EXTRA_CA_CERTS="$fixture/ca.pem" \
+    node "$root/scripts/qualify-keycloak.mjs" "$fixture" "$container" "https://$binding" "$sylux_fixture"

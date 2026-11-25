@@ -49,6 +49,11 @@ rule. No fairness or eventual-completion property is claimed.
 | Atomic `Execute` | `src/persistence/sqlite.rs`: `SqliteWorkers::transact_result` and `run_result_transaction`; writer submission and immediate transaction enclose the operation |
 | Four initial operation pairs, 204/401 results and one remaining admin | `tests/contract/setup_auth.rs`: `concurrent_account_authority_changes_preserve_an_enabled_admin_and_reject_revoked_actor` |
 
+From schema 8, account mode constrains administrator roles to local accounts.
+The OIDC paths issue sessions only for ordinary users. The existing session
+epoch, current authority, last-administrator check and atomic revocation still
+govern the administrator pair in this model.
+
 The contract test also tries further actions with the losing session and
 checks no extra account changes or audit events. Those follow-up requests
 are outside this two-request model. The model explores both serial orders;

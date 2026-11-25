@@ -1,8 +1,8 @@
 {
-  "sync_commit": "26ac8c4783a9c8745e31045929eb6a2becaf0fad",
+  "sync_commit": "9328361da0d0dfd9a593fe3e31c3bdc33442be9c",
   "files": {
-    "src/http/accounts.rs": "87ac3cd0815b75585c222ff4c4b022f3b70e9d40d332c985ee867dc71401ae50",
-    "src/domain/authz.rs": "27575baa2bcff68c319ea2f4482a7e0438572222883e57a51d0cc14600c3a664",
+    "src/http/accounts.rs": "4be68cfa926fc939123c414c0e5fdc889e2ca3a10bea0c6497d2ceaf26066aa7",
+    "src/domain/authz.rs": "d38b687242606e56dbefd1d51f231f99f22abedb5b04f13de0e23331b7409808",
     "src/persistence/sqlite.rs": "86f290e5c29488f72504b5b05ba21d9f3b49bce56188d507b5f724e3bc62beb5",
     "tests/contract/setup_auth.rs": "aeaf2f744a1dc8d21bbac32acfa2026de4e54e07eb1c89497435aef8eb5fa52c"
   },

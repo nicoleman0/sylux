@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { setTimeout as wait } from 'node:timers/promises';
 import { chromium } from '../web/node_modules/playwright/index.mjs';
 
-const [fixture, container, origin] = process.argv.slice(2);
+const [fixture, container, origin, syluxFixture] = process.argv.slice(2);
 const realm = 'qualification';
 const issuer = `${origin}/realms/${realm}`;
 const clientId = 'fixture-rp';
@@ -411,7 +411,15 @@ async function main() {
         delete env.KC_BOOTSTRAP_ADMIN_CLIENT_SECRET;
         browser = await chromium.launch({ env, args: [`--ignore-certificate-errors-spki-list=${pin}`] });
         console.log(`Node ${process.version}, Chromium ${browser.version()}.`);
-        await run(browser, callback);
+        if (syluxFixture) {
+            const { qualifySylux } = await import('./qualify-sylux-oidc.mjs');
+            await qualifySylux(fixture, syluxFixture, browser, {
+                check, issuer, clientId, clientSecret, createUser, admin, container, provision, submit,
+                step: (name) => { step = name; },
+            });
+        } else {
+            await run(browser, callback);
+        }
     } finally {
         try {
             await browser?.close();
