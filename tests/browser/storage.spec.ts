@@ -914,7 +914,8 @@ test('WebDAV changes appear in Files and Trash and the app password can be revok
   const upload = `dav-new-${phase}.txt`;
   const renamed = `dav-moved-${phase}.txt`;
   const folder = `DAV delivery ${phase}`;
-  const destination = `/dav/Files/${encodeURIComponent(folder)}/${renamed}`;
+  const collection = `/dav/Files/${encodeURIComponent(folder)}/`;
+  const destination = collection + renamed;
   const preview = (file: string) => page.getByRole('button', { name: `Preview ${file}`, exact: true });
   const bytes = Buffer.from('WebDAV fixture bytes\n');
   await expect(preview(upload)).toHaveCount(0);
@@ -922,7 +923,7 @@ test('WebDAV changes appear in Files and Trash and the app password can be revok
   await page.getByRole('button', { name: 'Refresh folder' }).press('Enter');
   await expect(preview(upload)).toBeVisible();
 
-  expect((await dav('MKCOL', `/dav/Files/${encodeURIComponent(folder)}/`)).status).toBe(201);
+  expect((await dav('MKCOL', collection)).status).toBe(201);
   expect((await dav('MOVE', `/dav/Files/${upload}`, Buffer.alloc(0), { Destination: origin + destination })).status).toBe(201);
   await page.getByRole('button', { name: 'Refresh folder' }).press('Enter');
   await expect(preview(upload)).toHaveCount(0);
@@ -938,6 +939,8 @@ test('WebDAV changes appear in Files and Trash and the app password can be revok
   await expect(preview(renamed)).toHaveCount(0);
   await page.getByRole('button', { name: 'Trash', exact: true }).press('Enter');
   await expect(page.getByText(renamed, { exact: true })).toBeVisible();
+  // Restart reuses this root, where the keyboard test expects the seeded folder first.
+  expect((await dav('DELETE', collection)).status).toBe(204);
 
   await page.getByRole('button', { name: 'Account', exact: true }).press('Enter');
   await page.getByRole('button', { name: 'Switch to dark mode' }).press('Enter');
