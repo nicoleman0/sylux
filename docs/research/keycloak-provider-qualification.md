@@ -78,7 +78,7 @@ Each pair used a clean browser context and a separate context initialized
 from the pre-disable SSO cookie state. Both attempts received a
 provider-rendered disabled-account denial at every sample, scheduled immediately
 and at 5, 30, 60, 120, 180, 240, 290 and 300 s. The last pair finished at
-300.50 s after acknowledgement.
+300.29 s after acknowledgement.
 
 These observations are consistent with the proposed **P ≤ 5 minutes** for
 the exercised paths on this host. Sampling gives an upper bound on when
