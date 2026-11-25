@@ -56,7 +56,9 @@ jobs:
         timeout-minutes: 5
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends thunar gvfs gvfs-backends dbus-x11 xvfb xdotool xauth openbox ca-certificates openssl at-spi2-core python3-pyatspi
+          sudo apt-get install --yes --no-install-recommends \
+            thunar gvfs gvfs-backends glib-networking libgtk-3-0t64 libglib2.0-bin \
+            dbus-x11 xvfb xdotool xauth openbox ca-certificates openssl at-spi2-core python3-pyatspi
       - name: Build Sylux
         run: |
           npm install --global npm@11.19.1

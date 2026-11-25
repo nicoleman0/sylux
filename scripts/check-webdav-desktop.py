@@ -1,12 +1,14 @@
 """Drive Thunar on a disposable Xvfb / D-Bus session. Requires runner-local sudo for the test CA."""
 
 import base64
+from collections import Counter
 import contextlib
 import hashlib
 import http.client
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import ssl
@@ -16,21 +18,24 @@ import tempfile
 import time
 
 import pyatspi
+from gi.repository import GLib
 
 
 ACCOUNT = "desktop-fixture"
 SEED = b"Seeded fixture download bytes\0\xff"
 UPLOAD = b"Thunar fixture upload bytes\0\xfe"
-ENV = {**os.environ, "LC_ALL": "C", "GTK_A11Y": "1", "NO_AT_BRIDGE": "0"}
+ENV = {**os.environ, "LC_ALL": "C", "GDK_BACKEND": "x11", "NO_AT_BRIDGE": "0",
+       "GIO_USE_VFS": "gvfs"}
 
 
 def record(event, **fields):
     print(json.dumps({"event": event, **fields}), flush=True)
 
 
-def run(*args, quiet=True):
+def run(*args, quiet=True, input_bytes=None):
     return subprocess.run(
         args, env=ENV, check=True, timeout=15,
+        input=input_bytes,
         stdout=subprocess.DEVNULL if quiet else subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
@@ -51,13 +56,15 @@ def process(*args, env=None):
                 child.wait(timeout=5)
 
 
-def eventually(label, operation, seconds=12):
+def eventually(label, operation, seconds=12, on_timeout=None):
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         result = operation()
         if result:
             return result
         time.sleep(0.15)
+    if on_timeout is not None:
+        on_timeout(label)
     raise RuntimeError(f"Timed out: {label}")
 
 
@@ -173,12 +180,12 @@ class Fixture:
     def dav_expect(self, label, method, path, status, body=None, **headers):
         return self.expect(label, method, path, status, body, {"Authorization": self.dav, **headers})
 
-    def wait_for_bytes(self, label, target, expected):
+    def wait_for_bytes(self, label, target, expected, on_timeout=None):
         def test():
             status, headers, payload = self.request("GET", target, headers={"Authorization": self.dav})
             if status == 200 and payload == expected:
                 return get_header(headers, "etag")
-        etag = eventually(label, test)
+        etag = eventually(label, test, on_timeout=on_timeout)
         record("http", step=label, method="GET", status=200, sha256=hashlib.sha256(expected).hexdigest())
         return etag
 
@@ -187,23 +194,132 @@ def get_header(headers, name):
     return next(value for header, value in headers.items() if header.lower() == name)
 
 
-def thunar_controls():
-    desktop = pyatspi.Registry.getDesktop(0)
-    for app in desktop:
-        if app and app.name.lower() == "thunar":
-            stack = [app]
-            while stack:
-                control = stack.pop()
-                if control:
-                    yield control
-                    stack.extend(control)
+def x11(*args):
+    try:
+        result = subprocess.run(("xdotool", *args), env=ENV, timeout=2,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return ""
+    return result.stdout.decode(errors="replace").strip() if result.returncode == 0 else ""
 
 
-def control_named(name, role=None):
-    return next((item for item in thunar_controls()
-                 if (item.name == name or (role == pyatspi.ROLE_FRAME and item.name.startswith(name + " - ")))
-                 and (role is None or item.getRole() == role)
-                 and item.getState().contains(pyatspi.STATE_SHOWING)), None)
+def thunar_windows(folder=None):
+    args = ("search", "--all", "--onlyvisible", "--class", "^Thunar$")
+    if folder is not None:
+        args += ("--name", "^" + re.escape(f"{folder} - Thunar") + "$")
+    return x11(*args).splitlines()
+
+
+def enable_accessibility():
+    run("gdbus", "call", "--session", "--dest", "org.a11y.Bus", "--object-path", "/org/a11y/bus",
+        "--method", "org.freedesktop.DBus.Properties.Set", "org.a11y.Status", "IsEnabled", "<true>")
+    # Start the registry before GTK tries to register its accessible objects.
+    registry = pyatspi.Registry.getDesktop(0)
+    if registry is None:
+        raise RuntimeError("AT-SPI registry did not start")
+    return registry
+
+
+def controls(root):
+    stack = [root]
+    while stack:
+        control = stack.pop()
+        if control is not None:
+            yield control
+            stack.extend(control)
+
+
+class Thunar:
+    def __init__(self, registry):
+        self.registry = registry
+        self.window = None
+        self.pid = None
+
+    def app(self):
+        if self.pid is None:
+            return None
+        # Dispatch registration and cache updates between polls.
+        context = GLib.MainContext.default()
+        for _ in range(16):
+            if not context.iteration(False):
+                break
+        for app in self.registry:
+            if app is not None:
+                try:
+                    if app.get_process_id() == self.pid:
+                        return app
+                except GLib.Error:
+                    continue
+        return None
+
+    def wait(self, stage, operation):
+        def probe():
+            try:
+                return operation()
+            except GLib.Error:
+                # A control can disappear while GTK replaces a view or closes a dialog.
+                return None
+        return eventually(stage, probe, on_timeout=self.diagnose)
+
+    def diagnose(self, stage):
+        counts = Counter()
+        roles = {pyatspi.ROLE_FRAME: "frames", pyatspi.ROLE_DIALOG: "dialogs",
+                 pyatspi.ROLE_ALERT: "alerts", pyatspi.ROLE_PASSWORD_TEXT: "password_entries",
+                 pyatspi.ROLE_TABLE: "tables", pyatspi.ROLE_TABLE_CELL: "table_cells"}
+        registered = False
+        try:
+            app = self.app()
+            registered = app is not None
+            for index, item in enumerate(controls(app)):
+                if index == 400:
+                    break
+                role = roles.get(item.getRole())
+                if role and item.getState().contains(pyatspi.STATE_SHOWING):
+                    counts[role] += 1
+        except GLib.Error:
+            counts["accessibility_error"] = 1
+        record("gui-timeout", step=stage, x11_windows=len(thunar_windows()),
+               thunar_registered=registered, showing=dict(counts))
+
+    def attach(self, folder):
+        def find_window():
+            windows = thunar_windows(folder)
+            if len(windows) == 1:
+                pid = x11("getwindowpid", windows[0])
+                if pid.isdecimal():
+                    return windows[0], int(pid)
+
+        self.window, self.pid = self.wait("Thunar named X11 window", find_window)
+        self.wait("Thunar X11 focus", self.focus)
+        record("gui", step="x11-window")
+        self.wait("Thunar AT-SPI registration", self.app)
+        record("gui", step="accessibility-registration")
+
+    def focus(self):
+        if x11("getactivewindow") == self.window:
+            return True
+        x11("windowactivate", self.window)
+        return False
+
+    def at_folder(self, folder):
+        return self.window in thunar_windows(folder) and x11("getactivewindow") == self.window
+
+    def control(self, role, name=None):
+        return next((item for item in controls(self.app())
+                     if item.getRole() == role and item.getState().contains(pyatspi.STATE_SHOWING)
+                     and (name is None or item.name == name)), None)
+
+    def row(self, name):
+        return self.control(pyatspi.ROLE_TABLE_CELL, name)
+
+    def select(self, name):
+        key("ctrl+s")
+        self.wait("Thunar select by pattern", lambda: self.control(pyatspi.ROLE_DIALOG, "Select by Pattern"))
+        key("ctrl+a")
+        type_text(name)
+        key("Return")
+        self.wait("Thunar selection dialog closed", lambda: x11("getactivewindow") == self.window
+                  and self.control(pyatspi.ROLE_DIALOG, "Select by Pattern") is None)
 
 
 def key(*keys):
@@ -211,22 +327,13 @@ def key(*keys):
 
 
 def type_text(value):
-    run("xdotool", "type", "--clearmodifiers", "--", value)
+    run("xdotool", "type", "--clearmodifiers", "--file", "-", input_bytes=value.encode())
 
 
 def navigate(location):
     key("ctrl+l", "ctrl+a")
     type_text(location)
     key("Return")
-
-
-def select(name):
-    key("ctrl+s")
-    eventually("Thunar select by pattern", lambda: control_named("Select by Pattern"))
-    key("ctrl+a")
-    type_text(name)
-    key("Return")
-    eventually("Thunar selection dialog closed", lambda: not control_named("Select by Pattern"))
 
 
 def activate(control):
@@ -248,63 +355,66 @@ def desktop(fixture, directory, app_password):
     uploads.mkdir()
     (uploads / "upload.bin").write_bytes(UPLOAD)
 
-    with process("openbox"), process("thunar", "--new-window", str(downloads)):
-        eventually("Thunar window", lambda: control_named(downloads.name, pyatspi.ROLE_FRAME))
+    thunar = Thunar(enable_accessibility())
+    with contextlib.ExitStack() as processes:
+        processes.enter_context(process("openbox"))
+        thunar.wait("Openbox X11 desktop", lambda: x11("get_desktop"))
+        processes.enter_context(process("thunar", "--new-window", str(downloads)))
+        thunar.attach(downloads.name)
+        key("ctrl+2")
+        thunar.wait("Thunar detailed list view", lambda: thunar.control(pyatspi.ROLE_TABLE))
         navigate(fixture.mount)
-        def password_entry():
-            return next((item for item in thunar_controls() if item.getRole() == pyatspi.ROLE_PASSWORD_TEXT
-                         and item.getState().contains(pyatspi.STATE_SHOWING)), None)
-        password = eventually("Thunar app password prompt", password_entry)
-        forget = control_named("Forget password immediately", pyatspi.ROLE_RADIO_BUTTON)
+        password = thunar.wait("Thunar app password prompt", lambda: thunar.control(pyatspi.ROLE_PASSWORD_TEXT))
+        forget = thunar.control(pyatspi.ROLE_RADIO_BUTTON, "Forget password immediately")
         if forget is not None:
             activate(forget)
         if not password.queryEditableText().setTextContents(app_password):
             raise RuntimeError("Thunar password field did not accept input")
-        connect = eventually("Thunar connect button", lambda: control_named("Connect", pyatspi.ROLE_PUSH_BUTTON))
+        connect = thunar.wait("Thunar connect button", lambda: thunar.control(pyatspi.ROLE_PUSH_BUTTON, "Connect"))
         activate(connect)
-        eventually("Thunar list contains seeded file", lambda: control_named("seed.bin"))
+        thunar.wait("Thunar list contains seeded file", lambda: thunar.row("seed.bin"))
         record("gui", step="connect-list", action="location bar, password prompt, list row")
 
-        select("seed.bin")
+        thunar.select("seed.bin")
         key("ctrl+c")
         navigate(str(downloads))
-        eventually("Thunar local download folder", lambda: control_named(downloads.name, pyatspi.ROLE_FRAME))
+        thunar.wait("Thunar local download folder", lambda: thunar.at_folder(downloads.name))
         key("ctrl+v")
         download = downloads / "seed.bin"
-        eventually("Thunar downloaded file", lambda: download.is_file() and download.stat().st_size == len(SEED))
+        thunar.wait("Thunar downloaded file", lambda: download.is_file() and download.stat().st_size == len(SEED))
         record("gui", step="download", action="select, copy, location bar, paste")
         verify_digest("download", download.read_bytes(), SEED)
 
         navigate(str(uploads))
-        eventually("Thunar local upload folder", lambda: control_named("upload.bin"))
-        select("upload.bin")
+        thunar.wait("Thunar local upload folder", lambda: thunar.row("upload.bin"))
+        thunar.select("upload.bin")
         key("ctrl+c")
         navigate(fixture.mount)
-        eventually("Thunar return to Files", lambda: control_named("seed.bin"))
+        thunar.wait("Thunar return to Files", lambda: thunar.row("seed.bin"))
         key("ctrl+v")
-        uploaded_etag = fixture.wait_for_bytes("uploaded", "/dav/Files/upload.bin", UPLOAD)
+        uploaded_etag = fixture.wait_for_bytes("uploaded", "/dav/Files/upload.bin", UPLOAD, thunar.diagnose)
         record("gui", step="upload", action="select, copy, location bar, paste")
 
-        eventually("Thunar uploaded file row", lambda: control_named("upload.bin"))
-        select("upload.bin")
+        thunar.wait("Thunar uploaded file row", lambda: thunar.row("upload.bin"))
+        thunar.select("upload.bin")
         key("F2")
-        eventually("Thunar rename dialog", lambda: control_named("Rename", pyatspi.ROLE_PUSH_BUTTON))
+        thunar.wait("Thunar rename dialog", lambda: thunar.control(pyatspi.ROLE_PUSH_BUTTON, "Rename"))
         key("ctrl+a")
         type_text("renamed.bin")
         key("Return")
-        if fixture.wait_for_bytes("renamed", "/dav/Files/renamed.bin", UPLOAD) != uploaded_etag:
+        if fixture.wait_for_bytes("renamed", "/dav/Files/renamed.bin", UPLOAD, thunar.diagnose) != uploaded_etag:
             raise RuntimeError("Thunar rename changed the file revision")
         fixture.dav_expect("renamed-source-gone", "GET", "/dav/Files/upload.bin", 404)
         record("gui", step="rename", action="select, F2, enter name")
 
-        eventually("Thunar renamed file row", lambda: control_named("renamed.bin"))
-        select("renamed.bin")
+        thunar.wait("Thunar renamed file row", lambda: thunar.row("renamed.bin"))
+        thunar.select("renamed.bin")
         key("ctrl+x")
         navigate(fixture.mount + "Destination/")
-        eventually("Thunar destination folder", lambda: control_named("Destination", pyatspi.ROLE_FRAME))
+        thunar.wait("Thunar destination folder", lambda: thunar.at_folder("Destination"))
         key("ctrl+v")
         target = "/dav/Files/Destination/renamed.bin"
-        if fixture.wait_for_bytes("moved", target, UPLOAD) != uploaded_etag:
+        if fixture.wait_for_bytes("moved", target, UPLOAD, thunar.diagnose) != uploaded_etag:
             raise RuntimeError("Thunar move changed the file revision")
         fixture.dav_expect("moved-source-gone", "GET", "/dav/Files/renamed.bin", 404)
         record("gui", step="move", action="select, cut, location bar, paste")
@@ -313,14 +423,14 @@ def desktop(fixture, directory, app_password):
         if json.loads(body)["items"]:
             raise RuntimeError("Thunar rename or move put an item in Sylux Trash")
 
-        eventually("Thunar moved file row", lambda: control_named("renamed.bin"))
-        select("renamed.bin")
+        thunar.wait("Thunar moved file row", lambda: thunar.row("renamed.bin"))
+        thunar.select("renamed.bin")
         key("shift+Delete")
-        delete = eventually("Thunar delete confirmation", lambda: control_named("Delete", pyatspi.ROLE_PUSH_BUTTON))
+        delete = thunar.wait("Thunar delete confirmation", lambda: thunar.control(pyatspi.ROLE_PUSH_BUTTON, "Delete"))
         activate(delete)
         def deleted():
             return fixture.request("GET", target, headers={"Authorization": fixture.dav})[0] == 404
-        eventually("Thunar deleted file", deleted)
+        thunar.wait("Thunar deleted file", deleted)
         record("http", step="deleted-source-gone", method="GET", status=404)
         record("gui", step="delete", action="select, Shift+Delete, confirm")
         _, body = fixture.expect("sylux-trash", "GET", "/trash", 200, headers=fixture.browser_headers())
@@ -332,7 +442,8 @@ def main(binary):
     if not (os.environ.get("DISPLAY") and os.environ.get("DBUS_SESSION_BUS_ADDRESS")):
         raise RuntimeError("Run through xvfb-run and dbus-run-session")
     versions = run("dpkg-query", "-W", "-f=${Package} ${Version}\\n",
-                   "thunar", "gvfs-backends", "dbus-x11", "xvfb", "xdotool", quiet=False)
+                   "thunar", "gvfs", "gvfs-backends", "glib-networking", "libgtk-3-0t64",
+                   "at-spi2-core", "dbus-x11", "openbox", "xvfb", "xdotool", quiet=False)
     record("versions", packages=versions.stdout.decode().splitlines())
     with tempfile.TemporaryDirectory(prefix="sylux-desktop-") as temporary:
         directory = Path(temporary)
@@ -340,10 +451,15 @@ def main(binary):
         root.mkdir(mode=0o700)
         client_home = directory / "client-home"
         client_home.mkdir(mode=0o700)
+        runtime = directory / "runtime"
+        runtime.mkdir(mode=0o700)
+        os.environ["XDG_RUNTIME_DIR"] = str(runtime)
         ENV.update(HOME=str(client_home), XDG_CONFIG_HOME=str(client_home / "config"),
-                   XDG_CACHE_HOME=str(client_home / "cache"), XDG_DATA_HOME=str(client_home / "data"))
+                   XDG_CACHE_HOME=str(client_home / "cache"), XDG_DATA_HOME=str(client_home / "data"),
+                   XDG_RUNTIME_DIR=str(runtime))
         run("dbus-update-activation-environment", "HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
-            "XDG_DATA_HOME", "DISPLAY", "XAUTHORITY", "GTK_A11Y", "NO_AT_BRIDGE")
+            "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "DISPLAY", "XAUTHORITY", "GDK_BACKEND",
+            "NO_AT_BRIDGE", "GIO_USE_VFS")
         cert, leaf, key_file = create_tls(directory)
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
