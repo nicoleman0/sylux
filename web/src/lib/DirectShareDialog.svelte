@@ -82,7 +82,7 @@
     onCloseAutoFocus={(event) => event.preventDefault()}>
     <Dialog.Header>
       <Dialog.Title class="[overflow-wrap:anywhere]">Share {folder.name}</Dialog.Title>
-      <Dialog.Description>Accounts you add can browse and download this folder and its contents.</Dialog.Description>
+      <Dialog.Description>Accounts you add can browse, search and download files in this folder. They cannot change anything.</Dialog.Description>
     </Dialog.Header>
     {#if loaded}
       <form class="grid gap-2" onsubmit={add}>
