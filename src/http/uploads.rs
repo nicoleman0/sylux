@@ -1,12 +1,14 @@
 #![allow(clippy::result_large_err)]
 
 use super::{
-    AuthState,
+    AuthState, dav,
     middleware::{decode_secret, origin_matches, session_cookie},
 };
 use crate::domain::{
     authz::csrf_matches,
-    coordinator::AdmissionTicket,
+    coordinator::{AdmissionTicket, MutationCoordinator},
+    dav_credentials::DavGrant,
+    names::EntryName,
     upload::{
         ActiveUpload, MAX_TEXT_EDIT_LENGTH, UploadAdmission, UploadStorage, VerifiedUploadTicket,
         WorkerError, admission_fingerprint, blob_id_from_staging, folder_etag,
@@ -92,6 +94,7 @@ impl UploadCancelTestBarrier {
 #[cfg(feature = "test-harness")]
 #[derive(Default)]
 pub struct UploadCommitTestBarrier {
+    lose_result: std::sync::atomic::AtomicBool,
     armed: std::sync::atomic::AtomicBool,
     paused: tokio::sync::Notify,
     release: tokio::sync::Notify,
@@ -99,6 +102,17 @@ pub struct UploadCommitTestBarrier {
 
 #[cfg(feature = "test-harness")]
 impl UploadCommitTestBarrier {
+    pub fn lose_next_committed_result(&self) {
+        self.lose_result
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn result_loss_pending(&self) -> bool {
+        self.lose_result.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn discard_committed_result(&self) -> bool {
+        self.lose_result
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
     pub fn arm(&self) {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -313,6 +327,99 @@ async fn authorize_mutation(
     }
 }
 
+#[derive(Clone)]
+enum WriteAccess {
+    Browser {
+        principal: AdmissionTicket,
+        csrf: [u8; 32],
+    },
+    Dav {
+        grant: DavGrant,
+        parent_path: Vec<EntryName>,
+    },
+}
+
+impl WriteAccess {
+    fn browser(principal: AdmissionTicket, headers: &HeaderMap) -> Result<Self, Response> {
+        let csrf = one_header(headers, "x-csrf-token")
+            .and_then(decode_secret)
+            .ok_or_else(|| error(StatusCode::FORBIDDEN, "csrf_required"))?;
+        Ok(Self::Browser { principal, csrf })
+    }
+
+    fn revalidate(
+        &self,
+        db: &Connection,
+        coordinator: &MutationCoordinator,
+        at: i64,
+    ) -> Result<(), Response> {
+        let unauthorized = || error(StatusCode::UNAUTHORIZED, "authentication_required");
+        match self {
+            Self::Browser { principal, csrf } => {
+                coordinator
+                    .revalidate_current(db, principal, at)
+                    .map_err(|_| unauthorized())?;
+                if !csrf_matches(db, principal.session_id(), csrf) {
+                    return Err(error(StatusCode::FORBIDDEN, "csrf_required"));
+                }
+            }
+            Self::Dav { grant, .. } => {
+                if !grant
+                    .can_write(db)
+                    .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable"))?
+                {
+                    return Err(unauthorized());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_parent(&self, db: &Connection, ticket: &VerifiedUploadTicket) -> Result<(), Response> {
+        match self {
+            Self::Browser { .. } => check_parent(db, ticket),
+            Self::Dav { grant, parent_path } => dav::check_upload_path(
+                db,
+                &grant.account_id,
+                parent_path,
+                &ticket.admission.parent_id,
+            )
+            .map_err(|status| error(status, "upload_path_changed")),
+        }
+    }
+
+    fn check_destination(
+        &self,
+        db: &Connection,
+        ticket: &VerifiedUploadTicket,
+        name_key: &[u8],
+    ) -> Result<(), Response> {
+        check_destination(db, &ticket.account_id, &ticket.admission, name_key).map_err(|response| {
+            if self.is_dav() && response.status() == StatusCode::CONFLICT {
+                StatusCode::PRECONDITION_FAILED.into_response()
+            } else {
+                response
+            }
+        })
+    }
+
+    fn check_dav_destination(
+        &self,
+        db: &Connection,
+        ticket: &VerifiedUploadTicket,
+    ) -> Result<(), Response> {
+        let name_key = ticket
+            .admission
+            .name_key()
+            .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid_name"))?;
+        self.check_destination(db, ticket, &name_key)
+    }
+
+    fn is_dav(&self) -> bool {
+        matches!(self, Self::Dav { .. })
+    }
+}
+
 fn verified_ticket(
     storage: &UploadStorage,
     headers: &HeaderMap,
@@ -437,6 +544,19 @@ pub async fn admit(
     if ticket.admission != admission {
         return error(StatusCode::CONFLICT, "admission_fingerprint_mismatch");
     }
+    let access = match WriteAccess::browser(principal, &headers) {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
+    admit_upload(&state, ticket, access).await
+}
+
+async fn admit_upload(
+    state: &AuthState,
+    ticket: VerifiedUploadTicket,
+    access: WriteAccess,
+) -> Response {
+    let admission = &ticket.admission;
     let name_key = match admission.name_key() {
         Ok(name_key) => name_key,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_name"),
@@ -457,11 +577,10 @@ pub async fn admit(
     let attempt_id_for_insert = attempt_id.clone();
     let staging_name_for_insert = staging_name.clone();
     let ticket_for_insert = ticket.clone();
-    let principal_for_insert = principal.clone();
     let coordinator = state.coordinator.clone();
     let result = state.workers.transact(move |transaction| -> rusqlite::Result<Result<Option<(String, String)>, Response>> {
-            if coordinator.revalidate_current(transaction, &principal_for_insert, now()).is_err() {
-                return Ok(Err(error(StatusCode::UNAUTHORIZED, "authentication_required")));
+            if let Err(response) = access.revalidate(transaction, &coordinator, now()) {
+                return Ok(Err(response));
             }
             if recovery_epoch(transaction).map_err(|_| rusqlite::Error::InvalidQuery)? != ticket_for_insert.recovery_epoch {
                 return Ok(Err(error(StatusCode::UNAUTHORIZED, "stale_mutation_ticket")));
@@ -485,10 +604,10 @@ pub async fn admit(
                 }
                 return Ok(Err(error(StatusCode::SERVICE_UNAVAILABLE, "upload_state_unavailable")));
             }
-            if let Err(response) = check_parent(transaction, &ticket_for_insert) {
+            if let Err(response) = access.check_parent(transaction, &ticket_for_insert) {
                 return Ok(Err(response));
             }
-            if let Err(response) = check_destination(transaction, &ticket_for_insert.account_id, &ticket_for_insert.admission, &name_key) {
+            if let Err(response) = access.check_destination(transaction, &ticket_for_insert, &name_key) {
                 return Ok(Err(response));
             }
             transaction.execute(
@@ -613,17 +732,11 @@ fn run_worker(
 fn activate_attempt(
     transaction: &rusqlite::Transaction<'_>,
     ticket: &VerifiedUploadTicket,
-    principal: &AdmissionTicket,
-    coordinator: &crate::domain::coordinator::MutationCoordinator,
+    access: &WriteAccess,
+    coordinator: &MutationCoordinator,
 ) -> rusqlite::Result<Result<Attempt, Response>> {
-    if coordinator
-        .revalidate_current(transaction, principal, now())
-        .is_err()
-    {
-        return Ok(Err(error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_required",
-        )));
+    if let Err(response) = access.revalidate(transaction, coordinator, now()) {
+        return Ok(Err(response));
     }
     if recovery_epoch(transaction).map_err(|_| rusqlite::Error::InvalidQuery)?
         != ticket.recovery_epoch
@@ -644,7 +757,12 @@ fn activate_attempt(
     if state.as_deref() != Some("admitted") {
         return Ok(Err(error(StatusCode::CONFLICT, "upload_not_staging")));
     }
-    if let Err(response) = check_parent(transaction, ticket) {
+    if let Err(response) = access.check_parent(transaction, ticket) {
+        return Ok(Err(response));
+    }
+    if access.is_dav()
+        && let Err(response) = access.check_dav_destination(transaction, ticket)
+    {
         return Ok(Err(response));
     }
     let active: Option<i64> = transaction
@@ -748,21 +866,33 @@ fn finish_attempt(
     ticket: &VerifiedUploadTicket,
     attempt: &Attempt,
     outcome: &WorkerOutcome,
-    principal: &AdmissionTicket,
-    coordinator: &crate::domain::coordinator::MutationCoordinator,
-    csrf: &[u8; 32],
+    access: &WriteAccess,
+    coordinator: &MutationCoordinator,
 ) -> rusqlite::Result<Result<(), Response>> {
-    if coordinator
-        .revalidate_current(transaction, principal, now())
-        .is_err()
-    {
-        return Ok(Err(error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_required",
-        )));
-    }
-    if !csrf_matches(transaction, principal.session_id(), csrf) {
-        return Ok(Err(error(StatusCode::FORBIDDEN, "csrf_required")));
+    let validation = access
+        .revalidate(transaction, coordinator, now())
+        .and_then(|()| {
+            if access.is_dav() {
+                access.check_parent(transaction, ticket)?;
+                access.check_dav_destination(transaction, ticket)?;
+            }
+            Ok(())
+        });
+    if let Err(response) = validation {
+        if access.is_dav() {
+            reject_dav_attempt(transaction, ticket)?;
+            if let WorkerOutcome::Published(published) | WorkerOutcome::Canceled(Some(published)) =
+                outcome
+            {
+                record_canceled_publication(
+                    transaction,
+                    &ticket.mutation_id,
+                    &attempt.attempt_id,
+                    published,
+                )?;
+            }
+        }
+        return Ok(Err(response));
     }
     match outcome {
         WorkerOutcome::Published(published) => {
@@ -841,35 +971,53 @@ async fn finish_attempt_owned(
     ticket: &VerifiedUploadTicket,
     attempt: &Attempt,
     outcome: &WorkerOutcome,
-    principal: &AdmissionTicket,
-    csrf: [u8; 32],
+    access: &WriteAccess,
 ) -> Result<(), Response> {
     let ticket = ticket.clone();
     let attempt = attempt.clone();
     let outcome = outcome.clone();
-    let principal = principal.clone();
+    let access = access.clone();
     let coordinator = state.coordinator.clone();
+    let recovery = access
+        .is_dav()
+        .then(|| (ticket.clone(), attempt.clone(), outcome.clone()));
     match state
         .workers
-        .transact(move |tx| {
-            finish_attempt(
-                tx,
-                &ticket,
-                &attempt,
-                &outcome,
-                &principal,
-                &coordinator,
-                &csrf,
-            )
-        })
+        .transact(move |tx| finish_attempt(tx, &ticket, &attempt, &outcome, &access, &coordinator))
         .await
     {
         Ok(Ok(())) => Ok(()),
         Ok(Err(response)) => Err(response),
-        Err(_) => Err(error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "database_unavailable",
-        )),
+        Err(_) => {
+            if let Some((ticket, attempt, outcome)) = recovery
+                && let WorkerOutcome::Published(published)
+                | WorkerOutcome::Canceled(Some(published)) = outcome
+            {
+                // Reconcile the same publication if its staging checkpoint failed.
+                let recovered = state
+                    .workers
+                    .transact(move |tx| {
+                        reject_dav_attempt(tx, &ticket)?;
+                        record_canceled_publication(
+                            tx,
+                            &ticket.mutation_id,
+                            &attempt.attempt_id,
+                            &published,
+                        )
+                    })
+                    .await;
+                if recovered.is_err() {
+                    return Err(error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "upload_reconciliation_unavailable",
+                    ));
+                }
+            }
+            Err(error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_unavailable",
+            ))
+        }
     }
 }
 
@@ -911,8 +1059,9 @@ pub async fn content(
     if ticket.mutation_id != upload_id {
         return error(StatusCode::NOT_FOUND, "upload_not_found");
     }
-    let Some(csrf_secret) = one_header(&headers, "x-csrf-token").and_then(decode_secret) else {
-        return error(StatusCode::FORBIDDEN, "csrf_required");
+    let access = match WriteAccess::browser(principal, &headers) {
+        Ok(access) => access,
+        Err(response) => return response,
     };
     if let Some(length) = one_header(&headers, CONTENT_LENGTH.as_str())
         && length.parse::<u64>().ok() != Some(ticket.admission.length)
@@ -924,6 +1073,17 @@ pub async fn content(
     {
         return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "octet_stream_required");
     }
+    stage_upload(&state, storage, ticket, access, body).await
+}
+
+async fn stage_upload(
+    state: &AuthState,
+    storage: Arc<UploadStorage>,
+    ticket: VerifiedUploadTicket,
+    access: WriteAccess,
+    body: Body,
+) -> Response {
+    let upload_id = &ticket.mutation_id;
     let body = if ticket.admission.text_revision().is_some() {
         match tokio::time::timeout(
             storage.chunk_idle_timeout(),
@@ -946,7 +1106,7 @@ pub async fn content(
         Ok(digest) => digest,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_sha256"),
     };
-    let writer = match storage.register_writer(&upload_id) {
+    let writer = match storage.register_writer(upload_id) {
         Ok(writer) => writer,
         Err(WorkerError::AlreadyActive) => return error(StatusCode::CONFLICT, "writer_active"),
         Err(WorkerError::Unavailable) => return ChunkFailure::Stopping.response(),
@@ -957,7 +1117,7 @@ pub async fn content(
         writer: Arc::clone(&writer),
     };
     let ticket_for_activation = ticket.clone();
-    let principal_for_activation = principal.clone();
+    let access_for_activation = access.clone();
     let coordinator_for_activation = state.coordinator.clone();
     let attempt = match state
         .workers
@@ -965,7 +1125,7 @@ pub async fn content(
             activate_attempt(
                 tx,
                 &ticket_for_activation,
-                &principal_for_activation,
+                &access_for_activation,
                 &coordinator_for_activation,
             )
         })
@@ -977,12 +1137,11 @@ pub async fn content(
     };
     if writer.is_cancelled() {
         let result = finish_attempt_owned(
-            &state,
+            state,
             &ticket,
             &attempt,
             &WorkerOutcome::Canceled(None),
-            &principal,
-            csrf_secret,
+            &access,
         )
         .await;
         drop(registration);
@@ -998,9 +1157,7 @@ pub async fn content(
         Ok(staging) => staging,
         Err(payload_error) => {
             let outcome = WorkerOutcome::Failed(payload_error);
-            let result =
-                finish_attempt_owned(&state, &ticket, &attempt, &outcome, &principal, csrf_secret)
-                    .await;
+            let result = finish_attempt_owned(state, &ticket, &attempt, &outcome, &access).await;
             drop(registration);
             return match result {
                 Ok(()) => worker_error(payload_error),
@@ -1023,10 +1180,22 @@ pub async fn content(
     let mut body = body;
     let mut cancellation = writer.cancellation();
     let mut sent = 0u64;
+    let mut timed_out = false;
+    let mut stopping = storage.stopping();
+    let is_dav = access.is_dav();
     loop {
         let next = tokio::select! {
             frame = body.frame() => frame,
             _ = cancellation.changed() => None,
+            _ = tokio::time::sleep(storage.chunk_idle_timeout()), if is_dav => {
+                timed_out = true;
+                let _ = sender.send(WorkerMessage::Abort(PayloadError::LengthMismatch)).await;
+                break;
+            }
+            _ = async { let _ = stopping.wait_for(|stopped| *stopped).await; }, if is_dav => {
+                let _ = sender.send(WorkerMessage::Abort(PayloadError::LengthMismatch)).await;
+                break;
+            }
         };
         let Some(frame) = next else {
             if !writer.is_cancelled() {
@@ -1088,11 +1257,16 @@ pub async fn content(
     } else {
         outcome
     };
-    let result =
-        finish_attempt_owned(&state, &ticket, &attempt, &outcome, &principal, csrf_secret).await;
+    let result = finish_attempt_owned(state, &ticket, &attempt, &outcome, &access).await;
     drop(registration);
     if let Err(response) = result {
         return response;
+    }
+    if timed_out {
+        return ChunkFailure::Idle.response();
+    }
+    if is_dav && storage.is_stopping() {
+        return ChunkFailure::Stopping.response();
     }
     match outcome {
         WorkerOutcome::Published(published) => finish(
@@ -1141,13 +1315,31 @@ pub async fn commit(
     if ticket.mutation_id != upload_id || request.parent_etag != ticket.admission.parent_etag {
         return error(StatusCode::CONFLICT, "commit_fingerprint_mismatch");
     }
-    let Some(csrf_secret) = one_header(&headers, "x-csrf-token").and_then(decode_secret) else {
-        return error(StatusCode::FORBIDDEN, "csrf_required");
+    let access = match WriteAccess::browser(principal, &headers) {
+        Ok(access) => access,
+        Err(response) => return response,
     };
     let completed_digest = match parse_digest(&request.sha256) {
         Ok(digest) => digest,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_sha256"),
     };
+    commit_upload(
+        &state,
+        ticket,
+        access,
+        Some((completed_digest, request.sha256)),
+    )
+    .await
+}
+
+async fn commit_upload(
+    state: &AuthState,
+    ticket: VerifiedUploadTicket,
+    access: WriteAccess,
+    expected_digest: Option<([u8; 32], String)>,
+) -> Response {
+    let upload_id = &ticket.mutation_id;
+    let digest_to_check = expected_digest.as_ref().map(|(digest, _)| *digest);
     let name_key = match ticket.admission.name_key() {
         Ok(name_key) => name_key,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_name"),
@@ -1165,19 +1357,14 @@ pub async fn commit(
         barrier.pause().await;
     }
     let committed_at = now();
-    let principal_for_tx = principal.clone();
+
     let coordinator = state.coordinator.clone();
     let ticket_for_tx = ticket.clone();
     let entry_id_for_tx = entry_id.clone();
     let revision_id_for_tx = revision_id.clone();
     let name_key_for_tx = name_key.clone();
-    let result = state.workers.transact_result(move |transaction| -> Result<(i64, String), Response> {
-            coordinator
-                .revalidate_current(transaction, &principal_for_tx, committed_at)
-                .map_err(|_| error(StatusCode::UNAUTHORIZED, "authentication_required"))?;
-            if !csrf_matches(transaction, principal_for_tx.session_id(), &csrf_secret) {
-                return Err(error(StatusCode::FORBIDDEN, "csrf_required"));
-            }
+    let result = state.workers.transact_result(move |transaction| -> Result<(i64, Vec<u8>), Response> {
+            access.revalidate(transaction, &coordinator, committed_at)?;
             if recovery_epoch(transaction).map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "installation_unavailable"))? != ticket_for_tx.recovery_epoch {
                 return Err(error(StatusCode::UNAUTHORIZED, "stale_mutation_ticket"));
             }
@@ -1189,14 +1376,15 @@ pub async fn commit(
             let Some((stored_digest, stored_length)) = staged else {
                 return Err(error(StatusCode::CONFLICT, "upload_not_staged"));
             };
-            if stored_digest.as_slice() != completed_digest
+            if stored_digest.len() != 32
+                || digest_to_check.is_some_and(|digest| stored_digest.as_slice() != digest)
                 || stored_length < 0
                 || stored_length as u64 != ticket_for_tx.admission.length
             {
                 return Err(error(StatusCode::CONFLICT, "commit_fingerprint_mismatch"));
             }
-            check_parent(transaction, &ticket_for_tx)?;
-            check_destination(transaction, &ticket_for_tx.account_id, &ticket_for_tx.admission, &name_key_for_tx)?;
+            access.check_parent(transaction, &ticket_for_tx)?;
+            access.check_destination(transaction, &ticket_for_tx, &name_key_for_tx)?;
             let staging_path: String = transaction.query_row(
                 "SELECT staging_path FROM upload_attempt WHERE mutation_id=?1 AND completed_sha256=?2 AND completed_length=?3 ORDER BY attempt_no DESC LIMIT 1",
                 params![ticket_for_tx.mutation_id,stored_digest,stored_length],
@@ -1262,9 +1450,21 @@ pub async fn commit(
                 "UPDATE mutation SET state='committed',result_revision_id=?2 WHERE mutation_id=?1 AND state='publishing'",
                 params![ticket_for_tx.mutation_id,revision_id_for_tx],
             ).map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "mutation_result_commit_failed"))?;
-            Ok((stored_length, blob_id.to_owned()))
+            Ok((stored_length, stored_digest))
         }).await;
-    let (length, _blob_id) = match result {
+    #[cfg(feature = "test-harness")]
+    let result = match result {
+        Ok(Ok(_))
+            if state
+                .upload_commit_test_barrier
+                .as_ref()
+                .is_some_and(|barrier| barrier.discard_committed_result()) =>
+        {
+            Err(crate::persistence::sqlite::WorkerError::InvalidResponse)
+        }
+        result => result,
+    };
+    let (length, stored_digest) = match result {
         Ok(Ok(result)) => result,
         Ok(Err(response)) => return response,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database_unavailable"),
@@ -1281,7 +1481,7 @@ pub async fn commit(
         "length": length,
         "revision_id": revision_id,
         "etag": etag,
-        "sha256": request.sha256,
+        "sha256": expected_digest.map_or_else(|| hex(&stored_digest), |(_, hex)| hex),
         "upload_id": upload_id,
         "mutation_id": upload_id,
         "status": "committed",
@@ -1296,6 +1496,99 @@ pub async fn commit(
         response.headers_mut().insert(ETAG, etag_header);
     }
     response
+}
+
+pub(super) async fn dav_put(
+    state: AuthState,
+    grant: DavGrant,
+    parent_path: Vec<EntryName>,
+    admission: UploadAdmission,
+    body: Body,
+) -> Response {
+    let Ok(storage) = storage(&state) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let owned_storage = storage.clone();
+    let task = storage.spawn_owned(async move {
+        let epoch = match state.workers.read(|db| Ok(recovery_epoch(db))).await {
+            Ok(Ok(epoch)) => epoch,
+            _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        let at = now();
+        let account = &grant.account_id;
+        let Ok(issued) = issue_upload_ticket(&owned_storage, account, epoch, &admission, at) else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let Ok(ticket) = verify_upload_ticket(&owned_storage, &issued.ticket, account, at) else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let access = WriteAccess::Dav { grant: grant.clone(), parent_path };
+        let admitted = admit_upload(&state, ticket.clone(), access.clone()).await;
+        let result = if admitted.status() == StatusCode::CREATED {
+            let staged = stage_upload(&state, owned_storage, ticket.clone(), access.clone(), body).await;
+            if staged.status().is_success() {
+                commit_upload(&state, ticket.clone(), access, None).await
+            } else {
+                staged
+            }
+        } else {
+            admitted
+        };
+        if let Some(etag) = result.headers().get(ETAG).cloned()
+            && result.status() == StatusCode::CREATED
+        {
+            return (StatusCode::CREATED, [(ETAG, etag)]).into_response();
+        }
+
+        // A worker failure can leave COMMIT uncertain. Check this mutation under
+        // the writer before rejecting it. Never replay the namespace effect.
+        let settled = state.workers.transact(move |tx| {
+            let committed: Option<String> = tx.query_row(
+                "SELECT r.revision_id FROM mutation m JOIN revision r ON r.revision_id=m.result_revision_id
+                 WHERE m.mutation_id=?1 AND m.principal_account_id=?2 AND m.scope=?3 AND m.state='committed'
+                   AND r.actor_account_id=m.principal_account_id",
+                params![ticket.mutation_id, ticket.account_id, UPLOAD_SCOPE], |row| row.get(0),
+            ).optional()?;
+            if committed.is_none() {
+                reject_dav_attempt(tx, &ticket)?;
+            }
+            if grant.can_write(tx)? {
+                Ok(Ok(committed))
+            } else {
+                Ok(Err(StatusCode::UNAUTHORIZED))
+            }
+        }).await;
+        match settled {
+            Ok(Ok(Some(revision))) => (StatusCode::CREATED, [(ETAG, revision_etag(&revision))]).into_response(),
+            Ok(Ok(None)) if result.status().is_client_error() => result.status().into_response(),
+            Ok(Err(status)) => status.into_response(),
+            _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    });
+    match task {
+        Ok(task) => task
+            .await
+            .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response()),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+fn reject_dav_attempt(
+    tx: &rusqlite::Transaction<'_>,
+    ticket: &VerifiedUploadTicket,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE mutation SET state='rejected' WHERE mutation_id=?1 AND principal_account_id=?2
+           AND scope=?3 AND state IN ('admitted','publishing')",
+        params![ticket.mutation_id, ticket.account_id, UPLOAD_SCOPE],
+    )?;
+    tx.execute(
+        "UPDATE upload_attempt SET writer_active=0,outcome='canceled'
+         WHERE mutation_id=?1 AND EXISTS (SELECT 1 FROM mutation m WHERE m.mutation_id=?1
+            AND m.principal_account_id=?2 AND m.scope=?3 AND m.state='rejected')",
+        params![ticket.mutation_id, ticket.account_id, UPLOAD_SCOPE],
+    )?;
+    Ok(())
 }
 
 pub async fn status(
@@ -1802,8 +2095,14 @@ async fn append_owned(
         Ok(Err(error)) => WorkerOutcome::Failed(error),
         Err(_) => WorkerOutcome::Failed(PayloadError::Io("payload_worker_failed")),
     };
-    if let Err(response) =
-        finish_attempt_owned(&state, &ticket, &attempt, &outcome, &principal, csrf).await
+    if let Err(response) = finish_attempt_owned(
+        &state,
+        &ticket,
+        &attempt,
+        &outcome,
+        &WriteAccess::Browser { principal, csrf },
+    )
+    .await
     {
         if let Err(release_error) = release_append(&state, &attempt.attempt_id).await {
             return release_error;

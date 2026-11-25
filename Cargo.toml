@@ -199,6 +199,9 @@ axum-server = { version = "=0.9.0", default-features = false, features = ["tls-r
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 tower-http = { version = "=0.7.1", default-features = false, features = ["fs"] }
 http-body-util = { version = "=0.1.5", default-features = false }
+httpdate = { version = "=1.0.3", default-features = false }
+percent-encoding = { version = "=2.3.2", default-features = false, features = ["alloc"] }
+roxmltree = { version = "=0.21.1", default-features = false, features = ["std"] }
 futures-util = { version = "=0.3.34", default-features = false }
 crc32fast = { version = "=1.5.5", default-features = false }
 tracing = { version = "=0.1.44", default-features = false, features = ["std"] }

@@ -6,7 +6,7 @@ use super::{root::InstallationIdentity, sqlite};
 
 /// Versions this build understands and serves. A bound database reporting
 /// anything else refuses startup instead of migrating guesses.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 4;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 5;
 
 pub fn is_older_schema(version: i64) -> bool {
     (1..SUPPORTED_SCHEMA_VERSION).contains(&version)
@@ -145,6 +145,7 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
             migrate_v1(connection, None)?;
             migrate_v2(connection, None)?;
             migrate_v3(connection, None)?;
+            migrate_v4(connection, None)?;
             Ok(MigrationOutcome::Applied)
         }
         _ => Err(SchemaError::Inconsistent("unsupported user_version")),
@@ -159,6 +160,14 @@ pub fn verify_core_schema(connection: &Connection) -> Result<(), SchemaError> {
 pub(super) fn verify_schema_at(connection: &Connection, version: i64) -> Result<(), SchemaError> {
     for (kind, names) in [
         ("table", CORE_TABLES),
+        (
+            "table",
+            if version >= 5 {
+                &["dav_credential"]
+            } else {
+                &[]
+            },
+        ),
         ("index", CORE_INDEXES),
         ("trigger", CORE_TRIGGERS),
         (
@@ -290,6 +299,19 @@ pub fn migrate_v3(
         connection,
         4,
         include_str!("../../migrations/sqlite/0004_private_libraries.sql"),
+        manifest_hash,
+    )
+}
+
+pub fn migrate_v4(
+    connection: &Connection,
+    manifest_hash: Option<&[u8]>,
+) -> Result<(), SchemaError> {
+    verify_schema_at(connection, 4)?;
+    migrate(
+        connection,
+        5,
+        include_str!("../../migrations/sqlite/0005_dav_credentials.sql"),
         manifest_hash,
     )
 }

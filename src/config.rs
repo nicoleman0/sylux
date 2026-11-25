@@ -24,6 +24,7 @@ pub struct CliConfig {
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub allow_non_loopback: bool,
+    pub webdav: bool,
     pub public_origin: Option<String>,
     pub assets: PathBuf,
     pub admin_handle: Option<String>,
@@ -77,6 +78,7 @@ where
     let mut tls_cert: Option<PathBuf> = None;
     let mut tls_key: Option<PathBuf> = None;
     let mut allow_non_loopback = false;
+    let mut webdav = false;
     let mut public_origin: Option<String> = None;
     while let Some(argument) = arguments.next() {
         let flag = argument
@@ -150,6 +152,7 @@ where
                 )?;
             }
             "--allow-non-loopback" => allow_non_loopback = true,
+            "--webdav" if command == CommandKind::Serve && !webdav => webdav = true,
             "--public-origin" => {
                 let value = value_string(&mut arguments, "public_origin_value_missing")?;
                 validate_public_origin(&value)?;
@@ -199,6 +202,7 @@ where
         tls_cert,
         tls_key,
         allow_non_loopback,
+        webdav,
         public_origin,
         assets,
         admin_handle,
@@ -283,6 +287,28 @@ mod tests {
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn webdav_is_an_explicit_serve_option() {
+        let serve = [
+            "serve",
+            "--root",
+            "/x",
+            "--tls-cert",
+            "/cert",
+            "--tls-key",
+            "/key",
+        ];
+        let parse_args = |items: &[&str]| parse(args(items));
+        assert!(!parse_args(&serve).unwrap().webdav);
+        assert!(
+            parse_args(&[serve.as_slice(), &["--webdav"]].concat())
+                .unwrap()
+                .webdav
+        );
+        assert!(parse_args(&[serve.as_slice(), &["--webdav", "--webdav"]].concat()).is_err());
+        assert!(parse_args(&["init", "--root", "/x", "--webdav"]).is_err());
     }
 
     #[test]

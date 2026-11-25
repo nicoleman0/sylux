@@ -7,6 +7,7 @@ const ALLOWED_CASES = new Set([
   'storage_upload_resume', 'storage_upload_cancel', 'storage_lost_commit_response', 'storage_pdf_preview', 'storage_public_share',
   'storage_text_edit_roundtrip', 'storage_text_edit_conflict', 'storage_text_edit_retry',
   'storage_private_libraries',
+  'storage_webdav_changes',
 ]);
 const ALLOWED_LISTING_PROGRESS = new Set([
   'signed-in', 'first-folder-response-held', 'returned-to-root', 'nested-file-visible',

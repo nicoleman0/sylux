@@ -57,6 +57,7 @@ fn safe_reporter_events(log: &str) -> Vec<Value> {
         "storage_text_edit_conflict",
         "storage_text_edit_retry",
         "storage_private_libraries",
+        "storage_webdav_changes",
         "unregistered",
     ];
     const NETWORK_ERRORS: &[&str] = &[
@@ -299,6 +300,7 @@ async fn start_api_server(
     TlsApiServer::start_with_origin(fixture, tls, Duration::from_secs(2), |origin| {
         let state =
             AuthState::new_with_setup(workers.clone(), origin, setup_authorization.to_owned())
+                .with_webdav(true)
                 .with_storage_root(product)
                 .expect("fixture payload storage");
         http::router(state)

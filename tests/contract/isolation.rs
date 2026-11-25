@@ -2,7 +2,10 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use common::{
     FixtureRoot,
     server::{TlsApiServer, TlsFiles, tls_connect},
@@ -13,11 +16,12 @@ use std::{
     collections::BTreeMap,
     fs,
     os::unix::fs::DirBuilderExt,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use sylux::{
     domain::authz::verifier,
-    http::{self, AuthState},
+    http::{self, AuthState, uploads::UploadCommitTestBarrier},
     persistence::{
         root,
         sqlite::{self, SqliteWorkers, WorkerConfig},
@@ -46,9 +50,14 @@ struct Fixture {
     server: Option<TlsApiServer>,
     workers: Option<SqliteWorkers>,
     ca: Vec<u8>,
+    upload_commit: Arc<UploadCommitTestBarrier>,
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_webdav(false).await
+    }
+
+    async fn with_webdav(webdav: bool) -> Self {
         let parent = std::env::temp_dir()
             .canonicalize()
             .unwrap()
@@ -72,12 +81,21 @@ impl Fixture {
             },
         )
         .unwrap();
-        let app = http::router(
-            AuthState::new(workers.clone(), "https://127.0.0.1".into())
-                .with_storage_root(&product)
-                .unwrap(),
-        );
-        let server = TlsApiServer::start(&root, &tls, app, Duration::from_secs(2))
+        let upload_commit = Arc::new(UploadCommitTestBarrier::default());
+        let server =
+            TlsApiServer::start_with_origin(&root, &tls, Duration::from_secs(2), |origin| {
+                let origin = if webdav {
+                    origin
+                } else {
+                    "https://127.0.0.1".into()
+                };
+                let mut state = AuthState::new(workers.clone(), origin)
+                    .with_webdav(webdav)
+                    .with_storage_root(&product)
+                    .unwrap();
+                state.upload_commit_test_barrier = Some(upload_commit.clone());
+                http::router(state)
+            })
             .await
             .unwrap();
         Self {
@@ -85,6 +103,7 @@ impl Fixture {
             server: Some(server),
             workers: Some(workers),
             ca,
+            upload_commit,
         }
     }
     async fn close(mut self) {
@@ -105,6 +124,17 @@ impl Fixture {
         actor: Option<(&str, &[u8; 32])>,
         headers: &[(&str, String)],
         body: &str,
+    ) -> (u16, BTreeMap<String, String>, Vec<u8>) {
+        self.request_bytes(method, path, actor, headers, body.as_bytes())
+            .await
+    }
+    async fn request_bytes(
+        &self,
+        method: &str,
+        path: &str,
+        actor: Option<(&str, &[u8; 32])>,
+        headers: &[(&str, String)],
+        body: &[u8],
     ) -> (u16, BTreeMap<String, String>, Vec<u8>) {
         let server = self.server.as_ref().unwrap();
         let mut s = tls_connect(server.address(), &self.ca, "127.0.0.1")
@@ -129,8 +159,9 @@ impl Fixture {
         for (k, v) in headers {
             req.push_str(&format!("{k}: {v}\r\n"));
         }
-        req.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
+        req.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
         s.write_all(req.as_bytes()).await.unwrap();
+        s.write_all(body).await.unwrap();
         let mut bytes = Vec::new();
         s.read_to_end(&mut bytes).await.unwrap();
         let split = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
@@ -151,6 +182,55 @@ impl Fixture {
             }
         }
         (status, hs, bytes[split + 4..].to_vec())
+    }
+    fn dav_origin(&self) -> String {
+        format!(
+            "https://fixture.test:{}",
+            self.server.as_ref().unwrap().address().port()
+        )
+    }
+
+    fn mutation_headers(&self, csrf: &[u8; 32]) -> [(&'static str, String); 2] {
+        [
+            ("Origin", self.dav_origin()),
+            ("X-CSRF-Token", URL_SAFE_NO_PAD.encode(csrf)),
+        ]
+    }
+
+    async fn credential(
+        &self,
+        actor: usize,
+        name: &str,
+        read_only: bool,
+    ) -> (String, (&'static str, String)) {
+        let (handle, csrf) = match actor {
+            0 => ("owner", CSRF),
+            1 => ("other", OTHER_CSRF),
+            _ => ("synthetic-admin", ADMIN_CSRF),
+        };
+        let input = serde_json::json!({ "name": name, "read_only": read_only }).to_string();
+        let (status, headers, body) = self
+            .request(
+                "POST",
+                "/me/webdav",
+                cookie(actor),
+                &self.mutation_headers(csrf),
+                &input,
+            )
+            .await;
+        assert_eq!(status, 201);
+        assert_eq!(
+            headers.get("cache-control").map(String::as_str),
+            Some("no-store")
+        );
+        let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = response["credential"]["id"].as_str().unwrap().to_owned();
+        let password = response["password"].as_str().unwrap();
+        let authorization = (
+            "Authorization",
+            format!("Basic {}", STANDARD.encode(format!("{handle}:{password}"))),
+        );
+        (id, authorization)
     }
 }
 fn seed(c: &rusqlite::Connection, product: &std::path::Path) {
@@ -1036,3 +1116,6 @@ async fn a03_unrelated_and_admin_route_matrix_denies_owner_private_state() {
     );
     f.close().await;
 }
+
+#[path = "isolation_webdav.rs"]
+mod webdav;

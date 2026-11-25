@@ -275,6 +275,7 @@ async fn serve_listener(
         }),
         setup_authorization,
     )
+    .with_webdav(configuration.webdav)
     .with_storage_root(&configuration.root)
     .map_err(|_| "payload_storage_unavailable")?;
     let mut terminate = signal(SignalKind::terminate()).map_err(|_| "signal_setup_failed")?;
