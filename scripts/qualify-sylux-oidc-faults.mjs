@@ -14,7 +14,8 @@ export async function faultProvider(fixture, clientId, clientSecret) {
     const privateKey = createPrivateKey(key);
     const jwk = { ...createPublicKey(privateKey).export({ format: 'jwk' }), alg: 'RS256', use: 'sig', kid: 'fixture-key' };
     const attempts = new Map();
-    let issuer, fault, gate;
+    const gates = [];
+    let issuer, fault;
     let redirected = 0, exchanges = 0;
     const server = createServer({ cert, key }, async (request, response) => {
         try {
@@ -27,15 +28,16 @@ export async function faultProvider(fixture, clientId, clientSecret) {
     async function handle(request, response) {
         const json = (value, status = 200) =>
             response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
-        switch (request.url) {
+        const path = new URL(request.url, issuer).pathname;
+        switch (path.replace('/realms/qualification-faults', '').replace('/protocol/openid-connect', '')) {
         case '/.well-known/openid-configuration':
             if (fault === 'redirect') return response.writeHead(302, { location: issuer + '/redirected' }).end();
             if (fault === 'oversize') return response.writeHead(200, { 'Content-Type': 'application/json' }).end(Buffer.alloc(1024 * 1024 + 1));
             return json({
                 issuer: fault === 'discovery_issuer' ? issuer + '/different' : issuer,
-                authorization_endpoint: issuer + '/authorize',
-                token_endpoint: (fault === 'destination' ? issuer.replace('127.0.0.1', 'localhost') : issuer) + '/token',
-                jwks_uri: issuer + '/jwks',
+                authorization_endpoint: issuer + '/protocol/openid-connect/auth',
+                token_endpoint: (fault === 'destination' ? issuer.replace('127.0.0.1', 'localhost') : issuer) + '/protocol/openid-connect/token',
+                jwks_uri: issuer + '/protocol/openid-connect/certs',
                 response_types_supported: ['code'],
                 response_modes_supported: ['query'],
                 subject_types_supported: ['public'],
@@ -48,7 +50,7 @@ export async function faultProvider(fixture, clientId, clientSecret) {
         case '/redirected':
             redirected++;
             return response.writeHead(500).end();
-        case '/jwks':
+        case '/certs':
             return json({ keys: fault === 'duplicate_key' ? [jwk, jwk] : [jwk] });
         case '/token': {
             exchanges++;
@@ -68,9 +70,8 @@ export async function faultProvider(fixture, clientId, clientSecret) {
                 form.get('redirect_uri') !== attempt.callback) {
                 return json({ error: 'invalid_grant' }, 400);
             }
-            if (gate) {
-                const held = gate;
-                gate = undefined;
+            const held = gates.shift();
+            if (held) {
                 held.enter();
                 await held.release;
             }
@@ -86,10 +87,14 @@ export async function faultProvider(fixture, clientId, clientSecret) {
                 aud: fault === 'audience' ? 'wrong-client' : clientId,
                 azp: fault === 'azp' ? 'wrong-client' : clientId,
                 sub: attempt.subject,
+                ...(fault === 'profile' ? { email: 'callback-user@example.invalid',
+                    preferred_username: 'callback-user', realm_access: { roles: ['administrator'] } } : {}),
                 nonce: fault === 'nonce' ? random() : attempt.nonce,
-                iat: fault === 'future' ? now + 3600 : now,
+                iat: fault === 'future' ? now + 3600 : fault === 'clock_ahead' ? now + 3 : now,
                 exp: fault === 'expiry' ? now - 1 : now + (fault === 'future' ? 3630 : 30),
-                auth_time: fault === 'auth_time' ? undefined : now,
+                auth_time: fault === 'auth_time' ? undefined
+                    : fault === 'stale_auth' ? now - 60 : fault === 'clock_behind' ? now - 3
+                    : fault === 'clock_ahead' ? now + 3 : now,
             };
             const signed = encode(header) + '.' + encode(claims);
             const signature = fault === 'unsigned' ? Buffer.alloc(0) :
@@ -108,7 +113,7 @@ export async function faultProvider(fixture, clientId, clientSecret) {
 
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
-    issuer = 'https://127.0.0.1:' + server.address().port;
+    issuer = 'https://127.0.0.1:' + server.address().port + '/realms/qualification-faults';
 
     return {
         issuer,
@@ -117,7 +122,7 @@ export async function faultProvider(fixture, clientId, clientSecret) {
         hold() {
             const { promise: entered, resolve: enter } = Promise.withResolvers();
             const { promise: release, resolve } = Promise.withResolvers();
-            gate = { enter, release };
+            gates.push({ enter, release });
             return { entered, release: resolve };
         },
         proof(authorization, subject) {

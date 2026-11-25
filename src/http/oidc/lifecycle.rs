@@ -12,50 +12,60 @@ const DENIED: StatusCode = StatusCode::UNAUTHORIZED;
 const CONFLICT: StatusCode = StatusCode::CONFLICT;
 const INTERNAL: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
 
-pub(super) async fn set_registration(
+const APPROVAL_SECONDS: i64 = 24 * 60 * 60;
+const MAX_PENDING_APPROVALS: i64 = 128;
+
+pub(super) async fn register(
     workers: &SqliteWorkers,
-    registration: Option<[u8; 32]>,
+    registration: [u8; 32],
 ) -> Result<(), ProtocolError> {
-    workers
+    let matches = workers
         .transact(move |db| {
-            let old: Option<Vec<u8>> = db
-                .query_row(
-                    "SELECT registration FROM external_provider WHERE singleton=1",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if old.as_deref() == registration.as_ref().map(<[u8; 32]>::as_slice) {
-                return Ok(());
-            }
-            let time = now();
             db.execute(
-            "INSERT INTO event(action,occurred_at,outcome,target_account_id,external_identity_id)
-             SELECT 'oidc.link_revoked',?1,'ok',account_id,identity_id
-             FROM external_identity WHERE state<>'revoked'",
-            [time],
-        )?;
-            db.execute(
-                "UPDATE session SET revoked=1 WHERE external_identity_id IS NOT NULL AND revoked=0",
-                [],
+                "INSERT INTO external_provider VALUES(1,?1) ON CONFLICT(singleton) DO NOTHING",
+                [registration],
             )?;
-            db.execute(
-                "UPDATE account SET enabled=0,credential_epoch=credential_epoch+1
-                    WHERE credential_mode='external' AND enabled=1",
-                [],
-            )?;
-            db.execute(
-                "UPDATE external_identity SET state='revoked' WHERE state<>'revoked'",
-                [],
-            )?;
-            db.execute("DELETE FROM external_provider WHERE singleton=1", [])?;
-            if let Some(registration) = registration {
-                db.execute("INSERT INTO external_provider VALUES(1,?1)", [registration])?;
-            }
-            Ok(())
+            registration_matches(db, &registration)
         })
         .await
-        .map_err(|_| ProtocolError::Unavailable)
+        .map_err(|_| ProtocolError::Unavailable)?;
+    if !matches {
+        return Err(ProtocolError::RegistrationChanged);
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_registration(db: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    let removed = db.execute("DELETE FROM external_provider WHERE singleton=1", [])?;
+    if removed == 0 {
+        return Ok(());
+    }
+    let time = now();
+    db.execute(
+        "INSERT INTO event(action,occurred_at,outcome,target_account_id,external_identity_id)
+         SELECT 'oidc.link_revoked',?1,'ok',account_id,identity_id
+         FROM external_identity WHERE state<>'revoked'",
+        [time],
+    )?;
+    db.execute(
+        "UPDATE session SET revoked=1 WHERE external_identity_id IS NOT NULL AND revoked=0",
+        [],
+    )?;
+    db.execute(
+        "UPDATE account SET enabled=0,credential_epoch=credential_epoch+1
+         WHERE credential_mode='external' AND enabled=1
+           AND account_id IN (SELECT account_id FROM external_identity WHERE state='active')",
+        [],
+    )?;
+    db.execute(
+        "UPDATE external_identity SET state='revoked' WHERE state<>'revoked'",
+        [],
+    )?;
+    db.execute(
+        "INSERT INTO event(action,occurred_at,outcome) VALUES('oidc.provider_removed',?1,'ok')",
+        [time],
+    )?;
+    Ok(())
 }
 
 pub(super) fn registration_matches(
@@ -77,6 +87,35 @@ pub(super) struct Approval {
     pub account_id: Option<String>,
 }
 
+#[derive(serde::Serialize)]
+pub(super) struct Link {
+    id: String,
+    handle: String,
+    pending: bool,
+    expires_at: Option<i64>,
+    generation: i64,
+}
+
+pub(super) fn list(db: &Connection) -> rusqlite::Result<Vec<Link>> {
+    db.prepare(
+        "SELECT identity_id,handle,state='pending',
+                CASE WHEN state='pending' THEN approval_expires_at END,generation
+         FROM external_identity WHERE state='active'
+           OR (state='pending' AND approval_expires_at>?1)
+         ORDER BY handle",
+    )?
+    .query_map([now()], |row| {
+        Ok(Link {
+            id: row.get(0)?,
+            handle: row.get(1)?,
+            pending: row.get(2)?,
+            expires_at: row.get(3)?,
+            generation: row.get(4)?,
+        })
+    })?
+    .collect()
+}
+
 pub(super) fn approve(
     db: &Connection,
     actor: &str,
@@ -86,6 +125,31 @@ pub(super) fn approve(
     if !accounts::valid_handle(&approval.handle) || !valid_subject(&approval.subject) {
         return Err(StatusCode::BAD_REQUEST);
     }
+    let time = now();
+    db.execute(
+        "INSERT INTO event(action,occurred_at,outcome,target_account_id,external_identity_id)
+         SELECT 'oidc.approval_expired',?1,'ok',account_id,identity_id
+         FROM external_identity WHERE state='pending' AND approval_expires_at<=?1",
+        [time],
+    )
+    .map_err(|_| INTERNAL)?;
+    db.execute(
+        "UPDATE external_identity SET state='revoked'
+         WHERE state='pending' AND approval_expires_at<=?1",
+        [time],
+    )
+    .map_err(|_| INTERNAL)?;
+    let pending: i64 = db
+        .query_row(
+            "SELECT count(*) FROM external_identity WHERE state='pending'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| INTERNAL)?;
+    if pending >= MAX_PENDING_APPROVALS {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    let expires_at = time.saturating_add(APPROVAL_SECONDS);
     let previous = db.query_row(
         "SELECT identity_id,account_id,handle,state FROM external_identity WHERE issuer=?1 AND subject=?2",
         params![issuer, approval.subject],
@@ -138,8 +202,8 @@ pub(super) fn approve(
     let identity = if let Some((id, ..)) = previous {
         db.execute(
             "UPDATE external_identity SET state='pending',generation=generation+1,approved_by=?1,
-             approver_epoch=?2,target_epoch=?3 WHERE identity_id=?4",
-            params![actor, approver_epoch, target_epoch, id],
+             approver_epoch=?2,target_epoch=?3,approval_expires_at=?4 WHERE identity_id=?5",
+            params![actor, approver_epoch, target_epoch, expires_at, id],
         )
         .map_err(|_| INTERNAL)?;
         id
@@ -147,9 +211,9 @@ pub(super) fn approve(
         let id = accounts::random_id()?;
         db.execute(
             "INSERT INTO external_identity(
-                identity_id,issuer,subject,account_id,handle,state,generation,approved_by,approver_epoch,target_epoch
-             ) VALUES(?1,?2,?3,?4,?5,'pending',0,?6,?7,?8)",
-            params![id, issuer, approval.subject, approval.account_id, approval.handle, actor, approver_epoch, target_epoch],
+                identity_id,issuer,subject,account_id,handle,state,generation,approved_by,approver_epoch,target_epoch,approval_expires_at
+             ) VALUES(?1,?2,?3,?4,?5,'pending',0,?6,?7,?8,?9)",
+            params![id, issuer, approval.subject, approval.account_id, approval.handle, actor, approver_epoch, target_epoch, expires_at],
         ).map_err(|_| INTERNAL)?;
         id
     };
@@ -163,17 +227,35 @@ pub(super) fn approve(
     Ok(identity)
 }
 
-pub(super) fn revoke(db: &Connection, actor: &str, identity: &str) -> Result<(), StatusCode> {
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Revoke {
+    pending: bool,
+    generation: i64,
+}
+
+pub(super) fn revoke(
+    db: &Connection,
+    actor: &str,
+    identity: &str,
+    expected: Revoke,
+) -> Result<(), StatusCode> {
+    let state = if expected.pending {
+        "pending"
+    } else {
+        "active"
+    };
     let account = db
         .query_row(
-            "UPDATE external_identity SET state='revoked' WHERE identity_id=?1 AND state<>'revoked'
+            "UPDATE external_identity SET state='revoked'
+             WHERE identity_id=?1 AND state=?2 AND generation=?3
          RETURNING account_id",
-            [identity],
+            params![identity, state, expected.generation],
             |r| r.get::<_, Option<String>>(0),
         )
         .optional()
         .map_err(|_| INTERNAL)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or(CONFLICT)?;
     if let Some(id) = &account {
         db.execute(
             "UPDATE account SET enabled=0,credential_epoch=credential_epoch+1
@@ -196,7 +278,7 @@ pub(super) fn revoke(db: &Connection, actor: &str, identity: &str) -> Result<(),
     )
 }
 
-fn audit(
+pub(in crate::http) fn audit(
     db: &Connection,
     actor: Option<&str>,
     action: &'static str,
@@ -239,9 +321,10 @@ pub(super) fn snapshot(
         "SELECT x.identity_id,x.generation,x.state='pending',x.approved_by,x.approver_epoch,x.target_epoch,
                 a.account_id,a.credential_epoch,a.credential_mode='local',a.enabled
          FROM external_identity x LEFT JOIN account a ON x.account_id=a.account_id
-         WHERE x.issuer=?1 AND x.handle=?2 AND x.state IN ('pending','active')
+         WHERE x.issuer=?1 AND x.handle=?2
+           AND (x.state='active' OR (x.state='pending' AND x.approval_expires_at>?3))
            AND (a.account_id IS NULL OR a.role='user')",
-        params![issuer,handle],
+        params![issuer,handle,now()],
         |r| {
             let id: Option<String> = r.get(6)?;
             let account = if let Some(id) = id {

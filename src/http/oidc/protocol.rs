@@ -1,4 +1,12 @@
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    fs::{File, OpenOptions},
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     body::Bytes,
@@ -41,11 +49,14 @@ pub(super) const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE: usize = 1024 * 1024;
 const MAX_KEYS: usize = 32;
 
-pub struct ProviderConfig {
-    pub issuer: String,
-    pub client_id: String,
-    pub secret: SecretString,
-    pub ca_pem: Vec<u8>,
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderConfig {
+    issuer: String,
+    client_id: String,
+    callback: String,
+    client_secret_file: PathBuf,
+    ca_file: PathBuf,
 }
 
 pub(super) struct Provider {
@@ -65,8 +76,48 @@ struct Transport {
 #[derive(Clone, Copy, Debug)]
 pub enum ProtocolError {
     Configuration,
+    Secret,
+    Ca,
+    RegistrationChanged,
     Unavailable,
     InvalidProof,
+}
+
+impl ProtocolError {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Configuration => "oidc_config_invalid",
+            Self::Secret => "oidc_client_secret_unavailable",
+            Self::Ca => "oidc_ca_unavailable",
+            Self::RegistrationChanged => "oidc_explicit_removal_required",
+            Self::Unavailable => "oidc_unavailable",
+            Self::InvalidProof => "oidc_invalid_proof",
+        }
+    }
+}
+
+fn read_file(path: &Path, limit: u64, secret: bool) -> std::io::Result<Vec<u8>> {
+    use rustix::fs::OFlags;
+    let file: File = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.len() > limit
+        || (secret
+            && (metadata.permissions().mode() & 0o077 != 0
+                || metadata.uid() != rustix::process::geteuid().as_raw()
+                || metadata.nlink() != 1))
+    {
+        return Err(std::io::Error::other("invalid OIDC file"));
+    }
+    let mut data = Vec::new();
+    file.take(limit + 1).read_to_end(&mut data)?;
+    if data.is_empty() || data.len() as u64 > limit {
+        return Err(std::io::Error::other("invalid OIDC file size"));
+    }
+    Ok(data)
 }
 
 fn https(value: &str) -> Result<Url, ProtocolError> {
@@ -93,26 +144,54 @@ fn https(value: &str) -> Result<Url, ProtocolError> {
 }
 
 impl Provider {
-    pub fn new(config: ProviderConfig, origin: &str) -> Result<Self, ProtocolError> {
+    pub fn load(path: &Path, origin: &str) -> Result<Self, ProtocolError> {
+        let data = read_file(path, 16 * 1024, false).map_err(|_| ProtocolError::Configuration)?;
+        let config: ProviderConfig =
+            serde_json::from_slice(&data).map_err(|_| ProtocolError::Configuration)?;
         let issuer = https(&config.issuer)?;
         let app = https(origin)?;
-        if app.path() != "/"
-            || origin.ends_with('/')
+        if issuer.as_str() != config.issuer
+            || issuer
+                .path()
+                .rsplit_once("/realms/")
+                .is_none_or(|(_, realm)| {
+                    realm.is_empty()
+                        || !realm
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+                })
+            || app.origin().ascii_serialization() != origin
+            || config.callback != format!("{origin}{CALLBACK}")
             || config.client_id.is_empty()
             || config.client_id.len() > 255
-            || config.secret.expose_secret().is_empty()
+            || !config.client_id.bytes().all(|b| b.is_ascii_graphic())
+            || !config.client_secret_file.is_absolute()
+            || !config.ca_file.is_absolute()
         {
             return Err(ProtocolError::Configuration);
         }
+        let mut secret =
+            read_file(&config.client_secret_file, 4096, true).map_err(|_| ProtocolError::Secret)?;
+        if secret.last() == Some(&b'\n') {
+            secret.pop();
+            if secret.last() == Some(&b'\r') {
+                secret.pop();
+            }
+        }
+        if secret.is_empty() || !secret.iter().all(u8::is_ascii_graphic) {
+            return Err(ProtocolError::Secret);
+        }
+        let secret = String::from_utf8(secret).map_err(|_| ProtocolError::Secret)?;
+        let ca = read_file(&config.ca_file, 256 * 1024, false).map_err(|_| ProtocolError::Ca)?;
         Ok(Self {
             issuer: config.issuer,
-            callback: format!("{origin}{CALLBACK}"),
+            callback: config.callback,
             client_id: config.client_id,
             auth: ClientSecret::builder()
-                .client_secret(ProvidedSecret::new(config.secret))
+                .client_secret(ProvidedSecret::new(SecretString::from(secret)))
                 .prefer_basic_auth(true)
                 .build(),
-            transport: Transport::new(issuer.origin(), &config.ca_pem)?,
+            transport: Transport::new(issuer.origin(), &ca).map_err(|_| ProtocolError::Ca)?,
         })
     }
 
@@ -126,19 +205,13 @@ impl Provider {
         hash.finalize().into()
     }
 
-    pub async fn start(
-        &self,
-        max_age: Option<Duration>,
-    ) -> Result<(AuthorizationCodeGrant, StartOutput), ProtocolError> {
-        tokio::time::timeout(EXCHANGE_TIMEOUT, self.start_inner(max_age))
+    pub async fn start(&self) -> Result<(AuthorizationCodeGrant, StartOutput), ProtocolError> {
+        tokio::time::timeout(EXCHANGE_TIMEOUT, self.start_inner())
             .await
             .map_err(|_| ProtocolError::Unavailable)?
     }
 
-    async fn start_inner(
-        &self,
-        max_age: Option<Duration>,
-    ) -> Result<(AuthorizationCodeGrant, StartOutput), ProtocolError> {
+    async fn start_inner(&self) -> Result<(AuthorizationCodeGrant, StartOutput), ProtocolError> {
         let metadata = AuthorizationServerMetadata::oidc_fetch()
             .http_client(&self.transport)
             .issuer(self.issuer.clone())
@@ -155,6 +228,12 @@ impl Provider {
                 .map_err(|_| ProtocolError::Configuration)?;
         }
         if metadata.issuer != self.issuer
+            || authorization.as_uri().to_string()
+                != format!("{}/protocol/openid-connect/auth", self.issuer)
+            || metadata.token_endpoint.as_uri().to_string()
+                != format!("{}/protocol/openid-connect/token", self.issuer)
+            || jwks.as_uri().to_string() != format!("{}/protocol/openid-connect/certs", self.issuer)
+            || !metadata.authorization_response_iss_parameter_supported
             || metadata.require_pushed_authorization_requests
             || !contains(&metadata.response_types_supported, "code")
             || !contains(&metadata.grant_types_supported, "authorization_code")
@@ -181,9 +260,7 @@ impl Provider {
             .jwks_uri(jwks)
             .token_endpoint_auth_methods_supported(vec!["client_secret_basic".into()])
             .redirect_uri(self.callback.clone())
-            .authorization_response_iss_parameter_supported(
-                metadata.authorization_response_iss_parameter_supported,
-            )
+            .authorization_response_iss_parameter_supported(true)
             .oidc(true)
             .response_mode(ResponseMode::Query)
             .allowed_id_token_signed_response_algs(HashSet::from(["RS256".into()]))
@@ -196,7 +273,7 @@ impl Provider {
             .start(
                 StartInput::builder()
                     .scope(vec!["openid".into()])
-                    .maybe_max_age(max_age)
+                    .max_age(Duration::ZERO)
                     .build(),
             )
             .await
@@ -235,23 +312,26 @@ impl Provider {
             return Err(invalid);
         }
         let subject = token.sub.filter(|sub| valid_subject(sub)).ok_or(invalid)?;
-        Ok(VerifiedIdentity {
-            subject,
-            auth_time: token
-                .claims
-                .auth_time
-                .and_then(|value| i64::try_from(value).ok()),
-            acr: token.claims.acr,
-            amr: token.claims.amr,
-        })
+        let auth_time = token
+            .claims
+            .auth_time
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or(invalid)?;
+        if auth_time > issued || !fresh_auth_time(auth_time, started, now) {
+            return Err(invalid);
+        }
+        Ok(VerifiedIdentity { subject })
     }
 }
 
 pub(super) struct VerifiedIdentity {
     pub subject: String,
-    pub auth_time: Option<i64>,
-    pub acr: Option<String>,
-    pub amr: Vec<String>,
+}
+
+fn fresh_auth_time(auth_time: i64, started: i64, now: i64) -> bool {
+    const CLOCK_SKEW_SECONDS: i64 = 5;
+    (started.saturating_sub(CLOCK_SKEW_SECONDS)..=now.saturating_add(CLOCK_SKEW_SECONDS))
+        .contains(&auth_time)
 }
 
 pub(super) fn valid_subject(subject: &str) -> bool {

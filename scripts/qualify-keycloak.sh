@@ -27,12 +27,12 @@ cleanup() {
         status=1
     fi
     if [[ -n "${sylux_fixture:-}" ]]; then
-        if ! rm -rf -- "$fixture/sylux" "$fixture/sylux-oidc.json"; then
+        if ! rm -rf -- "$fixture/sylux" "$fixture/sylux-oidc.json" "$fixture/oidc-client-secret" "$fixture/backup"; then
             echo 'Cleanup failed for disposable Sylux storage.' >&2
             status=1
         fi
     fi
-    if ! rm -f -- "$fixture/"{ca.key,ca.pem,ca.srl,leaf.csr,leaf.ext} \
+    if ! rm -f -- "$fixture/"{ca.key,ca.pem,ca.srl,leaf.csr,leaf.ext,untrusted.key,untrusted.pem} \
         "$fixture/tls/"{leaf.key,leaf.pem} || ! rmdir "$fixture/tls" "$fixture"; then
         echo 'Cleanup failed for fixture files.' >&2
         status=1
@@ -62,6 +62,9 @@ EXT
 openssl x509 -req -in "$fixture/leaf.csr" -CA "$fixture/ca.pem" -CAkey "$fixture/ca.key" \
     -CAcreateserial -out "$fixture/tls/leaf.pem" -days 1 -sha256 -extfile "$fixture/leaf.ext" >/dev/null 2>&1
 openssl verify -CAfile "$fixture/ca.pem" -verify_ip 127.0.0.1 "$fixture/tls/leaf.pem" >/dev/null
+openssl req -x509 -newkey rsa:2048 -noenc -days 1 -sha256 -subj '/CN=Untrusted fixture CA' \
+    -keyout "$fixture/untrusted.key" -out "$fixture/untrusted.pem" \
+    -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign' >/dev/null 2>&1
 chmod 644 "$fixture/tls/"{leaf.key,leaf.pem}
 
 export KC_BOOTSTRAP_ADMIN_CLIENT_SECRET

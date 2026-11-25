@@ -18,14 +18,17 @@ use huskarl::grant::authorization_code::{AuthorizationCodeGrant, CompleteInput, 
 use rusqlite::OptionalExtension;
 use std::{
     collections::{HashMap, HashSet},
+    path::Path as FilePath,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
 
-use lifecycle::{Admission, Approval, Session, Snapshot};
+pub(super) use lifecycle::audit;
+pub(crate) use lifecycle::remove_registration;
+use lifecycle::{Admission, Approval, Revoke, Session, Snapshot};
 pub use protocol::ProtocolError;
-use protocol::{Provider, ProviderConfig, VerifiedIdentity};
+use protocol::Provider;
 
 const COOKIE: &str = "__Host-sylux-oidc";
 const DENIED: StatusCode = StatusCode::UNAUTHORIZED;
@@ -34,32 +37,12 @@ const UNAVAILABLE: StatusCode = StatusCode::SERVICE_UNAVAILABLE;
 const MAX_ATTEMPTS: usize = 128;
 const MAX_PROVIDER_FLOWS: usize = 8;
 
-struct Policy {
-    attempt: Duration,
-    session: Duration,
-    max_age: Option<Duration>,
-    assurance: fn(Option<&str>, &[String]) -> bool,
-}
-
-impl Policy {
-    fn admits(&self, identity: &VerifiedIdentity, started: i64) -> bool {
-        if let Some(age) = self.max_age {
-            let earliest = started.saturating_sub(i64::try_from(age.as_secs()).unwrap_or(i64::MAX));
-            if !identity
-                .auth_time
-                .is_some_and(|time| time >= earliest && time <= auth::now())
-            {
-                return false;
-            }
-        }
-        (self.assurance)(identity.acr.as_deref(), &identity.amr)
-    }
-}
+const ATTEMPT: Duration = Duration::from_secs(5 * 60);
+const SESSION_SECONDS: i64 = 15 * 60;
 
 pub(super) struct Oidc {
     provider: Provider,
     registration: [u8; 32],
-    policy: Policy,
     attempts: Mutex<HashMap<[u8; 32], Attempt>>,
     provider_flows: Semaphore,
 }
@@ -74,80 +57,34 @@ struct Attempt {
     pending: PendingState,
 }
 
-async fn configure(
-    state: &mut AuthState,
-    config: Option<(ProviderConfig, Policy)>,
-) -> Result<(), ProtocolError> {
-    let oidc = config
-        .map(|(config, policy)| -> Result<_, ProtocolError> {
-            let provider = Provider::new(config, &state.origin)?;
-            Ok(Arc::new(Oidc {
-                registration: provider.registration(),
-                provider,
-                policy,
-                attempts: Mutex::default(),
-                provider_flows: Semaphore::new(MAX_PROVIDER_FLOWS),
-            }))
-        })
-        .transpose()?;
-    lifecycle::set_registration(&state.workers, oidc.as_ref().map(|x| x.registration)).await?;
-    state.oidc = oidc;
+pub(super) async fn configure(state: &mut AuthState, path: &FilePath) -> Result<(), ProtocolError> {
+    let path = path.to_owned();
+    let origin = state.origin.clone();
+    let provider = tokio::task::spawn_blocking(move || Provider::load(&path, &origin))
+        .await
+        .map_err(|_| ProtocolError::Unavailable)??;
+    let registration = provider.registration();
+    lifecycle::register(&state.workers, registration).await?;
+    state.oidc = Some(Arc::new(Oidc {
+        registration,
+        provider,
+        attempts: Mutex::default(),
+        provider_flows: Semaphore::new(MAX_PROVIDER_FLOWS),
+    }));
     Ok(())
 }
 
-pub(super) async fn disable(state: &mut AuthState) -> Result<(), ProtocolError> {
-    configure(state, None).await
-}
-
-#[cfg(feature = "test-harness")]
-pub struct TestOidcConfig {
-    pub issuer: String,
-    pub client_id: String,
-    pub secret: String,
-    pub ca_pem: Vec<u8>,
-    pub attempt: Duration,
-    pub session: Duration,
-}
-
-#[cfg(feature = "test-harness")]
-pub(super) async fn configure_test(
-    state: &mut AuthState,
-    config: TestOidcConfig,
-) -> Result<(), ProtocolError> {
-    if config.attempt.is_zero()
-        || config.session.is_zero()
-        || config.attempt.as_secs() > i64::MAX as u64
-        || config.session.as_secs() > i64::MAX as u64
-    {
-        return Err(ProtocolError::Configuration);
-    }
-    configure(
-        state,
-        Some((
-            ProviderConfig {
-                issuer: config.issuer,
-                client_id: config.client_id,
-                secret: config.secret.into(),
-                ca_pem: config.ca_pem,
-            },
-            Policy {
-                attempt: config.attempt,
-                session: config.session,
-                max_age: Some(Duration::ZERO),
-                // The disposable provider is a password-only qualification fixture.
-                assurance: |_, _| true,
-            },
-        )),
-    )
-    .await
-}
-
 pub(super) fn routes(app: Router<AuthState>) -> Router<AuthState> {
-    app.route("/auth/oidc/start", post(start))
+    app.route("/auth/oidc/status", get(status))
+        .route("/auth/oidc/start", post(start))
         .route(protocol::CALLBACK, get(callback))
         .route("/auth/oidc/session", get(session))
-        .route("/auth/oidc/approvals", post(approve))
+        .route("/auth/oidc/approvals", get(list).post(approve))
         .route("/auth/oidc/approvals/{id}/revoke", post(revoke))
+}
+
+async fn status(State(state): State<AuthState>) -> Response {
+    private(Json(serde_json::json!({ "enabled": state.oidc.is_some() })).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -195,11 +132,12 @@ async fn check_local_proof(
         })
         .await
         .map_err(|_| INTERNAL)?;
-    if !state
+    let has_local_verifier = encoded.is_some();
+    let valid = state
         .limiter
         .verify_login_async(password.into_bytes(), encoded)
-        .await
-    {
+        .await;
+    if !has_local_verifier || !valid {
         return Err(DENIED);
     }
     Ok(cookie)
@@ -246,10 +184,11 @@ async fn begin(
     if !accounts::valid_handle(&input.handle) {
         return Err(StatusCode::BAD_REQUEST);
     }
+    if input.conversion_password.is_none() {
+        consume_anonymous(state, headers)?;
+    }
     let started = auth::now();
-    let expires = Instant::now()
-        .checked_add(oidc.policy.attempt)
-        .ok_or(INTERNAL)?;
+    let expires = Instant::now().checked_add(ATTEMPT).ok_or(INTERNAL)?;
     let handle = input.handle.clone();
     let issuer = oidc.provider.issuer.clone();
     let registration = oidc.registration;
@@ -266,15 +205,18 @@ async fn begin(
     let local = if let Some(password) = input.conversion_password {
         Some(check_local_proof(state, headers, target.as_ref(), password).await?)
     } else {
-        consume_anonymous(state, headers)?;
         None
     };
+    let previous = attempt_binding(headers);
+    {
+        let mut attempts = oidc.attempts.lock().map_err(|_| INTERNAL)?;
+        attempts.retain(|key, attempt| Some(*key) != previous && attempt.expires > Instant::now());
+        if attempts.len() >= MAX_ATTEMPTS {
+            return Err(UNAVAILABLE);
+        }
+    }
     let _permit = oidc.provider_flows.try_acquire().map_err(|_| UNAVAILABLE)?;
-    let (grant, output) = oidc
-        .provider
-        .start(oidc.policy.max_age)
-        .await
-        .map_err(|_| UNAVAILABLE)?;
+    let (grant, output) = oidc.provider.start().await.map_err(|_| UNAVAILABLE)?;
     let (browser, cookie) = auth::random_secret().ok_or(INTERNAL)?;
     let mut attempts = oidc.attempts.lock().map_err(|_| INTERNAL)?;
     let now = Instant::now();
@@ -305,6 +247,12 @@ async fn begin(
     Ok(response)
 }
 
+fn attempt_binding(headers: &HeaderMap) -> Option<[u8; 32]> {
+    middleware::cookie_value(headers, COOKIE)
+        .and_then(|cookie| middleware::decode_secret(&cookie))
+        .map(|secret| authz::verifier(&secret))
+}
+
 fn attempt_cookie(value: &str, lifetime: u64) -> Result<HeaderValue, StatusCode> {
     HeaderValue::from_str(&format!(
         "{COOKIE}={value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={lifetime}"
@@ -323,8 +271,27 @@ async fn callback(
     }
     match finish(&state, &headers, query.as_deref().unwrap_or_default()).await {
         Ok(response) => response,
+        Err(status) if browser_navigation(&headers) => {
+            let location = if status == UNAVAILABLE {
+                "/?oidc=unavailable"
+            } else {
+                "/?oidc=failed"
+            };
+            private((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
+        }
         Err(status) => failed(status),
     }
+}
+
+fn browser_navigation(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept
+                .split(',')
+                .any(|value| value.trim().starts_with("text/html"))
+        })
 }
 
 async fn finish(
@@ -333,14 +300,12 @@ async fn finish(
     query: &str,
 ) -> Result<Response, StatusCode> {
     let oidc = state.oidc.as_ref().ok_or(StatusCode::NOT_FOUND)?;
-    let binding = middleware::cookie_value(headers, COOKIE)
-        .and_then(|cookie| middleware::decode_secret(&cookie))
-        .ok_or(DENIED)?;
+    let binding = attempt_binding(headers).ok_or(DENIED)?;
     let attempt = oidc
         .attempts
         .lock()
         .map_err(|_| INTERNAL)?
-        .remove(&authz::verifier(&binding))
+        .remove(&binding)
         .ok_or(DENIED)?;
     if attempt.expires <= Instant::now() || !valid_callback(query) {
         return Err(DENIED);
@@ -367,19 +332,13 @@ async fn finish(
             ProtocolError::InvalidProof => DENIED,
             _ => UNAVAILABLE,
         })?;
-    if attempt.expires <= Instant::now() || !oidc.policy.admits(&proof, attempt.started) {
+    if attempt.expires <= Instant::now() {
         return Err(DENIED);
     }
     let target = attempt.target.ok_or(DENIED)?;
     let expires_at = attempt
         .started
-        .checked_add(
-            oidc.policy
-                .session
-                .as_secs()
-                .try_into()
-                .map_err(|_| INTERNAL)?,
-        )
+        .checked_add(SESSION_SECONDS)
         .ok_or(INTERNAL)?;
     let session_id = auth::random_session_id().ok_or(INTERNAL)?;
     let (secret, encoded) = auth::random_secret().ok_or(INTERNAL)?;
@@ -487,6 +446,27 @@ async fn session(State(state): State<AuthState>, headers: HeaderMap) -> Response
     }
 }
 
+async fn list(State(state): State<AuthState>, headers: HeaderMap) -> Response {
+    let (cookie, _) = match accounts::credentials(&headers, &state, false) {
+        Ok(value) => value,
+        Err(status) => return failed(status),
+    };
+    match state
+        .workers
+        .read(move |db| {
+            if let Err(status) = accounts::authorize(db, &cookie, None, true) {
+                return Ok(Err(status));
+            }
+            lifecycle::list(db).map(Ok)
+        })
+        .await
+    {
+        Ok(Ok(links)) => private(Json(links).into_response()),
+        Ok(Err(status)) => failed(status),
+        Err(_) => failed(INTERNAL),
+    }
+}
+
 async fn approve(
     State(state): State<AuthState>,
     headers: HeaderMap,
@@ -524,6 +504,7 @@ async fn revoke(
     State(state): State<AuthState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Json(expected): Json<Revoke>,
 ) -> Response {
     let (cookie, csrf) = match accounts::credentials(&headers, &state, true) {
         Ok(value) => value,
@@ -534,7 +515,7 @@ async fn revoke(
             .workers
             .transact_result(move |db| {
                 let actor = accounts::authorize(db, &cookie, csrf.as_ref(), true)?;
-                lifecycle::revoke(db, &actor, &id)
+                lifecycle::revoke(db, &actor, &id, expected)
             })
             .await,
     ))
@@ -552,5 +533,11 @@ fn private(mut response: Response) -> Response {
 }
 
 fn failed(status: StatusCode) -> Response {
-    private((status, "external_authentication_failed").into_response())
+    private(
+        (
+            status,
+            Json(serde_json::json!({ "code": "external_authentication_failed" })),
+        )
+            .into_response(),
+    )
 }

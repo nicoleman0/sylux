@@ -129,8 +129,8 @@ pub async fn list(State(state): State<AuthState>, headers: HeaderMap) -> Respons
     };
     let result = state.workers.read(move |db| {
         if let Err(status) = authorize(db, &cookie, None, true) { return Ok(Err(status)); }
-        let mut statement = db.prepare("SELECT account_id,handle,role,enabled FROM account ORDER BY handle")?;
-        let rows = statement.query_map([], |r| Ok(serde_json::json!({"account_id":r.get::<_,String>(0)?,"handle":r.get::<_,String>(1)?,"role":r.get::<_,String>(2)?,"enabled":r.get::<_,i64>(3)? == 1})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut statement = db.prepare("SELECT account_id,handle,role,enabled,credential_mode FROM account ORDER BY handle")?;
+        let rows = statement.query_map([], |r| Ok(serde_json::json!({"account_id":r.get::<_,String>(0)?,"handle":r.get::<_,String>(1)?,"role":r.get::<_,String>(2)?,"enabled":r.get::<_,i64>(3)? == 1,"credential_mode":r.get::<_,String>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Ok(rows))
     }).await;
     match result {

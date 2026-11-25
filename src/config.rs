@@ -13,6 +13,7 @@ pub enum CommandKind {
     AdminVerifyPayloads,
     AdminExport,
     AdminBackup,
+    AdminRemoveOidcProvider,
 }
 
 #[derive(Debug)]
@@ -26,6 +27,7 @@ pub struct CliConfig {
     pub allow_non_loopback: bool,
     pub webdav: bool,
     pub public_origin: Option<String>,
+    pub oidc_config: Option<PathBuf>,
     pub assets: PathBuf,
     pub admin_handle: Option<String>,
     pub destination: Option<PathBuf>,
@@ -66,6 +68,7 @@ where
             Some("verify-payloads") => CommandKind::AdminVerifyPayloads,
             Some("export") => CommandKind::AdminExport,
             Some("backup") => CommandKind::AdminBackup,
+            Some("remove-oidc-provider") => CommandKind::AdminRemoveOidcProvider,
             _ => return Err(ConfigError::Usage("admin_subcommand_required")),
         },
         _ => return Err(ConfigError::Usage("subcommand_required")),
@@ -80,6 +83,7 @@ where
     let mut allow_non_loopback = false;
     let mut webdav = false;
     let mut public_origin: Option<String> = None;
+    let mut oidc_config = None;
     while let Some(argument) = arguments.next() {
         let flag = argument
             .to_str()
@@ -87,7 +91,9 @@ where
         // Admin commands accept only their own flags.
         let allowed: Option<&[&str]> = match command {
             CommandKind::AdminResetPassword => Some(&["--root", "--handle", "--password-stdin"]),
-            CommandKind::AdminVerifyPayloads => Some(&["--root"]),
+            CommandKind::AdminVerifyPayloads | CommandKind::AdminRemoveOidcProvider => {
+                Some(&["--root"])
+            }
             CommandKind::AdminExport => Some(&["--root", "--handle", "--destination"]),
             CommandKind::AdminBackup => Some(&["--root", "--destination"]),
             CommandKind::Init | CommandKind::Serve => None,
@@ -153,6 +159,13 @@ where
             }
             "--allow-non-loopback" => allow_non_loopback = true,
             "--webdav" if command == CommandKind::Serve && !webdav => webdav = true,
+            "--oidc-config" if command == CommandKind::Serve => {
+                set_once(
+                    &mut oidc_config,
+                    value_path(&mut arguments, "oidc_config_path_missing")?,
+                    "duplicate_oidc_config",
+                )?;
+            }
             "--public-origin" => {
                 let value = value_string(&mut arguments, "public_origin_value_missing")?;
                 validate_public_origin(&value)?;
@@ -204,6 +217,7 @@ where
         allow_non_loopback,
         webdav,
         public_origin,
+        oidc_config,
         assets,
         admin_handle,
         destination,

@@ -37,18 +37,18 @@ on exit.
 
 ## Sylux browser contract
 
-The disposable Sylux contract uses the same pinned container and an isolated
-TLS browser. Build `oidc_fixture` with the `test-harness` feature, then pass the
-absolute executable path from Cargo to `scripts/qualify-keycloak.sh`:
+Run the production-enabled Sylux browser contract with:
 
 ```sh
-cargo test --locked --features test-harness --test oidc_fixture --no-run
-bash scripts/qualify-keycloak.sh /absolute/path/to/oidc_fixture
+npm --prefix web run build
+bash scripts/check-oidc.sh
 ```
 
-This exercises real provider sign-in and a local TLS fault provider. The test
-policy and password-only realm are fixture inputs. Production enablement and
-operator policy require separate approval.
+It builds the regular Sylux binary and uses browser controls with the same
+image pin, a separate password-and-OTP flow and disposable storage. It also
+uses a separate local TLS fault provider for timing, token and database
+controls. See the [operator guide](../oidc.md) for the production settings.
+The observations below are the original password-only provider qualification.
 
 ## Profile and checks
 

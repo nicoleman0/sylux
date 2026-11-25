@@ -22,12 +22,6 @@ default = []
 test-harness = []
 
 [[test]]
-name = "oidc_fixture"
-path = "tests/oidc_fixture.rs"
-harness = false
-required-features = ["test-harness"]
-
-[[test]]
 name = "harness_self"
 path = "tests/harness_self.rs"
 required-features = ["test-harness"]

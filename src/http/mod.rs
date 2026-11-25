@@ -11,10 +11,8 @@ pub mod entries;
 pub mod instance;
 pub mod middleware;
 pub mod mutations;
-mod oidc;
+pub(crate) mod oidc;
 pub use oidc::ProtocolError as OidcError;
-#[cfg(feature = "test-harness")]
-pub use oidc::TestOidcConfig;
 pub mod removals;
 pub mod setup;
 mod shares;
@@ -109,14 +107,8 @@ impl AuthState {
         }
     }
 
-    pub async fn disable_oidc(&mut self) -> Result<(), OidcError> {
-        oidc::disable(self).await
-    }
-
-    #[cfg(feature = "test-harness")]
-    pub async fn with_test_oidc(mut self, config: TestOidcConfig) -> Result<Self, OidcError> {
-        oidc::configure_test(&mut self, config).await?;
-        Ok(self)
+    pub async fn configure_oidc(&mut self, path: &std::path::Path) -> Result<(), OidcError> {
+        oidc::configure(self, path).await
     }
 
     pub fn with_webdav(mut self, enabled: bool) -> Self {
@@ -289,11 +281,7 @@ pub fn router(state: AuthState) -> Router {
             axum::routing::any(|| async { axum::http::StatusCode::NOT_FOUND }),
         )
     };
-    let app = if state.oidc.is_some() {
-        oidc::routes(app)
-    } else {
-        app
-    };
-    app.layer(DefaultBodyLimit::max(64 * 1024))
+    oidc::routes(app)
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }

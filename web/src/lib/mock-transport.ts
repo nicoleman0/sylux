@@ -224,6 +224,8 @@ export class MockTransport implements ApiTransport {
     }
     if (route === '/me/password' && method === 'POST') { this.user = null; return undefined as T; }
     if (route === '/setup' && method === 'GET') return { setupRequired: this.setupRequired, user: this.user, csrfToken: 'mock-csrf-token' } as T;
+    if (route === '/auth/oidc/status' && method === 'GET') return { enabled: false } as T;
+    if (route === '/auth/oidc/session' && method === 'GET') throw new HttpError(401);
     if (route === '/auth/csrf' && method === 'GET') return { csrf_token: 'mock-csrf-token' } as T;
     if (route === '/archives' && method === 'POST') {
       const ids = new Set((options.body as { entry_ids: string[] }).entry_ids);

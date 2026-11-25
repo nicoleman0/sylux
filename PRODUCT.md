@@ -26,7 +26,7 @@ Build a pleasant, fast and efficient file server for small groups. Compete for t
 - Instance naming belongs in administrator Settings, persists on the server and applies to all users.
 - Text and image previews are implemented in `web/src/lib/preview.ts`; PDF previews render locally, with page and zoom controls and a download fallback (`docs/pdf-preview.md`).
 - Optional WebDAV access uses revocable app passwords scoped to the account's private libraries (`docs/webdav.md`).
-- Shared folders, public folder links and OIDC sign-in remain planned.
+- Optional [Keycloak sign-in](docs/oidc.md) uses administrator-approved account links and independent local recovery.
 - Prototype data and account actions are simulated. The prototype is not deployment or durability evidence.
 
 ## Brand Commitments

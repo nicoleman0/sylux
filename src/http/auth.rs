@@ -329,25 +329,36 @@ pub async fn logout(State(state): State<AuthState>, headers: HeaderMap) -> Respo
     drop(_guard);
     let session_id = cookie.session_id.clone();
     let secret = cookie.secret;
-    let revoked = state
-        .workers
-        .transact_result(move |tx| -> Result<(), StatusCode> {
-            if crate::domain::authz::validate_session(tx, &session_id, &secret, now()).is_none() {
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-            if !crate::domain::authz::csrf_matches(tx, &session_id, &csrf) {
-                return Err(StatusCode::FORBIDDEN);
-            }
-            let changed = tx.execute(
-            "UPDATE session SET revoked=1 WHERE session_id=?1 AND verifier=?2 AND revoked=0",
-            params![session_id, crate::domain::authz::verifier(&secret).as_slice()],
-        ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if changed != 1 {
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-            Ok(())
-        })
-        .await;
+    let revoked =
+        state
+            .workers
+            .transact_result(move |tx| -> Result<(), StatusCode> {
+                if crate::domain::authz::validate_session(tx, &session_id, &secret, now()).is_none()
+                {
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+                if !crate::domain::authz::csrf_matches(tx, &session_id, &csrf) {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                let (account, identity): (String, Option<String>) = tx.query_row(
+                "UPDATE session SET revoked=1 WHERE session_id=?1 AND verifier=?2 AND revoked=0
+                 RETURNING account_id, external_identity_id",
+                params![session_id, crate::domain::authz::verifier(&secret).as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::UNAUTHORIZED)?;
+                if let Some(identity) = identity {
+                    super::oidc::audit(
+                        tx,
+                        Some(&account),
+                        "oidc.session_revoked",
+                        Some(&account),
+                        &identity,
+                    )?;
+                }
+                Ok(())
+            })
+            .await;
     match revoked {
         Ok(Ok(())) => {}
         Ok(Err(status)) => return fail(status),

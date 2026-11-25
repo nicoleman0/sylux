@@ -18,6 +18,7 @@ CREATE TABLE external_identity (
     approved_by TEXT NOT NULL REFERENCES account(account_id),
     approver_epoch INTEGER NOT NULL CHECK (approver_epoch >= 0),
     target_epoch INTEGER CHECK (target_epoch >= 0),
+    approval_expires_at INTEGER NOT NULL CHECK (approval_expires_at > 0),
     CHECK ((account_id IS NULL) = (target_epoch IS NULL)),
     CHECK (state <> 'active' OR account_id IS NOT NULL),
     UNIQUE (issuer, subject)
