@@ -204,10 +204,12 @@ def x11(*args):
 
 
 def thunar_windows(folder=None):
-    args = ("search", "--all", "--onlyvisible", "--class", "^Thunar$")
-    if folder is not None:
-        args += ("--name", "^" + re.escape(f"{folder} - Thunar") + "$")
-    return x11(*args).splitlines()
+    # xdotool search accepts one positional regex; inspect titles after discovery.
+    windows = x11("search", "--all", "--onlyvisible", "--class", "^Thunar$").splitlines()
+    if folder is None:
+        return windows
+    expected = f"{folder} - Thunar"
+    return [window for window in windows if x11("getwindowname", window) == expected]
 
 
 def enable_accessibility():
