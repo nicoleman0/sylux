@@ -1,6 +1,7 @@
 name: WebDAV desktop journey
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - .github/workflows/webdav-desktop.yml
@@ -11,10 +12,15 @@ on:
       - .nvmrc
       - src/config.rs
       - src/main.rs
+      - src/domain/authz.rs
+      - src/domain/names.rs
       - src/domain/dav_credentials.rs
       - src/domain/coordinator.rs
       - src/domain/namespace.rs
       - src/domain/upload.rs
+      - src/http/accounts.rs
+      - src/http/auth.rs
+      - src/http/middleware.rs
       - src/http/dav/**
       - src/http/dav_credentials.rs
       - src/http/mod.rs

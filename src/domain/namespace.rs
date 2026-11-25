@@ -487,9 +487,10 @@ pub(crate) fn move_entry_as(
     };
     let changed = db.execute(
         "UPDATE entry SET parent_id=?1,generation=generation+1,
-             original_name=coalesce(?5,original_name),name_key=coalesce(?6,name_key)
+             original_name=coalesce(?5,original_name),name_key=coalesce(?6,name_key),
+             name_key_version=CASE WHEN ?6 IS NULL THEN name_key_version ELSE ?7 END
          WHERE entry_id=?2 AND owner_account_id=?3 AND generation=?4",
-        params![destination, entry, owner, generation, display, key]
+        params![destination, entry, owner, generation, display, key, NAME_KEY_VERSION]
     ).map_err(|error| if matches!(error, rusqlite::Error::SqliteFailure(ref e, _) if e.code == rusqlite::ErrorCode::ConstraintViolation) { NamespaceError::Conflict } else { NamespaceError::Sql })?;
     if changed != 1 {
         return Err(NamespaceError::Stale);
