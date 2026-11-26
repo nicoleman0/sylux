@@ -111,14 +111,14 @@ verify_public_tag "$conflict:$next_stable" "$stable_digest"
 
 # An unlabeled beta alias must fail with an actionable message and remain untouched.
 unlabeled="${destination}-unlabeled"
-crane copy "$source_repo:$stable" "$unlabeled:v9.0.0-beta.99"
+crane copy "$source_repo:base" "$unlabeled:v9.0.0-beta.99"
 crane tag "$unlabeled:v9.0.0-beta.99" beta
 unlabeled_digest=$(tag_digest "$unlabeled:beta")
 expect_failure 'not a labeled Sylux release image; leaving it unchanged' \
-  mirror_image "$source_repo" "$unlabeled" "$next_stable" "$revision" \
-  "$(image_config_digest "$source_repo:$next_stable")"
+  mirror_image "$source_repo" "$unlabeled" "$new_beta" "$revision" \
+  "$(image_config_digest "$source_repo:$new_beta")"
 verify_public_tag "$unlabeled:beta" "$unlabeled_digest"
-[[ -z "$(tag_digest "$unlabeled:$next_stable")" ]]
+verify_public_tag "$unlabeled:$new_beta" "$new_digest"
 
 crane tag "$destination@$new_digest" latest
 expect_failure 'cannot be matched to an exact version on its channel' \
