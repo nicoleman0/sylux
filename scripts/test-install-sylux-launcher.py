@@ -84,7 +84,7 @@ def check(label, *, version=STABLE, metadata=None, problem="", answer=None,
     with tempfile.TemporaryDirectory(prefix="sylux-launcher-") as directory:
         fixture = Path(directory)
         (fixture / "assets").mkdir()
-        api_url = f"{API}/latest" if version == STABLE else f"{API}/tags/{version}"
+        api_url = f"{API}/latest" if version != BETA else f"{API}/tags/{version}"
         (fixture / "payload").write_bytes(PAYLOAD)
         (fixture / "release.json").write_text(
             json.dumps(release(version) if metadata is None else metadata)
@@ -169,6 +169,7 @@ exec "$@"
 
 
 check("promoted stable preserves interactive approval", answer=b"y\n")
+check("later stable preserves interactive approval", version="v0.1.1", answer=b"y\n")
 check("interactive decline propagates", answer=b"n\n", error="Plan declined.")
 check("explicit beta.10 preserves interactive approval", version=BETA, answer=b"y\n")
 check("missing terminal", auth=False, error="interactive terminal")
@@ -176,7 +177,7 @@ check("unknown arguments", problem="arguments", auth=False, requests=0, error="p
 for failure in ("api-404", "api-timeout"):
     check(failure, problem=failure, auth=False, requests=1, error="Could not confirm")
 check("invalid response", problem="api-json", auth=False, requests=1, error="expected stable installer")
-for fields in ({"tag_name": "v0.0.1"}, {"tag_name": BETA}, {"draft": True},
+for fields in ({"tag_name": "v0.0.1"}, {"tag_name": BETA}, {"tag_name": "v00.1.0"}, {"tag_name": "v0.1.0-rc.1"}, {"tag_name": "v0.1"}, {"draft": True},
                {"prerelease": True}, {"assets": []},
                {"assets": release(STABLE)["assets"] * 2}):
     check(str(fields), metadata=release(STABLE) | fields, auth=False, requests=1,

@@ -19,10 +19,17 @@ import json
 import re
 import sys
 
-version, url, channel = sys.argv[1:]
+version, channel = sys.argv[1:]
 prerelease = channel == "beta"
 try:
     release = json.load(sys.stdin)
+    tag = release["tag_name"]
+    if channel == "stable":
+        match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag)
+        if not match or tuple(map(int, match.groups())) < (0, 1, 0):
+            raise ValueError("invalid stable tag")
+        version = tag
+    url = f"https://github.com/nicoleman0/sylux/releases/download/{version}/install-sylux.sh"
     assets = [asset for asset in release["assets"] if asset["name"] == "install-sylux.sh"]
     ready = (
         release["tag_name"] == version
@@ -39,9 +46,9 @@ except (KeyError, TypeError, ValueError):
     ready = False
 if not ready:
     sys.exit(1)
-print(assets[0]["digest"])
-' "$2" "$3" "$4" ||
-        fail "GitHub did not report the expected $4 installer for $2. Check the releases page and retry."
+print(version, assets[0]["digest"])
+' "$2" "$3" ||
+        fail "GitHub did not report the expected $3 installer for $2. Check the releases page and retry."
 }
 
 install_sylux() (
@@ -49,7 +56,7 @@ install_sylux() (
     api=https://api.github.com/repos/nicoleman0/sylux/releases
     case "$#:${1-}" in
         0:)
-            version=v0.1.0
+            version=latest
             api="$api/latest"
             channel=stable
             ;;
@@ -60,8 +67,10 @@ install_sylux() (
             ;;
         *) fail 'Run with no arguments for stable or pass --beta for v0.1.0-beta.10.' ;;
     esac
+    result=$(installer_digest "$api" "$version" "$channel")
+    version=${result%% *}
+    digest=${result#* }
     url="https://github.com/nicoleman0/sylux/releases/download/$version/install-sylux.sh"
-    digest=$(installer_digest "$api" "$version" "$url" "$channel")
     installer=$(mktemp)
     trap 'rm -f "$installer"' EXIT
     download --output "$installer" "$url" && [ -s "$installer" ] ||

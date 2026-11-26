@@ -12,7 +12,7 @@ Use an Ubuntu 24.04 x86_64 host running systemd, with `/srv` on local ext4 and T
 curl -fsSL https://raw.githubusercontent.com/nicoleman0/sylux/main/install.sh | sh
 ```
 
-The launcher requires GitHub to list `v0.1.0` as the latest release. It checks the chosen release's installer against GitHub's asset checksum. For [beta.10](https://github.com/nicoleman0/sylux/releases/tag/v0.1.0-beta.10), replace `| sh` with `| sh -s -- --beta`.
+The launcher selects GitHub’s latest published, non-prerelease version at or above `v0.1.0`. The stable release is not yet live. It checks the chosen release's installer against GitHub's asset checksum. For [beta.10](https://github.com/nicoleman0/sylux/releases/tag/v0.1.0-beta.10), replace `| sh` with `| sh -s -- --beta`.
 
 **Installing a specific version?** Download and review `install-sylux.sh` from the [release](https://github.com/nicoleman0/sylux/releases) you want, then run `sudo bash ./install-sylux.sh '<release tag>'` with that exact tag. Use the script shipped alongside this guide to install the version it covers.
 
@@ -28,6 +28,8 @@ Run the installer again with the same tag to resume an unsubmitted browser setup
 If the installer reports uncertain initialization or unfamiliar state, retain both directories and inspect the reported conflict before retrying. For a release change, take a backup and use the [manual upgrade procedure](#5-upgrade-and-roll-back). That moves the installation out of installer management; do not rerun the installer after upgrading. Releases without `install-sylux.sh` use the manual steps below.
 
 ### Recover an empty interrupted initialization
+
+For beta.10, use the [guarded manual reset in its tagged guide](https://github.com/nicoleman0/sylux/blob/v0.1.0-beta.10/docs/docker-beta.md#recover-an-empty-interrupted-initialization).
 
 If initialization may have written data, retain both directories and investigate. When init stopped before writing data, stop any manual init or Docker activity for Sylux. Run the recovery command from a release that ships this option. The installer retains that release's verified script in `/opt/sylux`.
 
