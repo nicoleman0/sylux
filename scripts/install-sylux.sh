@@ -106,7 +106,7 @@ fetch_bundle() {
 
 prepare_install() (
   local version=$1 stage revision
-  stage=$(mktemp -d /opt/.sylux.XXXXXXXX)
+  stage=$(mktemp -d "${install_dir%/*}/.sylux.XXXXXXXX")
   trap 'rm -rf -- "$stage"' EXIT
   revision=$(fetch_bundle "$version" "$stage")
   make_tls "$stage/tls"
@@ -170,8 +170,9 @@ check_docker() {
 }
 
 check_storage() {
-  [[ "$(findmnt -n -o FSTYPE -T "$1")" == ext4 ]] ||
-    fail 'Requires local ext4 storage for /srv/sylux.'
+  local filesystem
+  filesystem=$(findmnt -n -o FSTYPE -T "$1") || fail 'Could not identify the filesystem for /srv/sylux.'
+  [[ "$filesystem" == ext4 ]] || fail 'Requires local ext4 storage for /srv/sylux.'
 }
 
 check_system_dir() {
@@ -189,7 +190,10 @@ present() {
 }
 
 private_dir() {
-  [[ -d "$1" && ! -L "$1" && "$(stat -c '%u:%g:%a' "$1")" == "$2:700" ]]
+  local metadata
+  [[ -d "$1" && ! -L "$1" ]] || return 1
+  metadata=$(stat -c '%u:%g:%a' "$1") || return 1
+  [[ "$metadata" == "$2:700" ]]
 }
 
 system_identity() {
@@ -242,6 +246,48 @@ require_free_port() {
 
 project_containers() {
   docker_local ps --all --no-trunc --quiet --filter label=com.docker.compose.project=sylux
+}
+
+require_empty_data_dir() {
+  local entry
+  entry=$(find "$data_dir" -mindepth 1 -maxdepth 1 -printf x -quit) ||
+    fail 'Could not check whether the data directory is empty.'
+  [[ -z "$entry" ]] || fail 'Data directory is not empty. Preserve it and inspect it before retrying.'
+}
+
+write_phase() (
+  local next_phase
+  next_phase=$(mktemp -- "$install_dir/.phase.XXXXXXXX")
+  trap 'rm -f -- "$next_phase"' EXIT
+  printf '%s\n' "$1" > "$next_phase"
+  mv -T -- "$next_phase" "$install_dir/phase" || fail 'Could not replace the initialization phase.'
+)
+
+reset_empty_init() {
+  local record metadata version containers
+  private_dir "$install_dir" 0:0 || fail 'Expected a private installer directory at /opt/sylux.'
+  for record in "$install_dir"/{version,phase}; do
+    if [[ ! -f "$record" || -L "$record" ]] ||
+       ! metadata=$(stat -c '%u:%g:%a:%h' "$record") || [[ "$metadata" != 0:0:600:1 ]]; then
+      fail 'Expected private, root-owned installer records for version and phase.'
+    fi
+  done
+  version=$(cat -- "$install_dir/version") || fail 'Could not read the recorded release tag.'
+  if ! release_channel "$version" >/dev/null || ! cmp -s "$install_dir/version" <(printf '%s\n' "$version"); then
+    fail 'The recorded release tag is invalid.'
+  fi
+  cmp -s "$install_dir/phase" <(printf 'initializing\n') ||
+    fail 'Only an interrupted initializing phase can be reset.'
+  private_dir "$data_dir" 10001:10001 || fail 'Unexpected /srv/sylux ownership or permissions.'
+  check_storage "$data_dir"
+  require_empty_data_dir
+  check_existing_docker
+  check_docker
+  containers=$(project_containers) || fail 'Could not list the local Sylux project containers.'
+  [[ -z "$containers" ]] || fail 'Sylux project containers exist. Inspect them before retrying.'
+
+  write_phase prepared
+  printf 'Empty initialization reset. Run the installer again with %s.\n' "$version"
 }
 
 confirm_plan() {
@@ -340,11 +386,15 @@ start_service() {
 
 main() {
   local version=${1:-} container revision phase image recorded init_digest
+  local install_parent=${install_dir%/*} data_parent=${data_dir%/*}
   if [[ "$version" == --help && $# -eq 1 ]]; then
     printf 'Usage: sudo bash install-sylux.sh <vX.Y.Z or vX.Y.Z-beta.N> [--yes]\n'
+    printf '       sudo bash /opt/sylux/install-sylux.sh --reset-empty-init\n'
     return
   fi
-  if ! release_channel "$version" >/dev/null || (( $# > 2 )) || [[ "${2---yes}" != --yes ]]; then
+  if [[ "$version" == --reset-empty-init ]]; then
+    [[ $# -eq 1 ]] || fail 'Use --reset-empty-init on its own.'
+  elif ! release_channel "$version" >/dev/null || (( $# > 2 )) || [[ "${2---yes}" != --yes ]]; then
     fail 'Pass a published version tag (vX.Y.Z or vX.Y.Z-beta.N) and optionally --yes.'
   fi
   export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -352,11 +402,15 @@ main() {
   check_host
   shopt -s inherit_errexit
   (( EUID == 0 )) || fail 'Run with sudo after reviewing the installer.'
-  check_system_dir /opt
-  check_system_dir /srv
-  check_storage /srv
-  exec 9</opt
+  check_system_dir "$install_parent"
+  check_system_dir "$data_parent"
+  check_storage "$data_parent"
+  exec 9<"$install_parent"
   flock -n 9 || fail 'Another installer is running.'
+  if [[ "$version" == --reset-empty-init ]]; then
+    reset_empty_init
+    return
+  fi
   if present "$install_dir"; then
     private_dir "$install_dir" 0:0 || fail 'Unexpected /opt/sylux. Inspect it before retrying.'
     [[ "$(cat "$install_dir/version")" == "$version" ]] ||
@@ -379,8 +433,7 @@ main() {
   if [[ "$phase" == prepared ]]; then
     require_free_port
     if present "$data_dir"; then
-      [[ -z "$(find "$data_dir" -mindepth 1 -maxdepth 1 -printf x -quit)" ]] ||
-        fail 'Data directory is not empty. Preserve it and inspect it before retrying.'
+      require_empty_data_dir
     fi
   else
     [[ -f "$data_dir/installation.json" && ! -L "$data_dir/installation.json" ]] ||
@@ -426,13 +479,11 @@ main() {
       "$image" "$data_dir" "$install_dir" > "$install_dir/.env"
     compose config --quiet
     require_free_port
-    printf '%s\n' initializing > "$install_dir/phase.new"
-    mv -T -- "$install_dir/phase.new" "$install_dir/phase"
+    write_phase initializing
     compose run --rm --no-deps -T sylux init --root /var/lib/sylux ||
       fail 'Initialization failed. Preserve the data and inspect it before retrying.'
     init_digest=$(sha256sum "$data_dir/installation.json")
-    printf '%s\n' "${init_digest%% *}" > "$install_dir/phase.new"
-    mv -T -- "$install_dir/phase.new" "$install_dir/phase"
+    write_phase "${init_digest%% *}"
   else
     IFS= read -r recorded < "$install_dir/.env"
     image=${recorded#SYLUX_IMAGE=}

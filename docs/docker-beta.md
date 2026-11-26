@@ -6,11 +6,15 @@ The tested path used a disposable Ubuntu 24.04 x86_64 runner, an ext4 bind mount
 
 ## Docker quick start
 
-Use an Ubuntu 24.04 x86_64 host running systemd, with `/srv` on local ext4 and TCP port 3000 free. The installer uses Ubuntu's Docker and Compose packages when Docker is absent. An existing installation needs a working local Docker Engine and the Compose v2 plugin. Download and review `install-sylux.sh` from a [published release](https://github.com/nicoleman0/sylux/releases) that includes it. Pass its exact tag, for example `v0.1.0` for stable or `v0.1.0-beta.10` for beta.
+Use an Ubuntu 24.04 x86_64 host running systemd, with `/srv` on local ext4 and TCP port 3000 free. The installer uses Ubuntu's Docker and Compose packages when Docker is absent. An existing installation needs a working local Docker Engine and the Compose v2 plugin. For a fresh stable installation, run this in an interactive terminal with curl, Python 3, and sudo access.
 
 ```sh
-sudo bash ./install-sylux.sh '<published version tag>'
+curl -fsSL https://raw.githubusercontent.com/nicoleman0/sylux/main/install.sh | sh
 ```
+
+The launcher requires GitHub to list `v0.1.0` as the latest release. It checks the chosen release's installer against GitHub's asset checksum. For [beta.10](https://github.com/nicoleman0/sylux/releases/tag/v0.1.0-beta.10), replace `| sh` with `| sh -s -- --beta`.
+
+**Installing a specific version?** Download and review `install-sylux.sh` from the [release](https://github.com/nicoleman0/sylux/releases) you want, then run `sudo bash ./install-sylux.sh '<release tag>'` with that exact tag. Use the script shipped alongside this guide to install the version it covers.
 
 The installer displays the privileged changes and asks before proceeding. It prepares UID/GID 10001, the verified release and TLS files under `/opt/sylux`, and the private data directory `/srv/sylux`. Use `--yes` only after reviewing the plan if you need unattended installation. Checksums detect mismatched downloads. The release and checksum share the same publisher.
 
@@ -25,26 +29,13 @@ If the installer reports uncertain initialization or unfamiliar state, retain bo
 
 ### Recover an empty interrupted initialization
 
-The installer refuses an `initializing` record. If init may have written data, retain both directories and investigate; do not reset it. Only reset after stopping all installer and init activity, confirming `/srv/sylux` is empty and owned by UID/GID 10001 with mode 700, and confirming there are no Compose project containers, including stopped or one-off containers. In a root shell, run this guarded reset. It holds the installer lock and changes only the phase record; it removes no data, accounts, images, or containers.
+If initialization may have written data, retain both directories and investigate. When init stopped before writing data, stop any manual init or Docker activity for Sylux. Run the recovery command from a release that ships this option. The installer retains that release's verified script in `/opt/sylux`.
 
-```bash
-(
-  flock -n 9 || exit 1
-  test "$(stat -c '%u:%g:%a' /opt/sylux)" = 0:0:700 || exit 1
-  test -d /opt/sylux && test -d /srv/sylux || exit 1
-  test ! -L /opt/sylux && test ! -L /srv/sylux || exit 1
-  test "$(stat -c '%u:%g:%a' /srv/sylux)" = 10001:10001:700 || exit 1
-  test "$(cat /opt/sylux/phase)" = initializing || exit 1
-  contents=$(find /srv/sylux -mindepth 1 -maxdepth 1 -print -quit) || exit 1
-  test -z "$contents" || exit 1
-  containers=$(docker --host unix:///var/run/docker.sock ps -aq --filter label=com.docker.compose.project=sylux) || exit 1
-  test -z "$containers" || exit 1
-  printf 'prepared\n' > /opt/sylux/phase.new
-  mv -T /opt/sylux/phase.new /opt/sylux/phase
-) 9</opt
+```sh
+sudo bash /opt/sylux/install-sylux.sh --reset-empty-init
 ```
 
-If any check fails, leave the state intact. After a successful reset, rerun the original installer tag. Do not use this procedure to reset an initialized installation or recover credentials.
+The command takes the installer lock and checks that the trusted records show `initializing`, `/srv/sylux` is empty with UID/GID 10001 and mode 700, and the local Docker Engine reports no Sylux project containers, including stopped and one-off containers. If it succeeds, it changes only the phase record to `prepared` and prints the original release tag. Rerun the installed script with that tag to resume setup. If a check fails or the installed release script lacks the option, retain the state and investigate.
 
 ## 1. Get and verify a published release
 

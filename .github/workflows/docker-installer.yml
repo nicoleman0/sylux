@@ -11,6 +11,7 @@ on:
       - scripts/test-release.sh
       - deploy/docker/**
       - docs/docker-beta.md
+      - install.sh
       - README.md
       - .nvmrc
       - web/package-lock.json
@@ -45,11 +46,15 @@ jobs:
           npm --prefix web exec -- playwright install --with-deps chromium
       - name: Lint and verify the published beta.9 data assets
         run: |
+          sh -n install.sh
+          shellcheck install.sh
           bash scripts/test-release.sh
-          bash -n scripts/install-sylux.sh
-          bash -n scripts/test-install-sylux.sh
-          bash -n scripts/qualify-install-sylux.sh
-          shellcheck -x scripts/{install-sylux,test-install-sylux,qualify-install-sylux,release-bundle,test-release}.sh
+          for script in scripts/{install-sylux,test-install-sylux,test-install-sylux-recovery,qualify-install-sylux}.sh; do
+            bash -n "$script"
+          done
+          shellcheck -x scripts/{install-sylux,test-install-sylux,test-install-sylux-recovery,qualify-install-sylux,release-bundle,test-release}.sh
+          python3 scripts/test-install-sylux-launcher.py
+          sudo bash scripts/test-install-sylux-recovery.sh
           assets=$(mktemp -d)
           trap 'rm -rf -- "$assets"' EXIT
           source scripts/install-sylux.sh
