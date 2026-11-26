@@ -7,6 +7,8 @@ on:
       - .github/workflows/beta-release.yml
       - scripts/*install-sylux*
       - scripts/package-beta.sh
+      - scripts/release-bundle.sh
+      - scripts/test-release.sh
       - deploy/docker/**
       - docs/docker-beta.md
       - README.md
@@ -43,10 +45,11 @@ jobs:
           npm --prefix web exec -- playwright install --with-deps chromium
       - name: Lint and verify the published beta.9 data assets
         run: |
+          bash scripts/test-release.sh
           bash -n scripts/install-sylux.sh
           bash -n scripts/test-install-sylux.sh
           bash -n scripts/qualify-install-sylux.sh
-          shellcheck -x scripts/{install-sylux,test-install-sylux,qualify-install-sylux}.sh
+          shellcheck -x scripts/{install-sylux,test-install-sylux,qualify-install-sylux,release-bundle,test-release}.sh
           assets=$(mktemp -d)
           trap 'rm -rf -- "$assets"' EXIT
           source scripts/install-sylux.sh

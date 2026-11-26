@@ -7,7 +7,6 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 version=${SYLUX_QUALIFY_VERSION:-v0.1.0-beta.9}
 mode=${SYLUX_QUALIFY_DOCKER:-clean}
-installer=${SYLUX_QUALIFY_INSTALLER:-scripts/install-sylux.sh}
 bundle=${SYLUX_QUALIFY_BUNDLE:-}
 fixture=$(mktemp -d "${RUNNER_TEMP:?}/sylux-install.XXXXXXXX")
 listener=''
@@ -22,8 +21,8 @@ unset DEBUG PWDEBUG
 umask 077
 
 # Verify the runner and the absence of an installation before changing packages.
-# shellcheck source=scripts/install-sylux.sh
-source scripts/install-sylux.sh
+# shellcheck source=scripts/release-bundle.sh
+source scripts/release-bundle.sh
 check_host
 check_storage /srv
 assert_no_install() {
@@ -73,20 +72,24 @@ expect_refusal() {
 # The candidate script is sourced unchanged; only its network transport is replaced.
 if [[ -n "$bundle" ]]; then
   bundle=$(cd "$bundle" && pwd)
-  installer=$(cd "$(dirname "$installer")" && pwd)/$(basename "$installer")
+  manifest=$(verify_release_bundle "$bundle" "$version" "${GITHUB_SHA:?}" "${SYLUX_QUALIFY_MANIFEST:?}")
+  printf -- '- Installer bundle %s, source %s, SHA256SUMS %s, build image %s\n' \
+    "$version" "$GITHUB_SHA" "$manifest" "$(<"$bundle/image-id.txt")" | tee -a "${GITHUB_STEP_SUMMARY:?}"
+  existing=$(docker_local image ls -q "sylux:$version")
+  [[ -z "$existing" ]] || fail 'The candidate tag is already present before the installer runs.'
   cat > "$fixture/candidate.sh" <<'WRAPPER'
 #!/usr/bin/env bash
-source "$1"
-bundle=$2
-shift 2
+bundle=$1
+shift
+source "$bundle/install-sylux.sh"
 download() { cp -- "$bundle/$3" "$2/$3"; }
 main "$@"
 WRAPPER
   chmod 0755 "$fixture" "$fixture/candidate.sh"
-  export SYLUX_QUALIFY_WRAPPER="$fixture/candidate.sh" SYLUX_QUALIFY_INSTALLER="$installer" SYLUX_QUALIFY_BUNDLE="$bundle"
+  export SYLUX_QUALIFY_WRAPPER="$fixture/candidate.sh" SYLUX_QUALIFY_BUNDLE="$bundle"
 fi
 
-# A beta cannot own a pre-existing process on the loopback port.
+# A fresh installation must leave a pre-existing loopback listener alone.
 python3 - "$fixture/listening" <<'PY' &
 import socket, sys, time
 from pathlib import Path
@@ -102,9 +105,9 @@ for _ in {1..50}; do
   sleep 0.1
 done
 [[ -f "$fixture/listening" ]] || fail 'Port listener did not become ready.'
-install_command=(bash "$installer" "$version" --yes)
+install_command=(bash scripts/install-sylux.sh "$version" --yes)
 if [[ -n "$bundle" ]]; then
-  install_command=(bash "$fixture/candidate.sh" "$installer" "$bundle" "$version" --yes)
+  install_command=(bash "$fixture/candidate.sh" "$bundle" "$version" --yes)
 fi
 if conflict=$(sudo "${install_command[@]}" 2>&1); then
   fail 'The port conflict was accepted.'
@@ -191,3 +194,14 @@ else
 fi
 
 SYLUX_QUALIFY_VERSION="$version" SYLUX_QUALIFY_DOCKER="$mode" node scripts/qualify-install-sylux.mjs "$fixture"
+if [[ -n "$bundle" ]]; then
+  image=$(inspect_image "sylux:$version" "$version" "$GITHUB_SHA")
+  container=$(sudo docker --host unix:///var/run/docker.sock compose --project-directory /opt/sylux ps -q sylux)
+  [[ "$(docker_local inspect --format '{{.Image}}' "$container")" == "$image" ]]
+  {
+    printf -- '- Ubuntu 24.04 x86_64, runner %s, local ext4, Docker Engine %s, Compose %s (%s)\n' \
+      "$ImageVersion" "$(docker_local version --format '{{.Server.Version}}')" "$(docker_local compose version --short)" "$mode"
+    printf -- '- Locally loaded and running %s, linux/amd64, OCI version %s, revision %s\n' "$image" "$version" "$GITHUB_SHA"
+    printf -- '- Trusted Chromium passed administrator creation, fresh sign-in, first upload, byte-exact download, restart and same-version rerun.\n'
+  } | tee -a "$GITHUB_STEP_SUMMARY"
+fi

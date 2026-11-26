@@ -1,49 +1,64 @@
 name: GHCR image
 
-# Publish the qualified release archive unchanged. The last run sets the beta tag.
 on:
   workflow_call:
     inputs:
       version:
         required: true
         type: string
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Published beta release, for example v0.1.0-beta.2'
+      manifest:
         required: true
         type: string
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   push:
+    if: >-
+      github.event_name == 'push' && github.ref == format('refs/tags/{0}', inputs.version) &&
+      github.event.created && !github.event.forced && !github.event.deleted &&
+      github.repository == 'nicoleman0/sylux' && !github.event.repository.private &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      QUALIFIED_MANIFEST: ${{ inputs.manifest }}
     steps:
-      - name: Load the verified release image
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Load the verified public release image
+        id: image
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ inputs.version }}
         run: |
-          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]] || exit 1
-          gh release download "$VERSION" --pattern sylux-image.tar.gz --pattern SHA256SUMS --dir "$RUNNER_TEMP/release"
-          cd "$RUNNER_TEMP/release"
-          grep -E '  sylux-image\.tar\.gz$' SHA256SUMS | sha256sum --check
-          docker load -i sylux-image.tar.gz
-          test "$(docker image inspect "sylux:$VERSION" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$VERSION"
-      - name: Push to GHCR
+          source scripts/release-bundle.sh
+          check_release_publish_ref "$RELEASE_VERSION" || fail 'Release tag is not authorized.'
+          test -n "$QUALIFIED_MANIFEST"
+          alias_tag=$(release_alias "$RELEASE_VERSION")
+          test "$(gh release view "$RELEASE_VERSION" --json isDraft --jq .isDraft)" = false
+          bundle="$RUNNER_TEMP/release"
+          gh release download "$RELEASE_VERSION" --pattern "*" --dir "$bundle"
+          verify_release_bundle "$bundle" "$RELEASE_VERSION" "$GITHUB_SHA" "$QUALIFIED_MANIFEST"
+          id=$(load_release_image "$bundle" "$RELEASE_VERSION" "$GITHUB_SHA")
+          printf 'id=%s\nalias=%s\n' "$id" "$alias_tag" >> "$GITHUB_OUTPUT"
+      - name: Push the exact image and its channel alias
         env:
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
-          IMAGE: ghcr.io/${{ github.repository }}
-          VERSION: ${{ inputs.version }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+          ALIAS: ${{ steps.image.outputs.alias }}
         run: |
+          image="ghcr.io/$GITHUB_REPOSITORY"
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
-          for tag in "$VERSION" beta; do
-            docker tag "sylux:$VERSION" "$IMAGE:$tag"
-            docker push "$IMAGE:$tag"
+          for tag in "$RELEASE_VERSION" "$ALIAS"; do
+            docker tag "$IMAGE_ID" "$image:$tag"
+            docker push "$image:$tag"
           done

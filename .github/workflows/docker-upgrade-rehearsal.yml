@@ -6,6 +6,7 @@ on:
       - .github/workflows/docker-upgrade-rehearsal.yml
       - scripts/rehearse-docker-upgrade.*
       - scripts/install-sylux.sh
+      - scripts/release-bundle.sh
       - docs/docker-beta.md
       - docs/docker-upgrade-rehearsal.md
   workflow_dispatch:

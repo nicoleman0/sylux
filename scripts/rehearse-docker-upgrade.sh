@@ -7,16 +7,25 @@ umask 077
   { echo 'Requires a disposable GitHub-hosted Linux x64 runner.' >&2; exit 1; }
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-# shellcheck source=scripts/install-sylux.sh
-source scripts/install-sylux.sh
+# shellcheck source=scripts/release-bundle.sh
+source scripts/release-bundle.sh
 check_host
 fixture="${RUNNER_TEMP:?}/sylux-upgrade"
 project=sylux-upgrade-rehearsal
 docker_local() { sudo -n env -i PATH="$PATH" HOME=/root docker --host unix:///var/run/docker.sock "$@"; }
 prior=v0.1.0-beta.9
 candidate=v0.1.0-beta.10
-
 prior_manifest=144ebe0038ae63679b2c7b0a96a2f5c416bd631d0f88f3c572d99ff52ac43425
+candidate_manifest=d6d61886c01d21e21f4bd1a9150423b30d8f88631c53d6e5a2376d133bbff349
+candidate_bundle=${SYLUX_REHEARSE_BUNDLE:-}
+if [[ -n "$candidate_bundle" && "${1:-}" != cleanup ]]; then
+  prior=$candidate
+  prior_manifest=$candidate_manifest
+  candidate=${SYLUX_REHEARSE_VERSION:?}
+  candidate_manifest=${SYLUX_REHEARSE_MANIFEST:?}
+  [[ "$(release_channel "$candidate")" == stable && "$candidate_manifest" =~ ^[a-f0-9]{64}$ ]] ||
+    fail 'Expected a stable candidate version and a qualified SHA256SUMS hash.'
+fi
 
 rehearsal_compose() {
   local release=$1 env_file=$2
@@ -82,14 +91,23 @@ evidence() {
 
 prepare_release() {
   local release=$1 manifest_hash=$2 release_dir="$fixture/$1"
-  local revision image_id archive_hash existing_image
+  local revision image_id archive_hash existing_image package
   mkdir "$release_dir"
-  revision=$(fetch_bundle "$release" "$release_dir")
-  printf '%s  %s\n' "$manifest_hash" "$release_dir/SHA256SUMS" | sha256sum --check --status
-  existing_image=$(docker_local image ls -q "sylux:$release")
-  [[ -z "$existing_image" ]]
-  docker_local load --input "$release_dir/sylux-image.tar.gz"
-  image_id=$(inspect_image "sylux:$release" "$release" "$revision")
+  if [[ "$release" == "$candidate" && -n "$candidate_bundle" ]]; then
+    revision=${GITHUB_SHA:?}
+    verify_release_bundle "$candidate_bundle" "$release" "$revision" "$manifest_hash"
+    cp -- "$candidate_bundle/"* "$release_dir/"
+    image_id=$(load_release_image "$release_dir" "$release" "$revision")
+    package="local workflow artifact ($release)"
+  else
+    revision=$(fetch_bundle "$release" "$release_dir")
+    printf '%s  %s\n' "$manifest_hash" "$release_dir/SHA256SUMS" | sha256sum --check --status
+    existing_image=$(docker_local image ls -q "sylux:$release")
+    [[ -z "$existing_image" ]]
+    docker_local load --input "$release_dir/sylux-image.tar.gz"
+    image_id=$(inspect_image "sylux:$release" "$release" "$revision")
+    package="https://github.com/nicoleman0/sylux/releases/tag/$release"
+  fi
   printf '%s\n' "$image_id" >"$release_dir/local-image-id"
   if [[ "$release" == "$prior" ]]; then
     sed -e "s|^SYLUX_IMAGE=.*|SYLUX_IMAGE=$image_id|" \
@@ -100,9 +118,9 @@ prepare_release() {
   fi
   rehearsal_compose "$release" "$release_dir/.env" config -q
   archive_hash=$(sha256sum "$release_dir/sylux-image.tar.gz")
-  evidence "Package: https://github.com/nicoleman0/sylux/releases/tag/$release"
+  evidence "Package: $package"
   evidence "Source $revision, manifest $manifest_hash, image archive ${archive_hash%% *}"
-  evidence "Build image $(<"$release_dir/image-id.txt"), loaded image $image_id"
+  evidence "Build image $(<"$release_dir/image-id.txt"), loaded image $image_id, linux/amd64"
 }
 
 start_release() {
@@ -198,6 +216,10 @@ rollback() {
   stage='comparing the rollback with the pre-upgrade baseline'
   python3 scripts/rehearse-docker-upgrade.py verify "$fixture" >&3 2>&3
   python3 scripts/rehearse-docker-upgrade.py trash-bytes "$fixture" >&3 2>&3
+  if [[ -n "$candidate_bundle" ]]; then
+    stage='comparing named grants after rollback'
+    python3 scripts/rehearse-docker-upgrade.py verify-grants "$fixture" >&3 2>&3
+  fi
   [[ "$(stat -c '%d:%i' "$fixture/live")" == "$live_identity" ]]
   require_loopback_listener
   evidence "Fresh-root rollback to $prior passed. The upgraded root was retained and recipient access stayed restricted to host loopback."
@@ -254,17 +276,22 @@ sudo chmod 0600 "$fixture/tls/key.pem"
 sudo cat "$fixture/tls/cert.pem" >"$fixture/trust.pem"
 openssl verify -CAfile "$fixture/trust.pem" -verify_ip 127.0.0.1 "$fixture/trust.pem"
 
-stage='verifying and loading the beta.9 release'
+stage="verifying and loading published $prior"
 prepare_release "$prior" "$prior_manifest"
-stage='initializing and starting beta.9'
+stage="initializing and starting $prior"
 rehearsal_compose "$prior" "$fixture/$prior/.env" run --rm -T --pull never sylux init --root /var/lib/sylux
 start_release "$prior" "$fixture/$prior/.env" "$fixture/live"
-stage='seeding and comparing the beta.9 fixture'
+stage="seeding and comparing the $prior fixture"
 sudo cat "$fixture/live/secrets/setup.authorization" |
   python3 scripts/rehearse-docker-upgrade.py seed "$fixture" >&3 2>&3
 python3 scripts/rehearse-docker-upgrade.py verify "$fixture" >&3 2>&3
 
-stage='stopping beta.9 and verifying its pre-upgrade archive'
+if [[ -n "$candidate_bundle" ]]; then
+  stage='establishing and comparing named grants before the archive'
+  python3 scripts/rehearse-docker-upgrade.py grants "$fixture" >&3 2>&3
+  python3 scripts/rehearse-docker-upgrade.py verify-grants "$fixture" >&3 2>&3
+fi
+stage="stopping $prior and verifying its pre-upgrade archive"
 stop_release "$prior"
 sudo tar --numeric-owner -C "$fixture/live" -cpf "$fixture/archive/backup.tar" .
 sudo chmod 0600 "$fixture/archive/backup.tar"
@@ -275,16 +302,18 @@ archive_hash=$(sudo cut -d' ' -f1 "$fixture/archive/backup.tar.sha256")
 printf '%s\n' "$archive_hash" >"$fixture/pre-upgrade-archive.sha256"
 evidence "Verified stopped-service pre-upgrade archive SHA-256: $archive_hash"
 
-stage='verifying and loading the beta.10 release'
-prepare_release "$candidate" d6d61886c01d21e21f4bd1a9150423b30d8f88631c53d6e5a2376d133bbff349
-stage='starting beta.10 on the existing root'
+stage="verifying and loading $candidate"
+prepare_release "$candidate" "$candidate_manifest"
+stage="starting $candidate on the existing root"
 start_release "$candidate" "$fixture/$candidate/.env" "$fixture/live"
-stage='comparing beta.10 with the beta.9 baseline'
+stage="comparing $candidate with the $prior baseline"
 python3 scripts/rehearse-docker-upgrade.py verify "$fixture" >&3 2>&3
-stage='verifying the original bytes of retained Trash on beta.10'
+stage='verifying the original bytes of retained Trash'
 python3 scripts/rehearse-docker-upgrade.py trash-bytes "$fixture" >&3 2>&3
-stage='recording beta.10 named library grant and revocation'
-python3 scripts/rehearse-docker-upgrade.py grants "$fixture" >&3 2>&3
+stage='checking named library grant and revocation on the upgraded service'
+if [[ -z "$candidate_bundle" ]]; then
+  python3 scripts/rehearse-docker-upgrade.py grants "$fixture" >&3 2>&3
+fi
 python3 scripts/rehearse-docker-upgrade.py verify-grants "$fixture" >&3 2>&3
 stage='checking retained rollback inputs'
 verify_pre_upgrade_archive

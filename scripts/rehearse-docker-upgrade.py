@@ -264,10 +264,17 @@ def verify_grants(trust, state, baseline):
     check(download(admin, "owner named library download", f"/entries/{entry_id}/content", "notes.txt")
           == baseline["download"], "Owner named library bytes changed.")
     active = baseline["active"]
+    grants = admin.data("owner active grant inventory", "GET",
+                        f"/entries/{active['library_id']}/direct-grants", 200)["items"]
+    check(grants == [active["grant"]], "Owner active grant differed.")
     incoming = member.data("member incoming shares", "GET", "/shared", 200)["items"]
     check([item["entry"]["id"] for item in incoming] == [active["library_id"]], "Active grant missing or unexpected shares.")
     check([item["id"] for item in items(member, "active shared listing", f"/shared/folders/{active['library_id']}/children")] == [active["entry_id"]], "Active grant listing differed.")
-    check(download(member, "active shared download", f"/shared/entries/{active['entry_id']}/content", "notes.txt") == active["download"], "Active grant bytes changed.")
+    path = f"/shared/entries/{active['entry_id']}/content"
+    check(download(member, "active shared download", path, "notes.txt") == active["download"],
+          "Active grant bytes changed.")
+    member.request("member private route still denied", "GET", f"/entries/{active['entry_id']}/content", 404)
+    Client(trust).request("anonymous named grant download denied", "GET", path, 401)
     evidence("Active and revoked library grants and bytes matched.")
 
 
@@ -299,9 +306,13 @@ def grants(trust, state):
     evidence("Named library baseline passed. The member discovered, listed and downloaded the grant, then lost access on revoke. Owner bytes still matched.")
     active_library = admin.data("create active library", "POST", "/libraries", 201, {"name": "Active rehearsal"})
     active_entry = upload(admin, active_library, "notes.txt")
-    admin.data("grant active library", "POST", f"/entries/{active_library['id']}/direct-grants", 200, {"handle": "fixture-member"})
+    active_grant = admin.data("grant active library", "POST", f"/entries/{active_library['id']}/direct-grants",
+                              200, {"handle": "fixture-member"})
+    active_download = download(admin, "owner active library download",
+                               f"/entries/{active_entry['id']}/content", "notes.txt")
     return {"library": inventory(library), "entry_id": uploaded["id"], "download": observed,
-            "active": {"library_id": active_library["id"], "entry_id": active_entry["id"], "download": observed}}
+            "active": {"library_id": active_library["id"], "entry_id": active_entry["id"],
+                       "grant": active_grant, "download": active_download}}
 
 
 def save(path, value):

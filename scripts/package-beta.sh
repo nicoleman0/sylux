@@ -2,15 +2,17 @@
 set -Eeuo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-version=${1:?Usage: scripts/package-beta.sh vX.Y.Z-beta.N NEW_OUTPUT_DIRECTORY}
+version=${1:?Usage: scripts/package-beta.sh VERSION NEW_OUTPUT_DIRECTORY}
 output=${2:?Provide a new output directory}
-[[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]] || { echo 'Expected vX.Y.Z-beta.N' >&2; exit 1; }
+# shellcheck source=scripts/install-sylux.sh
+source scripts/install-sylux.sh
+release_channel "$version" >/dev/null || fail 'Expected vX.Y.Z or vX.Y.Z-beta.N.'
 git diff --quiet HEAD -- || { echo 'Commit tracked changes before packaging' >&2; exit 1; }
 [[ ! -e "$output" ]] || { echo 'Output directory already exists' >&2; exit 1; }
 revision=$(git rev-parse HEAD)
 context=$(mktemp -d "${TMPDIR:-/tmp}/sylux-package.XXXXXXXX")
 trap 'rm -rf -- "$context"' EXIT
-git archive HEAD | tar -x -C "$context"
+git archive "$revision" | tar -x -C "$context"
 mkdir -p -- "$output"
 output=$(cd "$output" && pwd)
 image="sylux:$version"

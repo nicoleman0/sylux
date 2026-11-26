@@ -72,5 +72,5 @@ the account handle. Compose supplies the usual source mount; export reads its
 metadata and payloads without changing them, including WAL and SHM files.
 The existing writer lock is opened read-write, so keep the source bind mount
 writable even though export does not modify its contents.
-The export is private account data. See [Docker beta install](docker-beta.md)
+The export is private account data. See [Docker install](docker-beta.md)
 for the service configuration and restart procedure.
