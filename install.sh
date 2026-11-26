@@ -75,8 +75,9 @@ install_sylux() (
     url="https://github.com/nicoleman0/sylux/releases/download/$version/install-sylux.sh"
     installer=$(mktemp)
     trap 'rm -f "$installer"' EXIT
-    download --output "$installer" "$url" && [ -s "$installer" ] ||
+    if ! download --output "$installer" "$url" || [ ! -s "$installer" ]; then
         fail "Could not download the installer for $version."
+    fi
     actual=$(sha256sum <"$installer")
     [ "sha256:${actual%% *}" = "$digest" ] ||
         fail "The installer checksum did not match for $version."
