@@ -240,7 +240,7 @@ findmnt -T /mnt/backup -o TARGET,SOURCE,FSTYPE,OPTIONS || exit 1
 sudo install -d -m 0700 /mnt/backup/sylux || exit 1
 sudo tar --numeric-owner -C /srv/sylux -cpf /mnt/backup/sylux/backup.tar . || exit 1
 sudo tar -tf /mnt/backup/sylux/backup.tar >/dev/null || exit 1
-sudo sh -c 'sha256sum /mnt/backup/sylux/backup.tar > /mnt/backup/sylux/backup.tar.sha256' || exit 1
+sudo sh -c 'cd /mnt/backup/sylux && sha256sum backup.tar > backup.tar.sha256' || exit 1
 docker compose up -d || exit 1
 ```
 
@@ -254,7 +254,7 @@ To restore, stop Sylux, verify the checksum, and extract into a **new empty dire
 docker compose stop || exit 1
 RUNNING=$(docker compose ps --status running -q) || exit 1
 test -z "$RUNNING" || exit 1
-sudo sha256sum -c /mnt/backup/sylux/backup.tar.sha256 || exit 1
+sudo sh -c 'cd /mnt/backup/sylux && sha256sum -c backup.tar.sha256' || exit 1
 sudo mkdir -m 0700 /srv/sylux-restore || exit 1
 sudo chown 10001:10001 /srv/sylux-restore || exit 1
 sudo tar --numeric-owner --same-owner --same-permissions \
@@ -282,7 +282,7 @@ UID/GID 10001 and `/var/lib/sylux` bind mount as the service:
 docker compose stop || exit 1
 RUNNING=$(docker compose ps --status running -q) || exit 1
 test -z "$RUNNING" || exit 1
-sudo sha256sum -c /mnt/backup/sylux/backup.tar.sha256 || exit 1
+sudo sh -c 'cd /mnt/backup/sylux && sha256sum -c backup.tar.sha256' || exit 1
 bash <<'RECOVERY' || exit 1
 set +x
 set +o history
@@ -351,7 +351,25 @@ For a plain-file copy of one account, stop Sylux and follow the
 
 Keep the current release archive, `.env`, and local image ID. Stop the service and make a verified pre-upgrade archive as in step 4 **without starting it again**. Download and verify all assets for the new release into a new directory as in step 1, then load and inspect its version tag. Copy the prior `.env` into the new directory, set `SYLUX_IMAGE` to the newly inspected local ID, run `docker compose config -q`, and start there with `docker compose up -d`. Check sign-in and known file downloads.
 
-If the new image fails before it starts, restore the prior image ID in `.env` and start it against the unchanged root. If the new image starts or may have written to the root, stop it, restore the pre-upgrade archive into a new empty directory after applying the [recipient restriction in §4](#4-stop-back-up-and-restore), set both the prior image ID and `SYLUX_DATA_DIR` in `.env`, and start. Do not run a previous image against a root that a newer image may have changed. Upgrade and schema rollback have not been qualified.
+If the new image fails before it starts, restore the prior image ID in `.env`
+and start it against the unchanged root. If the new image starts or may have
+written to the root, use the pre-upgrade archive and its matching release:
+
+1. [Restrict recipient access](#restrict-share-access-before-restoring) and
+   confirm the upgraded service has stopped.
+2. Verify the archive checksum and the prior release bundle. Restore into a
+   new empty directory as in [step 4](#4-stop-back-up-and-restore). Preserve the
+   upgraded root until recovery is verified.
+3. Use the prior release's Compose file and set the matching immutable local
+   image ID and recovered `SYLUX_DATA_DIR` in its `.env`. Validate the
+   configuration with `docker compose config -q` and start the prior release.
+4. Check fresh sign-ins, expected account and recipient access, known downloads,
+   Trash, and working and revoked links against your pre-upgrade records.
+   Keep the restriction in place until owners review restored access.
+
+The [disposable rehearsal](docker-upgrade-rehearsal.md) exercises this
+fresh-root procedure for beta.9 after beta.10. Its scope is the pinned beta
+packages and the disposable Ubuntu/ext4 setup.
 
 Send beta feedback and the host, Docker Engine/Compose versions, image ID, and a brief reproduction to **hello@corvus-dev.com**. Remove setup tokens, passwords, private keys, and file contents before sharing logs.
 
