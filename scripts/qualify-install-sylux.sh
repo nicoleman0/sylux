@@ -62,11 +62,21 @@ expect_refusal() {
     'Another installer is running' 'Could not check port 3000' \
     'Port 3000 is already in use' 'Existing /srv/sylux has no installer record' \
     'Unexpected /srv/sylux ownership or permissions' 'Data directory is not empty' \
-    'Sylux project containers exist'; do
+    'Sylux project containers exist' 'Requires Ubuntu 24.04 x86_64' \
+    'Requires a systemd host' 'Run on the Ubuntu host, outside containers' \
+    'Run with sudo' 'Could not identify the filesystem for /srv/sylux' \
+    'Expected a private installer directory at /opt/sylux' \
+    'Expected private, root-owned installer records for version and phase' \
+    'Could not read the recorded release tag' 'The recorded release tag is invalid' \
+    'Only an interrupted initializing phase can be reset' \
+    'Could not check whether the data directory is empty'; do
     if [[ "$output" == *"$known"* ]]; then
       fail "$label: unexpected installer refusal category: $known."
     fi
   done
+  if [[ "$output" == *"unbound variable"* ]]; then
+    fail "$label: installer encountered an unbound variable."
+  fi
   fail "$label: unexpected installer output (withheld)."
 }
 
