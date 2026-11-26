@@ -18,7 +18,7 @@ const filename = 'first-upload.bin';
 const phasePath = '/opt/sylux/phase';
 const authorizationPath = '/srv/sylux/secrets/setup.authorization';
 const installer = process.env.SYLUX_QUALIFY_WRAPPER
-  ? ['bash', process.env.SYLUX_QUALIFY_WRAPPER, process.env.SYLUX_QUALIFY_INSTALLER, process.env.SYLUX_QUALIFY_BUNDLE, version, '--yes']
+  ? ['bash', process.env.SYLUX_QUALIFY_WRAPPER, process.env.SYLUX_QUALIFY_BUNDLE, version, '--yes']
   : ['bash', 'scripts/install-sylux.sh', version, '--yes'];
 const dockerPackageNames = mode === 'existing' ? ['containerd.io', 'docker-ce', 'docker-ce-cli'] : ['docker.io', 'docker-compose-v2'];
 const compose = ['docker', '--host', 'unix:///var/run/docker.sock', 'compose', '--project-directory', '/opt/sylux'];
@@ -156,7 +156,7 @@ try {
   assert.equal(started(id), before);
   console.log('Unsubmitted browser setup resumed with the same authorization and running Docker service.');
 
-  stage = 'creating the administrator and uploading through the browser';
+  stage = 'creating the administrator in trusted Chromium';
   await session(browser, async page => {
     await page.getByRole('button', { name: 'First-time setup' }).click();
     await page.getByLabel('One-use setup authorization').fill(token);
@@ -164,10 +164,14 @@ try {
     await page.getByLabel('Password').fill(password);
     await page.getByRole('button', { name: 'Create administrator' }).click();
     await expect(page.getByRole('status')).toContainText('Setup complete');
+    stage = 'signing in as the new administrator';
     await signIn(page);
+    stage = 'uploading the first file through the browser';
     await page.getByLabel('Choose files to upload').setInputFiles({
       name: filename, mimeType: 'application/octet-stream', buffer: payload,
     });
+    await expect(page.getByText(filename, { exact: true })).toBeVisible();
+    stage = 'downloading and comparing the first file';
     await verifyDownload(page);
   });
   console.log('Trusted Chromium created the administrator and uploaded and downloaded the first file.');

@@ -1,15 +1,15 @@
-# Docker beta install
+# Docker install
 
-This is a beta procedure for **one** Sylux instance on Ubuntu 24.04 x86_64, with a local ext4 data directory and SQLite. Use only a published release that includes every file below. Do not keep your only copy of important files in Sylux.
+Use this procedure for **one** Sylux instance on Ubuntu 24.04 x86_64, with a local ext4 data directory and SQLite. Use a published release and the matching guide shipped with it. Do not keep your only copy of important files in Sylux.
 
-The tested path used a disposable Ubuntu 24.04 x86_64 runner, an ext4 bind mount, TLS on host loopback, restart and replacement, and a stopped-service archive restore. Physical storage durability, a separate physical client, upgrades, interruption recovery, and this Compose file have not been qualified. Native LXC is a separate installation path.
+The tested path used a disposable Ubuntu 24.04 x86_64 runner, an ext4 bind mount, TLS on host loopback, restart and replacement, and a stopped-service archive restore. See [the upgrade rehearsal](docker-upgrade-rehearsal.md) for the tested upgrade and rollback. The rehearsal covers only its pinned packages on a disposable runner; upgrades and this Compose file are not qualified for other environments. Physical storage durability, a separate physical client, and power interruption recovery remain outside its scope. Native LXC is a separate installation path.
 
 ## Docker quick start
 
-Use an Ubuntu 24.04 x86_64 host running systemd, with `/srv` on local ext4 and TCP port 3000 free. The installer uses Ubuntu's Docker and Compose packages when Docker is absent. An existing installation needs a working local Docker Engine and the Compose v2 plugin. Download and review `install-sylux.sh` from a [published beta release](https://github.com/nicoleman0/sylux/releases) that includes it, then use that same version tag:
+Use an Ubuntu 24.04 x86_64 host running systemd, with `/srv` on local ext4 and TCP port 3000 free. The installer uses Ubuntu's Docker and Compose packages when Docker is absent. An existing installation needs a working local Docker Engine and the Compose v2 plugin. Download and review `install-sylux.sh` from a [published release](https://github.com/nicoleman0/sylux/releases) that includes it. Pass its exact tag, for example `v0.1.0` for stable or `v0.1.0-beta.10` for beta.
 
 ```sh
-sudo bash ./install-sylux.sh '<published beta tag>'
+sudo bash ./install-sylux.sh '<published version tag>'
 ```
 
 The installer displays the privileged changes and asks before proceeding. It prepares UID/GID 10001, the verified release and TLS files under `/opt/sylux`, and the private data directory `/srv/sylux`. Use `--yes` only after reviewing the plan if you need unattended installation. Checksums detect mismatched downloads. The release and checksum share the same publisher.
@@ -74,7 +74,7 @@ test "$(docker image inspect "sylux:$RELEASE" --format '{{.Os}}/{{.Architecture}
 test "$(docker image inspect "sylux:$RELEASE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$RELEASE" || exit 1
 ```
 
-The local image ID is a full `sha256:<64 hex digits>` value. `image-id.txt` records the build engine's ID; another Docker image store may report a different ID for the loaded image. Compose pins the locally inspected ID with `pull_policy: never`, so it neither builds nor requests an image from a registry. Keep the archive and checksum for rollback. The source Dockerfile can be built for development, but that is outside this prebuilt-image install. Each published release is also pushed unchanged to `ghcr.io/nicoleman0/sylux:<release tag>`, and the `beta` tag follows the newest one; this guide does not use them.
+The local image ID is a full `sha256:<64 hex digits>` value. `image-id.txt` records the build engine's ID; another Docker image store may report a different ID for the loaded image. Compose pins the locally inspected ID with `pull_policy: never`, so it neither builds nor requests an image from a registry. Keep the archive and checksum for rollback. The source Dockerfile can be built for development, but that is outside this prebuilt-image install. The release workflow also pushes the exact release tag to `ghcr.io/nicoleman0/sylux`. Stable releases update `latest` and beta releases update `beta`. This procedure uses the archive from the GitHub release.
 
 ## 2. Prepare the host
 
@@ -371,7 +371,7 @@ The [disposable rehearsal](docker-upgrade-rehearsal.md) exercises this
 fresh-root procedure for beta.9 after beta.10. Its scope is the pinned beta
 packages and the disposable Ubuntu/ext4 setup.
 
-Send beta feedback and the host, Docker Engine/Compose versions, image ID, and a brief reproduction to **hello@corvus-dev.com**. Remove setup tokens, passwords, private keys, and file contents before sharing logs.
+Send feedback and the host, Docker Engine/Compose versions, image ID, and a brief reproduction to **hello@corvus-dev.com**. Remove setup tokens, passwords, private keys, and file contents before sharing logs.
 
 Docker reference: [Compose bind mounts](https://docs.docker.com/reference/compose-file/services/#volumes), [variable interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/), [`docker compose run`](https://docs.docker.com/reference/cli/docker/compose/run/), and [pull policy](https://docs.docker.com/reference/compose-file/services/#pull_policy).
 

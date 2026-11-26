@@ -7,6 +7,17 @@ data_dir=/srv/sylux
 origin=https://127.0.0.1:3000
 release_assets=(compose.yaml docker-beta.md env.example image-id.txt release.json sylux-image.tar.gz)
 
+release_channel() {
+  local version=${1:-} base='v[0-9]+\.[0-9]+\.[0-9]+'
+  if [[ "$version" =~ ^${base}$ ]]; then
+    printf 'stable\n'
+  elif [[ "$version" =~ ^${base}-beta\.[1-9][0-9]*$ ]]; then
+    printf 'beta\n'
+  else
+    return 1
+  fi
+}
+
 fail() {
   printf 'Sylux install: %s\n' "$*" >&2
   exit 1
@@ -31,14 +42,14 @@ download() {
 }
 
 verify_bundle() {
-  python3 - "$@" "${release_assets[@]}" <<'PY'
+  python3 - "$1" "$2" "${3:-}" "${release_assets[@]}" <<'PY'
 import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 
-root, version, *required = sys.argv[1:]
+root, version, expected_revision, *required = sys.argv[1:]
 root = Path(root)
 try:
     manifest = root.joinpath("SHA256SUMS").read_text(encoding="ascii")
@@ -50,6 +61,15 @@ try:
         entries[name] = digest
     if set(entries) not in (set(required), set(required) | {"install-sylux.sh"}):
         raise ValueError()
+    if expected_revision:
+        expected_files = set(required) | {"install-sylux.sh", "SHA256SUMS"}
+        files = list(root.iterdir())
+        if (
+            set(entries) != expected_files - {"SHA256SUMS"}
+            or {path.name for path in files} != expected_files
+            or any(path.is_symlink() or not path.is_file() or not path.stat().st_size for path in files)
+        ):
+            raise ValueError()
     for name, digest in entries.items():
         with root.joinpath(name).open("rb") as stream:
             if hashlib.file_digest(stream, "sha256").hexdigest() != digest:
@@ -61,6 +81,7 @@ try:
         metadata["version"] != version
         or metadata["platform"] != "linux/amd64"
         or not re.fullmatch(r"[a-f0-9]{40}", revision)
+        or (expected_revision and revision != expected_revision)
         or metadata["source_url"] != f"https://github.com/nicoleman0/sylux/tree/{revision}"
         or not re.fullmatch(r"sha256:[a-f0-9]{64}", build_id)
         or metadata["image_id"] != build_id
@@ -320,11 +341,12 @@ start_service() {
 main() {
   local version=${1:-} container revision phase image recorded init_digest
   if [[ "$version" == --help && $# -eq 1 ]]; then
-    printf 'Usage: sudo bash install-sylux.sh vX.Y.Z-beta.N [--yes]\n'
+    printf 'Usage: sudo bash install-sylux.sh <vX.Y.Z or vX.Y.Z-beta.N> [--yes]\n'
     return
   fi
-  [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ &&
-     $# -le 2 && ( $# -eq 1 || "$2" == --yes ) ]] || fail 'Pass a published beta tag and optionally --yes.'
+  if ! release_channel "$version" >/dev/null || (( $# > 2 )) || [[ "${2---yes}" != --yes ]]; then
+    fail 'Pass a published version tag (vX.Y.Z or vX.Y.Z-beta.N) and optionally --yes.'
+  fi
   export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   umask 077
   check_host

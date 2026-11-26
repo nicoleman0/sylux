@@ -45,7 +45,7 @@ Browser download took about 9 seconds in the baseline logs. Keep fresh browser i
 
 ## Verification procedure
 
-Dispatch `beta-release.yml` on the feature branch with a valid unused beta version and `publish=false`. Record run IDs, revisions, runner images, cache keys and complete gate results.
+Dispatch `beta-release.yml` on the feature branch with the `version` input. A stable version such as `v0.1.0` also runs the packaged upgrade and rollback. Dispatch runs package the run SHA and upload the bundle as a run artifact. Release and GHCR publication require a newly pushed version tag from the repository owner on a commit in `main`. Record run IDs, revisions, runner images, cache keys and complete gate results.
 
 | Input | Expected observation |
 | --- | --- |
