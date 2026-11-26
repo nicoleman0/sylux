@@ -27,7 +27,7 @@ Before: `2026-11-15T08-44-29.591Z-full`. After: `2026-11-15T08-48-34.883Z-full`.
 
 Search is deliberately excluded to separate refresh reduction from SYL-58. The existing broad benchmark also opens Trash after upload; its separate 100k browser crash remains SYL-59 work. An upload completion sample does not make the full run a pass.
 
-Raw runs remain in ignored `reports/syl-48/`, including `samples.jsonl`, `resources.jsonl`, `run.json`, `source.diff` and harness snapshots. The adjacent JSON retains the upload samples, full progress events, attribution, lifecycle and hashes of raw files. It contains no credentials or fixture paths.
+Raw runs remain in ignored `reports/syl-48/`, including `samples.jsonl`, `resources.jsonl`, `run.json`, `source.diff` and harness snapshots. The [upload samples](measurements/upload-refresh-samples.json) file retains the upload samples, full progress events, attribution, lifecycle and hashes of raw files. It contains no credentials or fixture paths.
 
 ## UI comparison and verification
 

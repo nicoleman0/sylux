@@ -67,7 +67,7 @@ Medians in milliseconds, with requests per five-character burst:
 
 All 48 samples recorded zero stale renders. Median columns are calculated
 independently, so their rounded values need not add to the median total.
-[Raw samples](search-scheduling-2026-11-15.json) retain each interval.
+[Raw samples](measurements/search-scheduling-2026-11-15.json) retain each interval.
 
 120 ms is the lowest tested delay that coalesced both typing rates into one
 request. It reduced final-input-to-results by about 128–131 ms from the baseline.

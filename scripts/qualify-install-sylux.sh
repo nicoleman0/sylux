@@ -61,11 +61,22 @@ expect_refusal() {
     'Requires local ext4 storage' 'service name, UID or GID is already in use' \
     'Another installer is running' 'Could not check port 3000' \
     'Port 3000 is already in use' 'Existing /srv/sylux has no installer record' \
-    'Unexpected /srv/sylux ownership or permissions' 'Data directory is not empty'; do
+    'Unexpected /srv/sylux ownership or permissions' 'Data directory is not empty' \
+    'Sylux project containers exist' 'Requires Ubuntu 24.04 x86_64' \
+    'Requires a systemd host' 'Run on the Ubuntu host, outside containers' \
+    'Run with sudo' 'Could not identify the filesystem for /srv/sylux' \
+    'Expected a private installer directory at /opt/sylux' \
+    'Expected private, root-owned installer records for version and phase' \
+    'Could not read the recorded release tag' 'The recorded release tag is invalid' \
+    'Only an interrupted initializing phase can be reset' \
+    'Could not check whether the data directory is empty'; do
     if [[ "$output" == *"$known"* ]]; then
       fail "$label: unexpected installer refusal category: $known."
     fi
   done
+  if [[ "$output" == *"unbound variable"* ]]; then
+    fail "$label: installer encountered an unbound variable."
+  fi
   fail "$label: unexpected installer output (withheld)."
 }
 
@@ -130,36 +141,41 @@ expect_refusal "$unknown" 'Existing /srv/sylux has no installer record.' 'Unknow
 sudo test ! -e /opt/sylux || fail 'Unknown data fixture created an install record.'
 sudo rm -rf -- /srv/sylux
 
-# Exercise the documented reset on known disposable state before Docker removal.
-python3 - "$fixture/reset.sh" <<'PY_RESET'
-from pathlib import Path
-import sys
-text = Path('docs/docker-beta.md').read_text()
-section = text.split('### Recover an empty interrupted initialization', 1)[1]
-Path(sys.argv[1]).write_text(section.split('```bash\n', 1)[1].split('\n```', 1)[0] + '\n')
-PY_RESET
+# Exercise the installed recovery command before Docker removal.
 sudo mkdir -m 0700 /opt/sylux /srv/sylux
 sudo chown 10001:10001 /srv/sylux
-printf 'initializing\n' | sudo tee /opt/sylux/phase >/dev/null
+sudo install -m 0600 "${bundle:-scripts}/install-sylux.sh" /opt/sylux/install-sylux.sh
+printf '%s\n' "$version" > "$fixture/version"
+printf 'initializing\n' > "$fixture/phase"
+sudo install -o 0 -g 0 -m 0600 -t /opt/sylux "$fixture/version" "$fixture/phase"
+for record in /opt/sylux/{version,phase}; do
+  if ! sudo test -f "$record" || sudo test -L "$record" ||
+     ! metadata=$(sudo stat -c '%u:%g:%a:%h' "$record") || [[ "$metadata" != 0:0:600:1 ]]; then
+    fail "Invalid recovery fixture metadata for ${record##*/}."
+  fi
+done
+reset_command=(sudo bash /opt/sylux/install-sylux.sh --reset-empty-init)
 printf 'fixture\n' | sudo tee /srv/sylux/marker >/dev/null
-if sudo bash "$fixture/reset.sh"; then fail 'Reset accepted nonempty data.'; fi
+if nonempty=$("${reset_command[@]}" 2>&1); then fail 'Reset accepted nonempty data.'; fi
+expect_refusal "$nonempty" 'Data directory is not empty.' 'Reset with data fixture'
 [[ "$(sudo cat /opt/sylux/phase)" == initializing ]] || fail 'Reset changed the initializing phase with data present.'
 sudo test -f /srv/sylux/marker || fail 'Reset removed the data marker.'
 sudo rm /srv/sylux/marker
 sudo docker pull alpine:3.20 >/dev/null
-reset_container=$(sudo docker create --label com.docker.compose.project=sylux alpine:3.20 true)
-if sudo bash "$fixture/reset.sh"; then fail 'Reset accepted an existing project container.'; fi
+reset_container=$(sudo docker create --label com.docker.compose.project=sylux \
+  --label com.docker.compose.oneoff=True alpine:3.20 true)
+if occupied=$("${reset_command[@]}" 2>&1); then fail 'Reset accepted an existing project container.'; fi
+expect_refusal "$occupied" 'Sylux project containers exist.' 'Reset with one-off container fixture'
 [[ "$(sudo cat /opt/sylux/phase)" == initializing ]] || fail 'Reset changed the initializing phase with a container present.'
 sudo docker rm "$reset_container" >/dev/null
-sudo bash "$fixture/reset.sh"
+"${reset_command[@]}"
 [[ "$(sudo cat /opt/sylux/phase)" == prepared ]] || fail 'Reset did not produce the prepared phase.'
-printf '%s\n' "$version" | sudo tee /opt/sylux/version >/dev/null
 printf 'fixture\n' | sudo tee /srv/sylux/marker >/dev/null
 if prepared=$(sudo "${install_command[@]}" 2>&1); then fail 'Prepared state accepted nonempty data.'; fi
 expect_refusal "$prepared" 'Data directory is not empty.' 'Prepared data fixture'
 [[ "$(sudo cat /opt/sylux/phase)" == prepared ]] || fail 'Prepared data refusal changed the phase.'
 sudo test -f /srv/sylux/marker || fail 'Prepared data refusal removed the marker.'
-sudo rm /srv/sylux/marker /opt/sylux/version
+sudo rm /srv/sylux/marker /opt/sylux/version /opt/sylux/install-sylux.sh
 sudo rm /opt/sylux/phase
 sudo rmdir /opt/sylux /srv/sylux
 assert_no_install
@@ -203,6 +219,7 @@ safe_version='^[A-Za-z0-9.+~-]+$'
 printf -- '- Ubuntu 24.04 x86_64, runner %s, local ext4, Docker Engine %s, Compose %s (%s)\n' \
   "$ImageVersion" "$engine_version" "$compose_version" "$mode" | tee -a "${GITHUB_STEP_SUMMARY:?}"
 if [[ -n "$bundle" ]]; then
+  sudo cmp -- "$bundle/install-sylux.sh" /opt/sylux/install-sylux.sh
   image=$(inspect_image "sylux:$version" "$version" "$GITHUB_SHA")
   container=$(qualify_docker compose --project-directory /opt/sylux ps -q sylux)
   [[ "$(docker_local inspect --format '{{.Image}}' "$container")" == "$image" ]]
