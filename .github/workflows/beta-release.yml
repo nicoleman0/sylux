@@ -351,6 +351,20 @@ jobs:
             gh release edit "$RELEASE_VERSION" --latest
           fi
 
+  docker-hub:
+    needs: [qualify, ghcr]
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docker-hub-image.yml
+    with:
+      version: ${{ needs.qualify.outputs.version }}
+      manifest: ${{ needs.qualify.outputs.manifest }}
+      repository: ${{ vars.SYLUX_DOCKER_HUB_REPOSITORY }}
+      username: ${{ vars.SYLUX_DOCKER_HUB_USERNAME }}
+    secrets:
+      token: ${{ secrets.SYLUX_DOCKER_HUB_PUSH_TOKEN }}
+
   ghcr:
     needs: [qualify, publish]
     permissions:
