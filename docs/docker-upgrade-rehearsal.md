@@ -61,4 +61,7 @@ Keep the resulting `expected-grants.json` alongside `expected.json`. After
 the stable upgrade, run `verify`, `trash-bytes` and `verify-grants` against the
 same fixture directory. The last phase verifies the revoked library remains
 unavailable and the active library remains the member's only incoming share,
-with its exact listing and download bytes intact.
+with its exact listing and download bytes intact. For the rollback rehearsal,
+create the named-grant baseline on beta.10 before archiving and verify it again
+after restoring beta.10 with `verify-grants`. The current beta.9 rehearsal does
+not change; it has no library or sharing routes.

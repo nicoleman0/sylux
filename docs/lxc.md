@@ -48,7 +48,7 @@ ownership and the whole root, including secrets and SQLite siblings. Before any 
 Verify the checksum:
 
 ```sh
-sudo sha256sum -c /mnt/backup/sylux/backup.tar.sha256 || exit 1
+sudo sh -c 'cd /mnt/backup/sylux && sha256sum -c backup.tar.sha256' || exit 1
 sudo -v || exit 1
 bash <<'RECOVERY' || exit 1
 set +x
