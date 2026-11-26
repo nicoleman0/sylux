@@ -75,9 +75,11 @@ mirror_image() {
   alias="$destination:$alias"
   alias_digest=$(tag_digest "$alias")
   if [[ -n "$alias_digest" && "$alias_digest" != "$source_digest" ]]; then
-    alias_version=$(crane config "$destination@$alias_digest" | jq -er '
+    if ! alias_version=$(crane config "$destination@$alias_digest" | jq -er '
       select(.config.Labels["org.opencontainers.image.source"] == "https://github.com/nicoleman0/sylux")
-      | .config.Labels["org.opencontainers.image.version"]')
+      | .config.Labels["org.opencontainers.image.version"]'); then
+      fail "Existing $alias is not a labeled Sylux release image; leaving it unchanged."
+    fi
     [[ "$(release_alias "$alias_version")" == "${alias##*:}" &&
       "$(crane digest "$destination:$alias_version")" == "$alias_digest" ]] ||
       fail "Existing $alias cannot be matched to an exact version on its channel."
