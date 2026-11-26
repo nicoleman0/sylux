@@ -25,6 +25,7 @@ fi
 # build.rs embeds web/dist, so build assets before Cargo checks.
 run python3 scripts/test-ci-changes.py
 run python3 scripts/test-ci-workflow.py
+run bash scripts/check-native-syntax.sh
 run python3 scripts/test-ci-comment-structured.py
 run python3 scripts/test-account-authority-check.py
 run npm --prefix web ci

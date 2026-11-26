@@ -30,11 +30,17 @@ class RequiredChecks(unittest.TestCase):
         self.assertIn('group: beta-release-${{ github.event_name }}', source,
                       'Separate dispatch and publication concurrency groups.')
         downloads = re.findall(r'uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093[^\n]*\n        with:\n((?:          [^\n]*\n)+)', source)
-        self.assertEqual(len(downloads), 3, 'Check all three pinned artifact downloads.')
+        identities = []
         for download in downloads:
-            self.assertIn('artifact-ids: ${{ needs.qualify.outputs.artifact }}', download)
+            identity = re.search(r'artifact-ids: \$\{\{ needs\.([a-z-]+)\.outputs\.artifact \}\}', download)
+            self.assertIsNotNone(identity, 'Download artifacts by the producing job’s ID.')
+            identities.append(identity[1])
             self.assertIn('merge-multiple: true', download,
                           'ID downloads must extract directly into the verifier path.')
+        self.assertCountEqual(identities, ['qualify'] * 4 + ['native-qualify'])
+        self.assertIn("needs.native-qualify.result == 'success'", source)
+        self.assertIn('path: release/docker', source)
+        self.assertIn('path: release/native', source)
 
     def test_contract_targets_are_in_required_native_checks(self):
         manifest = tomllib.loads((ROOT / 'Cargo.toml').read_text())
