@@ -56,6 +56,54 @@ expect_failure 'Set SYLUX_DOCKER_HUB_REPOSITORY' mirror_config 'ghcr.io/test/syl
 RELEASE_VERSION=v1.0.0 GITHUB_EVENT_NAME=workflow_dispatch \
   expect_failure 'Release tag is not authorized' publish_mirror
 
+(
+  mkdir "$fixture/bin"
+  export PATH="$fixture/bin:$PATH"
+  cat > "$fixture/bin/crane" <<'SH'
+#!/usr/bin/env bash
+[[ "$1" == digest ]] || exit 2
+case "${2##*:}" in
+  warning)
+    printf 'sha256:%064d\n' 1
+    printf '[WARNING]: fixture registry warning\n' >&2
+    ;;
+  invalid)
+    printf 'extra stdout\nsha256:%064d\n' 1
+    ;;
+  missing-repo|missing-tag|auth|transport)
+    case "${2##*:}" in
+      missing-repo) diagnostic='NAME_UNKNOWN: repository missing' ;;
+      missing-tag) diagnostic='MANIFEST_UNKNOWN: manifest missing' ;;
+      auth) diagnostic='UNAUTHORIZED: access denied' ;;
+      transport) diagnostic='dial tcp: connection refused' ;;
+    esac
+    repository=${2%:*}
+    printf 'Error: GET http://%s/v2/%s/manifests/%s: %s\n' \
+      "${repository%%/*}" "${repository#*/}" "${2##*:}" "$diagnostic" >&2
+    exit 1
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$fixture/bin/crane"
+  lookup=localhost/sylux/mirror
+  digest=$(tag_digest "$lookup:warning" 2> "$fixture/warning") || {
+    cat "$fixture/warning" >&2
+    fail 'Digest lookup with a trailing warning failed.'
+  }
+  [[ "$digest" == "$(printf 'sha256:%064d' 1)" ]]
+  grep -Fxq '[WARNING]: fixture registry warning' "$fixture/warning"
+  for missing in missing-repo missing-tag; do
+    digest=$(tag_digest "$lookup:$missing")
+    [[ -z "$digest" ]]
+  done
+  expect_failure 'Invalid registry digest' tag_digest "$lookup:invalid"
+  expect_failure 'Registry lookup failed' tag_digest "$lookup:auth"
+  grep -Fq 'UNAUTHORIZED: access denied' "$fixture/failed"
+  expect_failure 'Registry lookup failed' tag_digest "$lookup:transport"
+  grep -Fq 'connection refused' "$fixture/failed"
+)
+
 start_registry "$fixture/source.log"
 source_repo="$registry_address/sylux/source"
 start_registry "$fixture/mirror.log"

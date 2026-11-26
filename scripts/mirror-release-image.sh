@@ -19,17 +19,21 @@ mirror_config() {
   printf 'enabled=true\n' >> "$GITHUB_OUTPUT"
 }
 
-tag_digest() {
-  local result
-  if result=$(crane digest "$1" 2>&1); then
-    result=${result##*$'\n'}
-    [[ "$result" =~ ^sha256:[a-f0-9]{64}$ ]] || fail "Invalid registry digest for $1."
-    printf '%s\n' "$result"
-  elif [[ "$result" != *$'\nError: GET '*': MANIFEST_UNKNOWN:'* &&
-    "$result" != *$'\nError: GET '*': NAME_UNKNOWN:'* ]]; then
-    fail "Registry lookup failed for $1. $result"
+tag_digest() (
+  local digest diagnostics error
+  local missing='^Error: GET https?://[^[:space:]]+/manifests/[^[:space:]]+: (MANIFEST_UNKNOWN|NAME_UNKNOWN):'
+  diagnostics=$(mktemp) || fail 'Could not create registry diagnostics file.'
+  trap 'rm -f -- "$diagnostics"' EXIT
+  if digest=$(crane digest "$1" 2> "$diagnostics"); then
+    cat "$diagnostics" >&2
+    [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || fail "Invalid registry digest for $1."
+    printf '%s\n' "$digest"
+  else
+    error=$(<"$diagnostics")
+    [[ -z "$digest" && "${error##*$'\n'}" =~ $missing ]] ||
+      fail "Registry lookup failed for $1. $error"
   fi
-}
+)
 
 image_config_digest() {
   crane manifest "$1" | jq -er '
