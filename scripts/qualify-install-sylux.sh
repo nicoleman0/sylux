@@ -194,18 +194,19 @@ else
 fi
 
 SYLUX_QUALIFY_VERSION="$version" SYLUX_QUALIFY_DOCKER="$mode" node scripts/qualify-install-sylux.mjs "$fixture"
+qualify_docker() { sudo -n env -i PATH="$PATH" HOME=/root docker --host unix:///var/run/docker.sock "$@"; }
+engine_version=$(qualify_docker version --format '{{.Server.Version}}') || fail 'Cannot read Docker Engine version.'
+compose_version=$(qualify_docker compose version 2>/dev/null) || fail 'Cannot read Docker Compose version.'
+safe_version='^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$'
+[[ "$engine_version" =~ $safe_version ]] || fail 'Docker Engine returned an empty or unsafe version.'
+[[ "$compose_version" =~ $safe_version ]] || fail 'Docker Compose returned an empty or unsafe version.'
+printf -- '- Ubuntu 24.04 x86_64, runner %s, local ext4, Docker Engine %s, Compose %s (%s)\n' \
+  "$ImageVersion" "$engine_version" "$compose_version" "$mode" | tee -a "${GITHUB_STEP_SUMMARY:?}"
 if [[ -n "$bundle" ]]; then
   image=$(inspect_image "sylux:$version" "$version" "$GITHUB_SHA")
   container=$(sudo docker --host unix:///var/run/docker.sock compose --project-directory /opt/sylux ps -q sylux)
   [[ "$(docker_local inspect --format '{{.Image}}' "$container")" == "$image" ]]
-  docker_local() { sudo -n env -i PATH="$PATH" HOME=/root docker --host unix:///var/run/docker.sock "$@"; }
-  engine_version=$(docker_local version --format '{{.Server.Version}}') || fail 'Cannot read Docker Engine version.'
-  compose_version=$(docker_local compose version --short 2>/dev/null) || fail 'Cannot read Docker Compose version.'
-  [[ -n "$engine_version" && "$engine_version" != *$'\n'* ]] || fail 'Docker Engine version is empty or unsafe.'
-  [[ -n "$compose_version" && "$compose_version" != *$'\n'* ]] || fail 'Docker Compose version is empty or unsafe.'
   {
-    printf -- '- Ubuntu 24.04 x86_64, runner %s, local ext4, Docker Engine %s, Compose %s (%s)\n' \
-      "$ImageVersion" "$engine_version" "$compose_version" "$mode"
     printf -- '- Locally loaded and running %s, linux/amd64, OCI version %s, revision %s\n' "$image" "$version" "$GITHUB_SHA"
     printf -- '- Trusted Chromium passed administrator creation, fresh sign-in, first upload, byte-exact download, restart and same-version rerun.\n'
   } | tee -a "$GITHUB_STEP_SUMMARY"
