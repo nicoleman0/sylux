@@ -145,7 +145,15 @@ sudo rm -rf -- /srv/sylux
 sudo mkdir -m 0700 /opt/sylux /srv/sylux
 sudo chown 10001:10001 /srv/sylux
 sudo install -m 0600 "${bundle:-scripts}/install-sylux.sh" /opt/sylux/install-sylux.sh
-sudo bash -c 'umask 077; printf "%s\n" "$1" >/opt/sylux/version; printf "initializing\n" >/opt/sylux/phase' _ "$version"
+printf '%s\n' "$version" > "$fixture/version"
+printf 'initializing\n' > "$fixture/phase"
+sudo install -o 0 -g 0 -m 0600 -t /opt/sylux "$fixture/version" "$fixture/phase"
+for record in /opt/sylux/{version,phase}; do
+  if ! sudo test -f "$record" || sudo test -L "$record" ||
+     ! metadata=$(sudo stat -c '%u:%g:%a:%h' "$record") || [[ "$metadata" != 0:0:600:1 ]]; then
+    fail "Invalid recovery fixture metadata for ${record##*/}."
+  fi
+done
 reset_command=(sudo bash /opt/sylux/install-sylux.sh --reset-empty-init)
 printf 'fixture\n' | sudo tee /srv/sylux/marker >/dev/null
 if nonempty=$("${reset_command[@]}" 2>&1); then fail 'Reset accepted nonempty data.'; fi

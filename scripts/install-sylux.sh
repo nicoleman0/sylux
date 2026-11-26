@@ -110,6 +110,8 @@ prepare_install() (
   trap 'rm -rf -- "$stage"' EXIT
   revision=$(fetch_bundle "$version" "$stage")
   make_tls "$stage/tls"
+  install -o 0 -g 0 -m 0600 /dev/null "$stage/version"
+  install -o 0 -g 0 -m 0600 /dev/null "$stage/phase"
   printf '%s\n' "$version" > "$stage/version"
   printf '%s\n' prepared > "$stage/phase"
   mv -T --no-clobber -- "$stage" "$install_dir"

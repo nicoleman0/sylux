@@ -41,7 +41,7 @@ jobs:
       - name: Install browser and check tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libnss3-tools shellcheck
+          sudo apt-get install --yes acl libnss3-tools shellcheck
           npm --prefix web ci
           npm --prefix web exec -- playwright install --with-deps chromium
       - name: Lint and verify the published beta.9 data assets

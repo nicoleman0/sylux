@@ -12,6 +12,8 @@ version=v0.1.0
 revision=0123456789abcdef0123456789abcdef01234567
 image_id=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 mkdir "$fixture"/{opt,srv,bundle}
+# A default ACL can override the installer's umask on file creation.
+setfacl -d -m u::rwx,g::rwx,o::rwx "$fixture/opt"
 cp "$root/scripts/install-sylux.sh" "$fixture/bundle/install-sylux.sh"
 chmod 0644 "$fixture/bundle/install-sylux.sh"
 for asset in compose.yaml docker-beta.md env.example sylux-image.tar.gz; do
@@ -89,8 +91,14 @@ docker_local() {
 }
 compose() {
   [[ "$scenario" == install ]] || fail 'Recovery attempted to change Docker state.'
+  local record
   case "$*" in
-    'config --quiet') [[ -s "$install_dir/.env" ]] ;;
+    'config --quiet')
+      for record in "$install_dir"/{version,phase}; do
+        [[ -f "$record" && ! -L "$record" && "$(stat -c '%u:%g:%a:%h' "$record")" == 0:0:600:1 ]] ||
+          fail "Expected a private installer record before init: ${record##*/}."
+      done
+      [[ -s "$install_dir/.env" ]] ;;
     'run --rm --no-deps -T sylux init --root /var/lib/sylux')
       [[ "$(<"$install_dir/phase")" == initializing ]] || fail 'Expected the initializing phase before Compose init.'
       [[ ! -f "$fixture/interrupt" ]] || return 1
