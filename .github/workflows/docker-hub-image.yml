@@ -1,0 +1,83 @@
+name: Docker Hub image
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/docker-hub-image.yml'
+      - '.github/workflows/beta-release.yml'
+      - '.github/workflows/ghcr-image.yml'
+      - 'scripts/mirror-release-image.sh'
+      - 'scripts/test-mirror-release-image.sh'
+      - 'scripts/release-bundle.sh'
+      - 'scripts/install-sylux.sh'
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      manifest:
+        required: true
+        type: string
+      repository:
+        required: false
+        type: string
+      username:
+        required: false
+        type: string
+    secrets:
+      token:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install pinned registry tools
+        run: |
+          export GOBIN="$RUNNER_TEMP/registry-tools"
+          go install github.com/google/go-containerregistry/cmd/{crane,registry}@v0.20.6
+          echo "$GOBIN" >> "$GITHUB_PATH"
+      - run: bash scripts/test-mirror-release-image.sh
+
+  mirror:
+    if: >-
+      github.event_name == 'push' && github.ref == format('refs/tags/{0}', inputs.version) &&
+      github.event.created && !github.event.forced && !github.event.deleted &&
+      github.repository == 'nicoleman0/sylux' && !github.event.repository.private &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      QUALIFIED_MANIFEST: ${{ inputs.manifest }}
+      MIRROR_REPOSITORY: ${{ inputs.repository }}
+      MIRROR_USERNAME: ${{ inputs.username }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check mirror settings
+        id: settings
+        env:
+          MIRROR_TOKEN: ${{ secrets.token }}
+        run: bash scripts/mirror-release-image.sh config
+      - name: Install pinned crane
+        if: steps.settings.outputs.enabled == 'true'
+        run: |
+          export GOBIN="$RUNNER_TEMP/registry-tools"
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.6
+          echo "$GOBIN" >> "$GITHUB_PATH"
+      - name: Mirror and verify the qualified image
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          MIRROR_TOKEN: ${{ secrets.token }}
+        run: bash scripts/mirror-release-image.sh publish

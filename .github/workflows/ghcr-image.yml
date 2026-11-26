@@ -45,7 +45,11 @@ jobs:
           alias_tag=$(release_alias "$RELEASE_VERSION")
           test "$(gh release view "$RELEASE_VERSION" --json isDraft --jq .isDraft)" = false
           bundle="$RUNNER_TEMP/release"
-          gh release download "$RELEASE_VERSION" --pattern "*" --dir "$bundle"
+          patterns=()
+          for asset in SHA256SUMS "${release_assets[@]}" install-sylux.sh; do
+            patterns+=(--pattern "$asset")
+          done
+          gh release download "$RELEASE_VERSION" "${patterns[@]}" --dir "$bundle"
           verify_release_bundle "$bundle" "$RELEASE_VERSION" "$GITHUB_SHA" "$QUALIFIED_MANIFEST"
           id=$(load_release_image "$bundle" "$RELEASE_VERSION" "$GITHUB_SHA")
           printf 'id=%s\nalias=%s\n' "$id" "$alias_tag" >> "$GITHUB_OUTPUT"
