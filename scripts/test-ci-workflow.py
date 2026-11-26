@@ -25,6 +25,17 @@ class RequiredChecks(unittest.TestCase):
         return subprocess.run(['bash', '-e', '-c', gate_script()], env=env,
                               capture_output=True, text=True)
 
+    def test_release_artifact_download_and_concurrency_contract(self):
+        source = (ROOT / '.github/workflows/beta-release.yml').read_text()
+        self.assertIn('group: beta-release-${{ github.event_name }}', source,
+                      'Separate dispatch and publication concurrency groups.')
+        downloads = re.findall(r'uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093[^\n]*\n        with:\n((?:          [^\n]*\n)+)', source)
+        self.assertEqual(len(downloads), 3, 'Check all three pinned artifact downloads.')
+        for download in downloads:
+            self.assertIn('artifact-ids: ${{ needs.qualify.outputs.artifact }}', download)
+            self.assertIn('merge-multiple: true', download,
+                          'ID downloads must extract directly into the verifier path.')
+
     def test_contract_targets_are_in_required_native_checks(self):
         manifest = tomllib.loads((ROOT / 'Cargo.toml').read_text())
         native = (ROOT / '.github/workflows/ci.yml').read_text().split('\n  native:\n', 1)[1].split('\n  web-smoke:', 1)[0]

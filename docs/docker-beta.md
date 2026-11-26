@@ -2,7 +2,7 @@
 
 Use this procedure for **one** Sylux instance on Ubuntu 24.04 x86_64, with a local ext4 data directory and SQLite. Use a published release and the matching guide shipped with it. Do not keep your only copy of important files in Sylux.
 
-The tested path used a disposable Ubuntu 24.04 x86_64 runner, an ext4 bind mount, TLS on host loopback, restart and replacement, and a stopped-service archive restore. See [the upgrade rehearsal](docker-upgrade-rehearsal.md) for the tested upgrade and rollback. Physical storage durability, a separate physical client, and power interruption recovery remain outside its scope. Native LXC is a separate installation path.
+The tested path used a disposable Ubuntu 24.04 x86_64 runner, an ext4 bind mount, TLS on host loopback, restart and replacement, and a stopped-service archive restore. See [the upgrade rehearsal](docker-upgrade-rehearsal.md) for the tested upgrade and rollback. The rehearsal covers only its pinned packages on a disposable runner; upgrades and this Compose file are not qualified for other environments. Physical storage durability, a separate physical client, and power interruption recovery remain outside its scope. Native LXC is a separate installation path.
 
 ## Docker quick start
 

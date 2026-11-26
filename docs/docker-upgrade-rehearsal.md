@@ -53,15 +53,15 @@ evidence leaves the runner.
 For a real recovery, follow the [Docker operator guide](docker-beta.md#5-upgrade-and-roll-back),
 including owner review of access before reopening it.
 
-## Reuse for the stable candidate
+## Stable candidate and publication
 
-Update the release pins to beta.10 and the published stable bundle. Seed
-beta.10 and run the driver's `grants` phase there before the stopped archive.
-Keep the resulting `expected-grants.json` alongside `expected.json`. After
-the stable upgrade, run `verify`, `trash-bytes` and `verify-grants` against the
-same fixture directory. The last phase verifies the revoked library remains
-unavailable and the active library remains the member's only incoming share,
-with its exact listing and download bytes intact. For the rollback rehearsal,
-create the named-grant baseline on beta.10 before archiving and verify it again
-after restoring beta.10 with `verify-grants`. The current beta.9 rehearsal does
-not change; it has no library or sharing routes.
+The Docker release workflow dispatch rehearses the candidate bundle produced by
+that run using `SYLUX_REHEARSE_BUNDLE`, `SYLUX_REHEARSE_VERSION` and
+`SYLUX_REHEARSE_MANIFEST`. It seeds beta.10 and its named grants before the
+archive, then verifies them after upgrade and rollback.
+
+Publication requires separate owner authorization. Once authorized, the owner
+pushes the new release tag by itself with git on a commit in `main`; do not
+create a release in the GitHub UI first. The tag push starts a new workflow
+which builds and verifies its own package from that source before publication.
+A successful dispatch does not authorize publication.
