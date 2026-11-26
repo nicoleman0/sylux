@@ -12,7 +12,7 @@ Use an Ubuntu 24.04 x86_64 host running systemd, with `/srv` on local ext4 and T
 curl -fsSL https://raw.githubusercontent.com/nicoleman0/sylux/main/install.sh | sh
 ```
 
-The launcher selects GitHub’s latest published, non-prerelease version at or above `v0.1.0`. The stable release is not yet live. It checks the chosen release's installer against GitHub's asset checksum. For [beta.10](https://github.com/nicoleman0/sylux/releases/tag/v0.1.0-beta.10), replace `| sh` with `| sh -s -- --beta`.
+The launcher selects GitHub’s latest published, non-prerelease version at or above `v0.1.0` when one is available. It checks the chosen release's installer against GitHub's asset checksum. For [beta.10](https://github.com/nicoleman0/sylux/releases/tag/v0.1.0-beta.10), replace `| sh` with `| sh -s -- --beta`.
 
 **Installing a specific version?** Download and review `install-sylux.sh` from the [release](https://github.com/nicoleman0/sylux/releases) you want, then run `sudo bash ./install-sylux.sh '<release tag>'` with that exact tag. Use the script shipped alongside this guide to install the version it covers.
 

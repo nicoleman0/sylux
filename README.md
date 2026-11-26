@@ -23,7 +23,7 @@ For a fresh installation, use Ubuntu 24.04 x86_64 with systemd, local ext4 stora
 curl -fsSL https://raw.githubusercontent.com/nicoleman0/sylux/main/install.sh | sh
 ```
 
-The stable command selects GitHub’s latest published, non-prerelease version at or above `v0.1.0`. The stable release is not yet live. To install [beta.10](https://github.com/nicoleman0/sylux/releases/tag/v0.1.0-beta.10), replace `| sh` with `| sh -s -- --beta`.
+The stable command selects GitHub’s latest published, non-prerelease version at or above `v0.1.0` when one is available. To install [beta.10](https://github.com/nicoleman0/sylux/releases/tag/v0.1.0-beta.10), replace `| sh` with `| sh -s -- --beta`.
 
 The installer shows its proposed host changes before asking for confirmation. Follow the [Docker quick start](docs/docker-beta.md#docker-quick-start) to trust the local certificate, create your administrator account, and upload your first file.
 

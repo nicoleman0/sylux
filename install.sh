@@ -12,8 +12,10 @@ download() {
 
 installer_digest() {
     command -v python3 >/dev/null || fail 'Python 3 is required to check the release.'
+    label=$2
+    [ "$label" != latest ] || label="the latest stable release"
     release=$(download -H 'Accept: application/vnd.github+json' "$1") ||
-        fail "Could not confirm $2. Check the releases page and retry."
+        fail "Could not confirm $label. Check the releases page and retry."
     printf '%s' "$release" | python3 -c '
 import json
 import re
@@ -48,7 +50,7 @@ if not ready:
     sys.exit(1)
 print(version, assets[0]["digest"])
 ' "$2" "$3" ||
-        fail "GitHub did not report the expected $3 installer for $2. Check the releases page and retry."
+        fail "GitHub did not report the expected $3 installer for $label. Check the releases page and retry."
 }
 
 install_sylux() (
