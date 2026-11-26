@@ -5,6 +5,33 @@ umask 077
 
 fail() { printf 'Sylux LXC: %s\n' "$*" >&2; exit 1; }
 
+check_upgrade_unit() {
+  local property actual
+  # systemctl reports the variable before expansion by the service manager.
+  # shellcheck disable=SC2016
+  local expected='/opt/sylux/current/sylux serve --root ${SYLUX_DATA_ROOT} --listen 127.0.0.1:3000 --tls-cert /etc/sylux/cert.pem --tls-key /etc/sylux/key.pem'
+  local start="{ path=${expected%% *} ; argv[]=$expected ; ignore_errors=no ; "
+  local status_fields='^start_time=\[[^{}]+\] ; stop_time=\[[^{}]+\] ; pid=[0-9]+ ; code=[^{}]+ ; status=[^{}]+ \}$'
+  for property in DropInPaths FragmentPath NeedDaemonReload ExecStart ActiveState; do
+    actual=$(systemctl show sylux.service -p "$property" --value) ||
+      fail "Could not inspect sylux.service ($property)."
+    case "$property" in
+      DropInPaths)
+        [[ -z "$actual" ]] || fail 'Remove or reconcile service drop-ins before upgrading.' ;;
+      FragmentPath)
+        [[ "$actual" == "$unit" ]] || fail 'Reconcile the service unit override before upgrading.' ;;
+      NeedDaemonReload)
+        [[ "$actual" == no ]] || fail 'Reload systemd and reconcile any unit changes before upgrading.' ;;
+      ExecStart)
+        [[ "$actual" == "$start"* && "${actual#"$start"}" =~ $status_fields ]] ||
+          fail 'The effective service command is unfamiliar; reconcile it before upgrading.' ;;
+      ActiveState)
+        [[ "$actual" == inactive ]] ||
+          fail 'Stop the service, reset any failed state with systemctl reset-failed sylux.service, and take a complete archive before upgrading.' ;;
+    esac
+  done
+}
+
 command=${1:-}
 [[ $# == 5 && "$command" =~ ^(verify|install|upgrade)$ ]] ||
   fail 'Usage: install-sylux-lxc.sh verify|install|upgrade BUNDLE VERSION SOURCE_SHA MANIFEST_SHA256'
@@ -138,6 +165,7 @@ else
   [[ -f "$unit" && ! -L "$unit" && -L "$prefix/current" && -d "$prefix/current" &&
      -f "$data/installation.json" && ! -L "$data" && -d "$tls" && ! -L "$tls" ]] ||
     fail 'Expected an installer-managed native installation.'
+  check_upgrade_unit
   installed=$(readlink "$prefix/current")
   [[ "$installed" =~ ^releases/v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$ ]] ||
     fail 'Current release link is unfamiliar.'
@@ -153,8 +181,6 @@ def key(version):
 if key(sys.argv[1]) >= key(sys.argv[2]):
     sys.exit("Sylux LXC: upgrade requires a newer release.")
 PYTHON
-  [[ "$(systemctl show sylux.service -p ActiveState --value)" == inactive ]] ||
-    fail 'Stop the service and take a complete archive before upgrading.'
   if ! unused_path "$new_release" || ! unused_path "$prefix/.next"; then
     fail 'The selected release or an interrupted switch already exists.'
   fi
@@ -183,6 +209,7 @@ Group=sylux
 UMask=0077
 Environment=SYLUX_DATA_ROOT=/srv/sylux
 ExecStart=/opt/sylux/current/sylux serve --root ${SYLUX_DATA_ROOT} --listen 127.0.0.1:3000 --tls-cert /etc/sylux/cert.pem --tls-key /etc/sylux/key.pem
+Restart=on-failure
 NoNewPrivileges=yes
 
 [Install]

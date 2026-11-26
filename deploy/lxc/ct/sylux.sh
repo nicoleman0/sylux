@@ -7,14 +7,15 @@ lxc_fail() { printf 'Sylux Proxmox: %s\n' "$*" >&2; exit 1; }
 
 stock_ct_config() {
   awk -v marker="$1" '
-    $0 == "description: " marker { owned++ }
-    $0 == "unprivileged: 1" { unprivileged++ }
-    $0 == "arch: amd64" { amd64++ }
-    $0 == "ostype: debian" { debian++ }
-    /^rootfs: / { rootfs++ }
-    /^\[/ || /^(lxc[.]|mp[0-9]+:|dev[0-9]+:|hookscript:|features:|lock:)/ { exceptions++ }
+    /^description:/ { owned++; if ($0 != "description: " marker && $0 != "description: " marker "%0A") exceptions++ }
+    /^unprivileged:/ { unprivileged++; if ($0 != "unprivileged: 1") exceptions++ }
+    /^arch:/ { amd64++; if ($0 != "arch: amd64") exceptions++ }
+    /^ostype:/ { debian++; if ($0 != "ostype: debian") exceptions++ }
+    /^rootfs:/ { rootfs++; if ($0 !~ /^rootfs: .+/) exceptions++ }
+    /^features:/ { features++; if ($0 != "features: nesting=1") exceptions++ }
+    /^\[/ || /^(lxc[.]|mp[0-9]+:|dev[0-9]+:|hookscript:|lock:)/ { exceptions++ }
     END { exit !(owned == 1 && unprivileged == 1 && amd64 == 1 && debian == 1 &&
-                  rootfs == 1 && !exceptions) }
+                  rootfs == 1 && features <= 1 && !exceptions) }
   '
 }
 
@@ -35,8 +36,10 @@ lxc_install() (
   check_ct "$ct" "$marker"
   bash "$lxc_dir/install/sylux-install.sh" verify "$bundle" "$version" "$revision" "$digest"
   [[ "$(pct status "$ct")" == "status: running" ]] || lxc_fail 'Start the intended CT first.'
-  stage=$(pct exec "$ct" -- mktemp -d /root/sylux-stage.XXXXXXXX)
-  [[ "$stage" =~ ^/root/sylux-stage\.[a-zA-Z0-9]{8}$ ]] || lxc_fail 'Unexpected guest staging path.'
+  stage=$(pct exec "$ct" -- mktemp -d /root/sylux-stage.XXXXXXXX) ||
+    lxc_fail 'Could not create a private guest staging directory.'
+  [[ "$stage" =~ ^/root/sylux-stage\.[a-zA-Z0-9]{8}$ ]] ||
+    lxc_fail 'Unexpected guest staging path. Inspect the owned CT before cleanup.'
   trap 'pct exec "$ct" -- rm -rf -- "$stage"' EXIT
   for file in SHA256SUMS-native install-sylux-lxc.sh "sylux-$version-linux-amd64.tar.gz"; do
     pct push "$ct" "$bundle/$file" "$stage/$file" --user 0 --group 0 --perms 0600

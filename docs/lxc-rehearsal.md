@@ -1,11 +1,16 @@
 # Rehearse Sylux native install, upgrade and restore
 
 Use a fresh disposable CT created for this exercise on the authorized Proxmox
-node. Follow [guest provisioning](lxc.md#2-provision-the-guest) and retain its
+node. Use the [guest provisioning command](lxc.md#2-provision-the-guest)
+with `--features nesting=1` and omit the entire `--net0` argument. Retain its
 ownership marker. The expected path is Proxmox VE 9.2 on x86_64, a Debian 13
-amd64 template and an ext4 CT root on local LVM-thin. The driver uses one CT
-with stock unprivileged isolation. It needs no guest network after prerequisite
-installation. Use synthetic data only.
+amd64 template and an ext4 CT root on local LVM-thin. Prepare a trusted template
+with `python3`, `openssl`, `libgcc-s1`, `iproute2`, `procps`, `util-linux`
+(including `flock` and `runuser`) and Debian base tools already installed, or
+stage trusted Debian packages with their dependencies from the host and install
+them offline through `pct exec`. The host needs Python 3 for verification.
+Keep the guest NIC-less throughout. The driver stages files via `pct push`
+and runs the HTTPS client in the guest. SSH is unnecessary. Use synthetic data only.
 
 ## Prepare the packages
 
@@ -86,8 +91,9 @@ The driver performs these checks in order:
 1. Install and boot beta.10. Test first setup and sign-in, two private accounts,
    multiple uploaded files, owner isolation and byte-exact TLS downloads.
 2. Restart the service, then shut down and start the same CT. Verify the enabled
-   service and exact files after each restart. Record the guest root filesystem,
-   user namespace map, running service ownership and TLS separation.
+   service and exact files after each restart. Record the settled systemd state
+   and failed units at preflight and after the CT restart. Record the guest root
+   filesystem, user namespace map, running service ownership and TLS separation.
 3. Stop the service cleanly and checksum an archive of the full data root.
    Select the candidate and verify the populated root, private file bytes and
    retained Trash. Stop the candidate cleanly.
@@ -97,6 +103,9 @@ The driver performs these checks in order:
    stop it. Both roots and the private archive remain in the CT.
 
 Retain the redacted evidence output and record the Proxmox release and exact
-package identities. The coordinator verifies CT ownership again before any
+package identities. The measured beta.10 and stable builds contained
+byte-identical executables. Their comparison covers package version replacement,
+persistence and recovery with those packages. Changed-binary and schema upgrades
+are outside that comparison. The coordinator verifies CT ownership again before any
 teardown. This rehearsal does not exercise replacement of the guest, a second
 CT, independent backup media, browser UI, or physical durability.

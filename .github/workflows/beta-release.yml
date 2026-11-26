@@ -314,7 +314,9 @@ jobs:
           Verify SHA256SUMS, load sylux-image.tar.gz, and pin Compose to the loaded image ID as described in the guide.
           For a native installation in Debian 13 Proxmox LXC, verify SHA256SUMS-native and follow https://github.com/nicoleman0/sylux/blob/$GITHUB_SHA/docs/lxc.md.
           Source commit: $GITHUB_SHA
-          Source, browser and packaged-image recovery checks passed in this workflow.
+          Native SHA256SUMS-native: $NATIVE_MANIFEST
+          Source, browser and packaged Docker image recovery checks passed in this workflow. Native CI used an offline Debian 13 fixture.
+          The native beta.10-to-stable comparison used byte-identical executables and covers package version replacement and data persistence.
           Physical durability and general schema upgrade support are outside qualification. Keep independent copies.
           Feedback: hello@corvus-dev.com
           EOF_NOTES

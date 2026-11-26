@@ -47,28 +47,51 @@ guest scripts before running them.
 As root on the chosen Proxmox node, select an unused CT ID, a cached Debian 13
 amd64 appliance template and active local LVM-thin storage. Check the node's
 `pveam list <template-storage>` and `pvesm status` for actual volume and storage
-names. These commands create one fresh guest with no virtual network interface:
+names. Choose a bridge on your trusted management network with DHCP and
+access to Debian package mirrors.
 
 ```bash
 CTID='<unused CT ID>'
 TEMPLATE='<storage:vztmpl/debian-13-…_amd64.tar.zst>'
 ROOT_STORAGE='<local LVM-thin storage ID>'
+BRIDGE='<existing trusted Proxmox bridge>'
 MARKER="sylux-$(openssl rand -hex 16)"
 pct create "$CTID" "$TEMPLATE" --hostname sylux --ostype debian --arch amd64 \
   --unprivileged 1 --description "$MARKER" --rootfs "$ROOT_STORAGE:8" \
+  --features nesting=1 --net0 "name=eth0,bridge=$BRIDGE,ip=dhcp" \
   --cores 2 --memory 1024 --onboot 0 || exit 1
 pct start "$CTID" || exit 1
 ```
 
 Keep the ownership marker. The host helper reads current and pending config and
-requires matching settings, the marker, and stock unprivileged isolation. Do
-not add nesting, keyctl, custom LXC directives, device or mount exceptions.
+requires matching settings, the marker, and stock unprivileged isolation.
+Debian 13 uses systemd 257. Proxmox recommends nesting for newer systemd
+versions because services can otherwise fail at boot. Keep `nesting=1` as
+the only feature and omit custom LXC directives, devices and extra mounts.
 Container IDs and storage names are local to the node. [Proxmox container
-options and commands](https://github.com/proxmox/pve-docs/blob/0d8269d6c45caeffed7a6d71b695ad25217c4a4c/generated/pct.1-synopsis.adoc).
+options and commands](https://github.com/proxmox/pve-docs/blob/0d8269d6c45caeffed7a6d71b695ad25217c4a4c/generated/pct.1-synopsis.adoc). [Proxmox systemd nesting check](https://github.com/proxmox/pve-container/blob/4ffd00b03858d3396bc8cd7bbbc6c5b01a3b4067/src/PVE/LXC/Setup/Base.pm#L662).
 
-Ensure `python3`, `openssl`, `libgcc-s1`, `iproute2`, `procps`, `util-linux`
-(including `flock` and `runuser`) and the Debian base tools are installed inside
-the guest. Prepare them from trusted Debian packages before isolating the guest.
+Inside the guest, install prerequisites and SSH from trusted Debian repositories.
+Use `pct exec "$CTID" -- ip -4 -brief address show dev eth0` on the node to
+find the guest IP. With `pct enter "$CTID"`, run the following as guest root.
+Replace the public key placeholder with your workstation's public key before
+running the block:
+
+```bash
+apt-get update && apt-get install --yes python3 openssl libgcc-s1 iproute2 \
+  procps util-linux openssh-server || exit 1
+adduser --disabled-password --gecos '' sylux-operator || exit 1
+install -d -o sylux-operator -g sylux-operator -m 0700 /home/sylux-operator/.ssh || exit 1
+printf '%s\n' '<your workstation public SSH key>' \
+  > /home/sylux-operator/.ssh/authorized_keys || exit 1
+chown sylux-operator:sylux-operator /home/sylux-operator/.ssh/authorized_keys || exit 1
+chmod 0600 /home/sylux-operator/.ssh/authorized_keys || exit 1
+systemctl enable --now ssh.service || exit 1
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+Record the SSH host key fingerprint from the guest console and compare it
+when first connecting from the workstation. Keep SSH access on the trusted network.
 The installer checks the LXC UID map and guest release, and checks the ELF and
 dynamic libraries before creating the service or data root.
 
@@ -89,10 +112,15 @@ The installer refuses an existing service account or install path. If it
 stops partway through, inspect guest state and preserve any initialized root
 before recovery.
 
-1. For browser use, arrange a loopback-to-loopback tunnel, such as an SSH local
-   forward to port 3000 in the guest through your configured guest access. The
-   offline qualification CT uses certificate-verified HTTP in the guest and
-   needs no tunnel or virtual NIC.
+1. On the workstation, set `GUEST_IP` to the guest's DHCP address and run
+   the tunnel below. Confirm the recorded host key if prompted. Keep this
+   terminal open during browser use.
+
+   ```bash
+   ssh -N -o ExitOnForwardFailure=yes -o PreferredAuthentications=publickey \
+     -L 127.0.0.1:3000:127.0.0.1:3000 "sylux-operator@$GUEST_IP"
+   ```
+
 2. Copy only `/etc/sylux/cert.pem` from the guest and trust it on the client
    using a private channel. The default certificate covers `127.0.0.1` and
    expires after one year. Keep the private key in the guest.
@@ -102,8 +130,7 @@ before recovery.
    one-use authorization in the setup form without capturing it in logs.
 4. Sign in, upload a disposable file and download it to check the contents.
 
-Keep the service private. If you configure a reverse proxy, verify TLS at both
-hops and set `--public-origin` to the exact browser origin. Keep TLS keys
+Keep the service private and bound to guest loopback. Keep TLS keys
 separate from the data archive, and back them up separately if you need to
 preserve client trust. Use `systemctl restart sylux.service` in the guest for a
 service restart.
@@ -133,7 +160,8 @@ For an ordinary backup, start the service and check sign-in and downloads.
 1. Download and verify the newer exact package. Back up the stopped root and
    keep the matching previous package.
 2. Run the Proxmox helper with `upgrade` and the new bundle, tag, revision and
-   digest. The installer requires a stopped service and stages a new release
+   digest. The installer requires a stopped service with its original unit
+   command and no drop-ins. It stages a new release
    without initializing or replacing the data root. It leaves the service
    stopped so you can check the version selection before starting it.
 3. Start `sylux.service` and check readiness, sign-in, inventory and a known
@@ -144,11 +172,30 @@ For rollback, stop the service and verify the archive checksum. Extract with
 root on suitable local storage, preserving the whole directory tree. Verify it
 with `tar --compare --numeric-owner` before starting the prior release on the
 restored root. Preserve the original root for inspection. Keep the same guest
-service UID and GID, and change the unit's `ExecStart` to the exact previous
-binary and the restored root. Restart only after reloading the unit. Check
+service UID and GID. Use a drop-in such as
+`/etc/systemd/system/sylux.service.d/restore.conf` with
+`Environment=SYLUX_DATA_ROOT=/srv/sylux-restored`, an empty `ExecStart=`
+to reset the command, and a copy of the original `ExecStart=` with
+`/opt/sylux/releases/<prior-tag>/sylux` in place of the `current` path.
+Put all three directives under `[Service]`. Restart after `systemctl daemon-reload`. Check
 ownership, sign-in and file bytes before reopening access.
 
-Before a snapshot restore, restrict recipient access at the proxy or network.
+Keep running with the drop-in until you are ready to reconcile the paths.
+Before retrying the same package or installing a later one, stop Sylux and
+archive the restored root as it stands, including any writes since rollback.
+Move the original `/srv/sylux` aside to a new private path on the same
+filesystem, then rename the restored root to `/srv/sylux`. Keep the original
+root, the pre-upgrade archive, and the new archive. Verify the selected
+paths before moving them. Park the unused candidate release directory
+at a fresh path outside `/opt/sylux/releases` so a retry can install its tag
+again. Atomically repoint `/opt/sylux/current` to `releases/<prior-tag>` using
+a fresh temporary symlink and `mv -Tf`. Move the restore drop-in out of the
+unit search path, run `systemctl daemon-reload`, and verify the prior binary,
+`/srv/sylux`, and absence of drop-ins. Start and verify the prior service on
+that root first. Take a fresh stopped backup and repeat the normal upgrade
+steps with the verified package after resolving the original failure.
+
+Snapshot restore can affect shared links. Before restoring, restrict recipient access at the proxy or network.
 The snapshot may revive a link revoked later. Keep access restricted through
 owner review and revocation. Owners can review their own links. Keep the
 restriction if owners cannot review.
@@ -159,8 +206,11 @@ The release workflow runs an offline Debian 13 amd64 container smoke test. It
 exercises the exact package through certificate-verified first setup, upload,
 download and restart. The live Proxmox driver additionally checks systemd boot,
 guest UID mapping, filesystem ownership, populated upgrade and stopped archive
-restore to a second root in the same CT. See the [live rehearsal](lxc-rehearsal.md)
-for inputs and checks. These results apply to the tested releases and storage
+restore to a second root in the same CT. The measured beta.10 and stable
+builds contained byte-identical executables. That comparison covers package
+version replacement and data persistence. Changed-binary and schema upgrades
+are outside its scope. See the [NIC-less live rehearsal](lxc-rehearsal.md)
+for prerequisites, inputs and checks. These results apply to the tested releases and storage
 configuration. Physical durability, guest replacement and other storage
 backends are outside the rehearsal.
 
@@ -173,13 +223,13 @@ its sessions. It does not reopen setup, create accounts or repair storage.
 
 Confirm the unit's `User`, `Group`, `ExecStart` and data root first. These examples
 assume `sylux.service`, service account `sylux`, binary `/opt/sylux/current/sylux` and
-root `/srv/sylux`. Substitute the exact values from the guest; do not run recovery
-as root or change ownership to bypass the service identity checks.
+root `/srv/sylux`. Run the shell steps as guest root and the recovery command
+as the service account via `runuser`. Substitute the exact values from the guest.
 
 ```sh
-sudo systemctl show sylux.service -p User -p Group -p ExecStart
-sudo systemctl stop sylux.service || exit 1
-if sudo systemctl is-active --quiet sylux.service; then exit 1; fi
+systemctl show sylux.service -p User -p Group -p ExecStart
+systemctl stop sylux.service || exit 1
+test "$(systemctl show sylux.service -p ActiveState --value)" = inactive || exit 1
 ```
 
 Take a [stopped-service archive](#back-up-the-stopped-root), preserving the
@@ -188,8 +238,7 @@ whole root, including numeric ownership, SQLite siblings and secrets.
 Verify the checksum:
 
 ```sh
-sudo sh -c 'cd /mnt/backup/sylux && sha256sum -c backup.tar.sha256' || exit 1
-sudo -v || exit 1
+(cd "$ARCHIVE_DIR" && sha256sum --check root.tar.sha256) || exit 1
 bash <<'RECOVERY' || exit 1
 set +x
 set +o history
@@ -197,11 +246,11 @@ set -o pipefail
 trap 'unset sylux_password' EXIT
 IFS= read -r -s -p 'New administrator password: ' sylux_password </dev/tty || exit 1
 printf '\n' >/dev/tty
-printf '%s' "$sylux_password" | sudo -n -u sylux -- /opt/sylux/current/sylux \
+printf '%s' "$sylux_password" | runuser -u sylux -- /opt/sylux/current/sylux \
   admin reset-password --root /srv/sylux \
   --handle '<existing administrator handle>' --password-stdin
 RECOVERY
-sudo systemctl start sylux.service || exit 1
+systemctl start sylux.service || exit 1
 ```
 
 Replace the handle placeholder. Use a trusted terminal without session recording.

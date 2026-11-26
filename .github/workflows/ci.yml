@@ -33,6 +33,7 @@ jobs:
         run: |
           python3 scripts/test-ci-changes.py
           python3 scripts/test-ci-workflow.py
+          bash scripts/check-native-syntax.sh
           python3 scripts/test-ci-comment-structured.py
           python3 scripts/test-account-authority-check.py
       - name: Identify required syntax parsers

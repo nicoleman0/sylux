@@ -84,7 +84,6 @@ if [[ ${1:-} == guest ]]; then
       sha256sum --check pre-upgrade.tar.sha256
       [[ ! -e "$restored" && ! -L "$restored" ]]
       install -d -o sylux -g sylux -m 0700 "$restored"
-      [[ "$(stat -c '%d:%i' "$restored")" != "$(stat -c '%d:%i' "$live")" ]]
       tar --extract --numeric-owner --same-owner --same-permissions \
         --file pre-upgrade.tar --directory "$restored"
       tar --compare --numeric-owner --file pre-upgrade.tar --directory "$restored"
@@ -118,11 +117,32 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$script_dir/../deploy/lxc/ct/sylux.sh"
 ct=$1 marker=$2 prior_bundle=$3 prior=$4 prior_sha=$5 prior_digest=$6
 candidate_bundle=$7 candidate=$8 candidate_sha=$9 candidate_digest=${10}
-check_ct "$ct" "$marker"
+check_offline_ct() {
+  local config
+  check_ct "$ct" "$marker"
+  config=$(pct config "$ct" --current 1) || lxc_fail 'Could not inspect guest network configuration.'
+  if [[ "$config" =~ (^|$'\n')net[0-9]+: ]]; then
+    lxc_fail 'Qualification requires a NIC-less CT.'
+  fi
+}
+
+guest_boot_health() {
+  local status result=0 failed
+  status=$(pct exec "$ct" -- timeout 90 systemctl is-system-running --wait) || result=$?
+  printf 'Guest systemd boot state: %s (exit %s)\n' "$status" "$result"
+  failed=$(pct exec "$ct" -- systemctl --failed --no-legend --no-pager --plain) ||
+    lxc_fail 'Could not inspect failed guest units.'
+  printf 'Guest failed units: %s\n' "${failed:-none}"
+  [[ "$result" == 0 && "$status" == running && -z "$failed" ]] ||
+    lxc_fail 'Guest did not settle into a healthy systemd boot.'
+}
+
+check_offline_ct
 bash "$lxc_dir/install/sylux-install.sh" verify "$prior_bundle" "$prior" "$prior_sha" "$prior_digest"
 bash "$lxc_dir/install/sylux-install.sh" verify "$candidate_bundle" "$candidate" "$candidate_sha" "$candidate_digest"
 [[ "$prior" != "$candidate" ]] || lxc_fail 'Select distinct prior and candidate tags.'
 [[ "$(pct status "$ct")" == "status: running" ]] || lxc_fail 'Start the intended CT first.'
+guest_boot_health
 storage=$(pct config "$ct" --current 1 | awk -F ': ' '$1 == "rootfs" {split($2, volume, ":"); print volume[1]}')
 [[ "$storage" =~ ^[a-zA-Z][a-zA-Z0-9_.-]*$ ]] || lxc_fail 'Expected a Proxmox-managed guest root volume.'
 pvesm status --storage "$storage" | awk '$2 == "lvmthin" && $3 == "active" { local_disk = 1 }
@@ -146,10 +166,11 @@ phase='prior install and first setup'
 lxc_install install "$ct" "$marker" "$prior_bundle" "$prior" "$prior_sha" "$prior_digest"
 guest seed "$prior"
 phase='CT restart'
-check_ct "$ct" "$marker"
+check_offline_ct
 pct shutdown "$ct" --timeout 60
 [[ "$(pct status "$ct")" == "status: stopped" ]]
 pct start "$ct"
+guest_boot_health
 phase='verification after CT restart and stopped backup'
 guest backup "$prior"
 phase='populated upgrade'
@@ -157,5 +178,5 @@ lxc_install upgrade "$ct" "$marker" "$candidate_bundle" "$candidate" "$candidate
 guest upgraded "$candidate"
 phase='restore in the original CT'
 guest restore "$prior"
-check_ct "$ct" "$marker"
+check_offline_ct
 printf 'Native LXC qualification passed using one CT. The service is stopped.\n'
