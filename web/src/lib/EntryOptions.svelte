@@ -1,3 +1,7 @@
+<script module lang="ts">
+  export type EntryAction = 'download' | 'share' | 'public-link' | 'rename' | 'move' | 'copy' | 'delete';
+</script>
+
 <script lang="ts">
   import { tick } from 'svelte';
   import { DropdownMenu } from 'bits-ui';
@@ -14,14 +18,14 @@
     copyDisabled?: boolean;
     downloadDisabled?: boolean;
     downloading?: boolean;
-    onaction: (action: 'download' | 'share' | 'rename' | 'move' | 'copy' | 'delete', trigger: HTMLElement) => void;
+    onaction: (action: EntryAction, trigger: HTMLElement) => void;
   } = $props();
   let trigger = $state<HTMLButtonElement | null>(null);
   let open = $state(false);
   let openingDialog = false;
   const modified = $derived(modifiedTime(entry));
 
-  async function select(action: 'download' | 'share' | 'rename' | 'move' | 'copy' | 'delete'): Promise<void> {
+  async function select(action: EntryAction): Promise<void> {
     openingDialog = action !== 'download';
     open = false;
     await tick();
@@ -40,6 +44,7 @@
       {#if modified}<div class="px-3 py-2 text-xs text-muted-foreground max-w-72 border-b mb-1"><span class="block">Modified</span><time datetime={modified.datetime}>{modified.full}</time></div>{/if}
       <DropdownMenu.Item class="menu-item" disabled={downloadDisabled} onSelect={() => select('download')}>Download</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item" onSelect={() => select('share')}>Share</DropdownMenu.Item>
+      {#if entry.kind === 'folder'}<DropdownMenu.Item class="menu-item" onSelect={() => select('public-link')}>Public link</DropdownMenu.Item>{/if}
       <DropdownMenu.Item class="menu-item" onSelect={() => select('rename')}>Rename</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item" disabled={moveDisabled} onSelect={() => select('move')}>Move</DropdownMenu.Item>
       <DropdownMenu.Item class="menu-item" disabled={copyDisabled} onSelect={() => select('copy')}>Copy</DropdownMenu.Item>

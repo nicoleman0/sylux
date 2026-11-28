@@ -18,6 +18,7 @@ async function installBackend(page: Page, paged = false) {
     if (url.pathname === '/setup') return json({ setupRequired: false, user: null });
     if (url.pathname === '/auth/csrf') return json({ csrf_token: 'csrf' });
     if (url.pathname === '/auth/local') return json({ account_id: 'owner', handle: 'owner', role: 'user', csrf_token: 'csrf' });
+    if (url.pathname === '/share-links' && route.request().method() === 'GET') return json([]);
     if (url.pathname === '/folders/root/path') return json({ items: [root] });
     if (url.pathname === '/folders/children') return json({ root, items: entries, next_cursor: null, has_more: false });
     if (/^\/folders\/[^/]+\/children$/.test(url.pathname)) {

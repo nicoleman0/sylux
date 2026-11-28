@@ -235,6 +235,7 @@ pub(super) struct Confirmation {
     lost_recipients: std::collections::BTreeSet<String>,
     carried_recipients: std::collections::BTreeSet<String>,
     exposes_to_all: bool,
+    exposes_to_public_links: bool,
     removes_access_for_all: bool,
 }
 
@@ -276,8 +277,15 @@ impl ConfirmTree<'_> {
         source: &[Entry],
         destination: &[Entry],
     ) -> Result<(), ConfirmationError> {
-        let impact = direct_grants::tree_impact(db, self.actor, self.entry, source, destination)
-            .map_err(|_| ConfirmationError::Sql)?;
+        let impact = direct_grants::tree_impact(
+            db,
+            self.actor,
+            self.entry,
+            source,
+            destination,
+            super::auth::now(),
+        )
+        .map_err(|_| ConfirmationError::Sql)?;
         if !impact.requires_confirmation() {
             return if self.token.is_some() {
                 Err(ConfirmationError::AudienceChanged)
@@ -290,7 +298,7 @@ impl ConfirmTree<'_> {
             .map_err(|_| ConfirmationError::Sql)?;
         let key = self.key.ok_or(ConfirmationError::Sql)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| ConfirmationError::Sql)?;
-        mac.update(b"sylux:sharing-tree-confirmation:v2\0");
+        mac.update(b"sylux:sharing-tree-confirmation:v3\0");
         mac.update(&body);
         if let Some(signature) = self
             .token
@@ -306,6 +314,7 @@ impl ConfirmTree<'_> {
             lost_recipients: impact.lost_recipients,
             carried_recipients: impact.carried_recipients,
             exposes_to_all: impact.exposes_to_all,
+            exposes_to_public_links: !impact.new_public_links.is_empty(),
             removes_access_for_all: impact.removes_access_for_all,
         }))
     }

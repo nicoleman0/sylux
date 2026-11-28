@@ -278,11 +278,13 @@ pub(crate) struct TreeImpact {
     destination_publication: Option<String>,
     pub exposes_to_all: bool,
     pub removes_access_for_all: bool,
+    pub new_public_links: Vec<String>,
 }
 
 impl TreeImpact {
     pub(crate) fn requires_confirmation(&self) -> bool {
         self.exposes_to_all
+            || !self.new_public_links.is_empty()
             || !self.new_recipients.is_empty()
             || !self.carried_recipients.is_empty()
     }
@@ -294,6 +296,7 @@ pub(crate) fn tree_impact(
     entry: &str,
     source: &[Entry],
     destination: &[Entry],
+    now: i64,
 ) -> Result<TreeImpact, NamespaceError> {
     let mut grants = db
         .prepare(
@@ -366,6 +369,11 @@ pub(crate) fn tree_impact(
             .map(|part| (part.id.clone(), part.name.clone()))
             .collect()
     };
+    let previous_links = super::public_links::inherited(db, owner, source, now)?;
+    let new_public_links = super::public_links::inherited(db, owner, destination, now)?
+        .into_iter()
+        .filter(|id| !previous_links.contains(id))
+        .collect();
     Ok(TreeImpact {
         source: location(source),
         destination: location(destination),
@@ -379,6 +387,7 @@ pub(crate) fn tree_impact(
         destination_publication,
         exposes_to_all,
         removes_access_for_all,
+        new_public_links,
     })
 }
 

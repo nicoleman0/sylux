@@ -1120,7 +1120,11 @@ fn require_private_tree_change(
     source: &[Entry],
     destination: &[Entry],
 ) -> Result<(), NamespaceError> {
-    let impact = super::direct_grants::tree_impact(db, owner, entry, source, destination)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let impact = super::direct_grants::tree_impact(db, owner, entry, source, destination, now)?;
     if impact.requires_confirmation() {
         return Err(NamespaceError::SharingConfirmationRequired);
     }

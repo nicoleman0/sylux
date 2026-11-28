@@ -142,7 +142,7 @@ For a customized service, keep its full command and append `--webdav`. Apply the
 
 ## Restrict share access before restoring
 
-Before restoring, restrict recipient access at the proxy or network. An unexpired share link revoked after the snapshot can become usable again. Keep recipient access restricted through owner review and revocation: each owner can inspect and revoke their own links, but there is no administrator-wide inventory. If owners cannot review, retain the restriction.
+Before restoring, [restrict public file and folder link access](sharing.md#backup-and-restore) at the proxy or network. An unexpired link revoked after the snapshot can become usable again. Keep recipient access restricted through owner review and revocation: each owner can inspect and revoke their own links, but there is no administrator-wide inventory. If owners cannot review, retain the restriction.
 
 ## Back up while serving
 

@@ -159,6 +159,10 @@ export class MockTransport implements ApiTransport {
     const method = options.method ?? 'GET';
     const route = path.split('?')[0]!;
     if (options.signal?.aborted) throw new DOMException('Canceled', 'AbortError');
+    if (route === '/share-links' && method === 'GET') {
+      if (!this.user) throw new HttpError(401);
+      return [] as T;
+    }
     if (route === '/libraries') {
       if (!this.user) throw new HttpError(401);
       if (method === 'GET') return { items: [root, ...this.libraries] } as T;

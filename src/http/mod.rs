@@ -250,7 +250,7 @@ pub fn router(state: AuthState) -> Router {
         .route("/uploads/{id}/commit", post(uploads::commit))
         .route("/share-links", get(shares::list).post(shares::create))
         .route("/share-links/{id}", axum::routing::delete(shares::revoke))
-        .route("/share/{*token}", axum::routing::any(shares::download))
+        .route("/share/{*token}", axum::routing::any(shares::public))
         .route("/share/", axum::routing::any(shares::missing))
         .route("/share", axum::routing::any(shares::missing))
         .route("/archives", post(archives::issue))

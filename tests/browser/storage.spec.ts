@@ -1034,6 +1034,216 @@ test('owner shares and revokes a file downloaded in a separate signed-out TLS co
   }
 });
 
+test('public folder link browses live content in a signed-out TLS context', {
+  annotation: { type: 'harness_case', description: 'storage_public_folder' },
+}, async () => {
+  const signedIn = page.waitForResponse(response => new URL(response.url()).pathname === '/auth/local' && response.request().method() === 'POST');
+  await signIn();
+  const { csrf_token: csrfToken } = await (await signedIn).json();
+  if (typeof csrfToken !== 'string' || !csrfToken) throw new Error('Missing fixture session CSRF token');
+  const appPassword = await page.evaluate(async ({ name, csrfToken }) => {
+    const response = await fetch('/me/webdav', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ name, read_only: false }),
+    });
+    if (response.status !== 201) throw new Error(`Could not create fixture app password (HTTP ${response.status})`);
+    const { password } = await response.json();
+    if (typeof password !== 'string' || !password) throw new Error('Missing disposable app password');
+    return password;
+  }, { name: `Public folder desktop fixture ${phase}`, csrfToken });
+  const folder = `Client delivery ${phase}`;
+  const nested = 'Ready to download';
+  const filename = `draft-${phase}.txt`;
+  const moveName = `moved-${phase}.txt`;
+  const addition = `added-${phase}.txt`;
+  const original = Buffer.from('Original shared bytes');
+  const replacement = Buffer.from('Replacement shared bytes');
+  const button = (tab: Pick<Page, 'getByRole'>, name: string) => tab.getByRole('button', { name, exact: true });
+  const options = async (name: string, action: string) => {
+    await button(page, `Options for ${name}`).press('Enter');
+    await page.getByRole('menuitem', { name: action, exact: true }).click();
+  };
+  const createFolder = async (name: string) => {
+    await button(page, 'New folder').click();
+    const form = page.getByRole('dialog', { name: 'Create folder' });
+    await form.getByLabel('Folder name').fill(name);
+    await button(form, 'Create folder').click();
+    await expect(form).toBeHidden();
+    await expect(button(page, `Open ${name}`)).toBeVisible();
+  };
+  const openFolder = async (name: string) => {
+    await button(page, `Open ${name}`).click();
+    await expect(page.getByRole('heading', { name, level: 1, exact: true })).toBeVisible();
+  };
+  const confirmUpload = async (name: string, bytes: Buffer, confirm?: boolean) => {
+    await page.locator('#upload-file').setInputFiles({ name, mimeType: 'text/plain', buffer: bytes });
+    const warning = page.getByRole('dialog', { name: `Upload to ${nested}?` });
+    await expect(warning).toContainText('Anyone with a public link');
+    await expect(button(warning, 'Cancel')).toBeFocused();
+    await button(warning, confirm ? 'Upload' : 'Cancel').press('Enter');
+    await expect(warning).toBeHidden();
+  };
+
+  await chooseUpload({ name: moveName, mimeType: 'text/plain', buffer: original });
+  await expect(button(page, `Preview ${moveName}`)).toBeVisible();
+  await createFolder(folder);
+  await openFolder(folder);
+  await createFolder(nested);
+  await openFolder(nested);
+  await chooseUpload({ name: filename, mimeType: 'text/plain', buffer: original });
+  await expect(button(page, `Preview ${filename}`)).toBeVisible();
+  await button(page.getByRole('navigation', { name: 'Files' }), 'Files').click();
+  await options(folder, 'Public link');
+  const dialog = page.getByRole('dialog', { name: `Share ${folder}` });
+  await expect(dialog).toContainText('They can see files added, restored or replaced, including through WebDAV sync, until the link expires or you revoke it.');
+  await expect(dialog.getByLabel('Expires after')).toHaveValue('7');
+  await button(dialog, 'Create link').click();
+  const field = dialog.getByRole('textbox', { name: 'Folder link' });
+  await expect(field).toBeFocused();
+  const url = await field.inputValue();
+  await button(dialog, 'Done').click();
+  await expect(button(page, `Options for ${folder}`)).toBeFocused();
+
+  await expect(page.getByRole('row', { name: folder, exact: true })).toContainText('Public link active');
+  const signedOut = await storageContext();
+  try {
+    const tab = await signedOut.newPage();
+    const listing = await tab.goto(url);
+    expect(listing?.status()).toBe(200);
+    expect((await listing?.allHeaders())?.['referrer-policy']).toBe('no-referrer');
+    expect(await signedOut.cookies()).toHaveLength(0);
+    await expect(tab.getByRole('heading', { level: 1 })).toHaveText(folder);
+    const style = tab.locator('link[rel="stylesheet"]');
+    expect(await style.getAttribute('href')).toBe('/public-folder.css');
+    await tab.getByRole('link', { name: `${nested} Open folder` }).press('Enter');
+    await expect(tab.getByRole('heading', { level: 1 })).toHaveText(nested);
+    const probe = await signedOut.newPage();
+    const freshStatus = async (saved: string) => {
+      const response = await probe.goto(new URL(saved, url).href);
+      return [response?.status(), await response?.json()];
+    };
+    const missing = [404, { code: 'share_not_found' }];
+    const breadcrumb = tab.getByRole('navigation', { name: 'Folder path' });
+    await expect(breadcrumb.getByRole('link')).toHaveText([folder]);
+    await expect(tab.getByRole('searchbox')).toHaveCount(0);
+
+    const entry = (name: string) => tab.getByRole('link', { name: `${name} Download`, exact: true });
+    const download = async (file: string, bytes: Buffer) => {
+      const response = tab.waitForEvent('download');
+      await entry(file).press('Enter');
+      const saved = await response;
+      expect(saved.suggestedFilename()).toBe(file);
+      expect(fs.readFileSync((await saved.path())!)).toEqual(bytes);
+    };
+    for (const [width, colorScheme] of [[1280, 'light'], [390, 'dark']] as const) {
+      await tab.setViewportSize({ width, height: 850 });
+      await tab.emulateMedia({ colorScheme });
+      await expect(entry(filename)).toBeVisible();
+      expect(await tab.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      expect(await tab.locator('body').evaluate(body => getComputedStyle(body).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+    }
+    const oldUrl = (await entry(filename).getAttribute('href'))!;
+    await download(filename, original);
+
+    await options(moveName, 'Move');
+    const picker = page.getByRole('dialog', { name: `Move ${moveName}`, exact: true });
+    await picker.getByRole('button', { name: folder, exact: true }).click();
+    await picker.getByRole('button', { name: nested, exact: true }).click();
+    const moveHere = button(picker, 'Move here');
+    await expect(moveHere).toBeEnabled();
+    await moveHere.click();
+    const moveWarning = page.getByRole('dialog', { name: `Move ${moveName}?` });
+    await expect(moveWarning).toContainText('Anyone with a public link');
+    await button(moveWarning, 'Cancel').press('Enter');
+    await tab.reload();
+    await expect(entry(moveName)).toHaveCount(0);
+    await expect(moveHere).toBeEnabled();
+    await moveHere.click();
+    await button(moveWarning, 'Move and share').press('Enter');
+    await expect(picker).toBeHidden();
+    await tab.reload();
+    await download(moveName, original);
+
+    await openFolder(folder);
+    await openFolder(nested);
+    await confirmUpload(addition, original);
+    await expect(button(page, 'Choose files')).toBeEnabled();
+    await tab.reload();
+    await expect(entry(addition)).toHaveCount(0);
+    await confirmUpload(addition, original, true);
+    await expect(button(page, `Preview ${addition}`)).toBeVisible();
+    await tab.reload();
+    await download(addition, original);
+
+    await confirmUpload(filename, replacement, true);
+    const replace = page.getByRole('dialog', { name: `Replace ${filename}?` });
+    await expect(replace).toContainText('The replacement file will be available');
+    await button(replace, 'Replace file').press('Enter');
+    await expect(button(page, 'Choose files')).toBeEnabled();
+    await tab.reload();
+    await download(filename, replacement);
+    expect(await freshStatus(oldUrl)).toEqual(missing);
+
+    const davFolder = 'Synced collection';
+    const davFile = 'synced.txt';
+    const davPath = `/dav/Files/${[folder, davFolder].map(encodeURIComponent).join('/')}/`;
+    expect((await davRequest(appPassword, 'MKCOL', davPath)).status).toBe(201);
+    const davUpload = await davRequest(appPassword, 'PUT', davPath + davFile, original);
+    expect(davUpload.status).toBe(201);
+    if (!davUpload.etag) throw new Error('DAV PUT must return an ETag');
+    await breadcrumb.getByRole('link', { name: folder }).press('Enter');
+    await tab.getByRole('link', { name: `${davFolder} Open folder` }).press('Enter');
+    await expect(tab.getByRole('heading', { name: davFolder })).toBeVisible();
+    await download(davFile, original);
+    const oldDavUrl = (await entry(davFile).getAttribute('href'))!;
+    expect((await davRequest(appPassword, 'PUT', davPath + davFile, replacement, { 'If-Match': davUpload.etag })).status).toBe(204);
+    await tab.reload();
+    await download(davFile, replacement);
+    const davUrl = (await entry(davFile).getAttribute('href'))!;
+    expect(await freshStatus(oldDavUrl)).toEqual(missing);
+    await tab.getByRole('navigation', { name: 'Folder path' }).getByRole('link', { name: folder }).press('Enter');
+    await tab.getByRole('link', { name: `${nested} Open folder` }).press('Enter');
+
+    const downloadUrl = (await entry(addition).getAttribute('href'))!;
+    await options(addition, 'Delete');
+    await button(page, 'Move to trash').press('Enter');
+    await expect(button(page, `Preview ${addition}`)).toHaveCount(0);
+    expect(await freshStatus(downloadUrl)).toEqual(missing);
+    await button(page, 'Trash').click();
+    const restore = button(page, `Restore ${addition}`);
+    await restore.press('Enter');
+    const restoring = page.getByRole('dialog', { name: `Restore ${addition}?` });
+    await expect(restoring).toContainText('Anyone with a public link');
+    await button(restoring, 'Cancel').press('Enter');
+    await expect(restore).toBeVisible();
+    expect(await freshStatus(downloadUrl)).toEqual(missing);
+    await restore.press('Enter');
+    await button(restoring, 'Restore and share').press('Enter');
+    await expect(restore).toHaveCount(0);
+    await tab.reload();
+    await download(addition, original);
+
+    await button(page.getByRole('navigation', { name: 'Files' }), 'Files').press('Enter');
+    await openFolder(folder);
+    const active = button(page, `Public link active for ${folder}. Manage public links`);
+    await active.press('Enter');
+    const manage = page.getByRole('dialog', { name: `Share ${folder}` });
+    await manage.getByRole('button', { name: `Revoke link 1 for ${folder}` }).press('Enter');
+    await expect(manage.getByRole('status')).toHaveText('Link revoked.');
+    await expect(button(manage, 'Done')).toBeFocused();
+    await button(manage, 'Done').press('Enter');
+    await expect(active).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: folder, exact: true })).toBeFocused();
+    await expect(tab.getByText('Public link active')).toHaveCount(0);
+    for (const saved of [url, downloadUrl, davUrl]) {
+      expect(await freshStatus(saved)).toEqual(missing);
+    }
+  } finally {
+    await signedOut.close();
+  }
+});
+
 async function openTextEditor(tab: Page, name: string) {
   await tab.getByRole('button', { name: `Preview ${name}`, exact: true }).click();
   await tab.getByRole('dialog', { name: `Preview ${name}` }).getByRole('button', { name: 'Edit', exact: true }).click();
@@ -1188,14 +1398,13 @@ test('navigation keeps the draft and retry finishes the same staged edit', {
   await expect(page.getByRole('dialog').locator('pre')).toHaveText('# Confirmed by status');
 });
 
-test('WebDAV changes appear in Files and Trash and the app password can be revoked', { annotation: { type: 'harness_case', description: 'storage_webdav_changes' } }, async () => {
-  await signIn();
+async function createDavPassword(appName: string): Promise<string> {
   await page.getByRole('button', { name: 'Account', exact: true }).press('Enter');
   const manage = page.getByRole('button', { name: 'Manage app passwords', exact: true });
   await manage.press('Enter');
   const dialog = page.getByRole('dialog', { name: 'WebDAV app passwords' });
   const name = dialog.getByRole('textbox', { name: 'App name' });
-  await name.fill('Desktop fixture');
+  await name.fill(appName);
   await dialog.getByRole('button', { name: 'Create app password' }).press('Enter');
   const passwordField = dialog.getByRole('textbox', { name: 'App password' });
   await expect(passwordField).toBeFocused();
@@ -1206,33 +1415,41 @@ test('WebDAV changes appear in Files and Trash and the app password can be revok
   await expect(name).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(manage).toBeFocused();
+  return appPassword;
+}
 
-  async function dav(method: string, target: string, body = Buffer.alloc(0), headers: Record<string, string> = {}) {
-    const fixtureOrigin = new URL(origin);
-    return new Promise<{ status: number; bytes: Buffer }>((resolve, reject) => {
-      const request = https.request({
-        hostname: '127.0.0.1',
-        servername: fixtureOrigin.hostname,
-        port: Number(fixtureOrigin.port),
-        path: target,
-        method,
-        ca: fs.readFileSync(process.env.S1_CA_CERT!),
-        headers: {
-          authorization: `Basic ${Buffer.from(`${fixtures.handle}:${appPassword}`).toString('base64')}`,
-          'content-length': String(body.length),
-          ...headers,
-        },
-      }, response => {
-        const parts: Buffer[] = [];
-        response.on('data', part => parts.push(part));
-        response.once('error', reject);
-        response.once('end', () => resolve({ status: response.statusCode ?? 0, bytes: Buffer.concat(parts) }));
-      });
-      request.setTimeout(10_000, () => request.destroy(new Error('fixture DAV request timed out')));
-      request.once('error', reject);
-      request.end(body);
+async function davRequest(appPassword: string, method: string, target: string, body: Buffer = Buffer.alloc(0), headers: Record<string, string> = {}) {
+  const fixtureOrigin = new URL(origin);
+  return new Promise<{ status: number; bytes: Buffer; etag?: string }>((resolve, reject) => {
+    const request = https.request({
+      hostname: '127.0.0.1',
+      servername: fixtureOrigin.hostname === '127.0.0.1' ? undefined : fixtureOrigin.hostname,
+      port: Number(fixtureOrigin.port),
+      path: target,
+      method,
+      ca: fs.readFileSync(process.env.S1_CA_CERT!),
+      headers: {
+        authorization: `Basic ${Buffer.from(`${fixtures.handle}:${appPassword}`).toString('base64')}`,
+        'content-length': String(body.length),
+        ...headers,
+      },
+    }, response => {
+      const parts: Buffer[] = [];
+      response.on('data', part => parts.push(part));
+      response.once('error', reject);
+      response.once('end', () => resolve({ status: response.statusCode ?? 0, bytes: Buffer.concat(parts), etag: response.headers.etag }));
     });
-  }
+    request.setTimeout(10_000, () => request.destroy(new Error('fixture DAV request timed out')));
+    request.once('error', reject);
+    request.end(body);
+  });
+}
+
+test('WebDAV changes appear in Files and Trash and the app password can be revoked', { annotation: { type: 'harness_case', description: 'storage_webdav_changes' } }, async () => {
+  await signIn();
+  const appPassword = await createDavPassword('Desktop fixture');
+  const dav = (method: string, target: string, body?: Buffer, headers?: Record<string, string>) =>
+    davRequest(appPassword, method, target, body, headers);
 
   await page.getByRole('button', { name: 'Files', exact: true }).press('Enter');
   const upload = `dav-new-${phase}.txt`;
@@ -1269,6 +1486,9 @@ test('WebDAV changes appear in Files and Trash and the app password can be revok
   await page.getByRole('button', { name: 'Account', exact: true }).press('Enter');
   await page.getByRole('button', { name: 'Switch to dark mode' }).press('Enter');
   await page.setViewportSize({ width: 390, height: 844 });
+  const manage = page.getByRole('button', { name: 'Manage app passwords', exact: true });
+  const dialog = page.getByRole('dialog', { name: 'WebDAV app passwords' });
+  const name = dialog.getByRole('textbox', { name: 'App name' });
   await manage.press('Enter');
   await expect(dialog).toBeInViewport();
   await dialog.getByRole('button', { name: 'Revoke Desktop fixture', exact: true }).press('Enter');

@@ -1880,7 +1880,7 @@ async fn file_shares_are_hash_only_owner_managed_and_download_exact_bytes_withou
     );
     assert_eq!(issue_share(&f, Some(0)).await.0, 400);
     for (entry, actor, csrf) in [
-        (ROOT, auth(SESSION, SECRET), CSRF),
+        (OTHER_ROOT, auth(SESSION, SECRET), CSRF),
         (SHARE_FILE, auth(OTHER_SESSION, OTHER_SECRET), OTHER_CSRF),
     ] {
         let body = serde_json::json!({"entry_id":entry,"expiry_days":30}).to_string();
@@ -2735,3 +2735,6 @@ async fn publication_live_tree_moves_and_restores_recheck_consent() {
     check_reachability(folder.as_str(), true).await;
     f.close().await;
 }
+
+#[path = "content_folder_links.rs"]
+mod folder_links;

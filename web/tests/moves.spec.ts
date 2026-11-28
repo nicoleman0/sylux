@@ -15,6 +15,7 @@ async function installMoveBackend(page: Page) {
     const json = (value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
     if (path === '/auth/csrf') return json({ csrf_token: 'csrf' });
     if (path === '/auth/local') return json({ account_id: 'owner', handle: 'owner', role: 'user', csrf_token: 'csrf' });
+    if (path === '/share-links' && request.method() === 'GET') return json([]);
     if (path === '/entries/search') return json({ items: entries.filter(entry => entry.name.includes('notes')).map(entry => ({ entry, location: [root] })), next_cursor: null, has_more: false });
     if (path === '/folders/children') return json({ root, items: entries.filter(entry => entry.parent_id === 'root'), next_cursor: null, has_more: false });
     if (/^\/folders\/[^/]+\/children$/.test(path)) return json({ items: entries.filter(entry => entry.parent_id === path.split('/')[2]), next_cursor: null, has_more: false });

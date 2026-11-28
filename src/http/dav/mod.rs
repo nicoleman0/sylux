@@ -13,7 +13,7 @@ use crate::domain::{
     library_publication,
     names::EntryName,
     namespace as storage_namespace,
-    upload::{MAX_UPLOAD_LENGTH, UploadAdmission},
+    upload::{MAX_UPLOAD_LENGTH, Replacement, UploadAdmission},
 };
 use axum::{
     body::{Body, Bytes, to_bytes},
@@ -454,13 +454,21 @@ async fn put(
         }
         let (parent, name) = writable_parent(db, &grant.account_id, &path.names)?;
         let existing = child(db, &grant.account_id, Some(&parent.id), name)?;
-        conditions.check(
-            existing.as_ref().map(|entry| entry.http_etag()).as_deref(),
-            existing.is_some(),
-        )?;
-        if existing.is_some() {
-            return Err(StatusCode::PRECONDITION_FAILED);
-        }
+        let http_etag = existing.as_ref().map(|entry| entry.http_etag());
+        conditions.check(http_etag.as_deref(), existing.is_some())?;
+        let replacement = match existing {
+            Some(entry) => {
+                if entry.folder || matches!(conditions.if_match.as_deref(), None | Some("*")) {
+                    return Err(StatusCode::PRECONDITION_FAILED);
+                }
+                Some(Replacement {
+                    entry_id: entry.id,
+                    etag: entry.etag,
+                    text_revision: None,
+                })
+            }
+            None => None,
+        };
         library_publication::require_unpublished_parent(db, &grant.account_id, &parent.id)
             .map_err(namespace_error)?;
         let admission = UploadAdmission {
@@ -469,7 +477,7 @@ async fn put(
             name: name.display.clone(),
             length,
             sha256: None,
-            replacement: None,
+            replacement,
         };
         Ok((
             grant.clone(),

@@ -586,10 +586,24 @@ pub async fn create(
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
 }
+#[derive(Deserialize)]
+pub struct FolderPathQuery {
+    #[serde(default)]
+    public_links: bool,
+}
+
+#[derive(Serialize)]
+struct FolderPathReply {
+    items: Vec<namespace::Entry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public_link_active: Option<bool>,
+}
+
 pub async fn folder_path(
     State(s): State<AuthState>,
     headers: HeaderMap,
     Path(folder): Path<String>,
+    Query(query): Query<FolderPathQuery>,
 ) -> Response {
     let (account, _) = match principal(&s, &headers).await {
         Ok(value) => value,
@@ -603,27 +617,41 @@ pub async fn folder_path(
         .read(move |db| {
             let snapshot = db.unchecked_transaction()?;
             let db = &snapshot;
-            let Some((current, _, _)) = authz::validate_session(
-                db,
-                &cookie.session_id,
-                &cookie.secret,
-                crate::http::auth::now(),
-            ) else {
+            let at = crate::http::auth::now();
+            let Some((current, _, _)) =
+                authz::validate_session(db, &cookie.session_id, &cookie.secret, at)
+            else {
                 return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
             };
             if current != account {
                 return Ok(Err(error(StatusCode::UNAUTHORIZED, "unauthorized")));
             }
-            Ok(
-                namespace::folder_path(db, &account, &folder).map_err(|failure| match failure {
-                    NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
-                    _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-                }),
-            )
+            Ok((|| {
+                let items =
+                    namespace::folder_path(db, &account, &folder).map_err(
+                        |failure| match failure {
+                            NamespaceError::NotFound => error(StatusCode::NOT_FOUND, "not_found"),
+                            _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+                        },
+                    )?;
+                let public_link_active = query
+                    .public_links
+                    .then(|| {
+                        crate::domain::public_links::inherited(db, &account, &items, at)
+                            .map(|links| !links.is_empty())
+                    })
+                    .transpose()
+                    .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))?;
+                Ok(FolderPathReply {
+                    items,
+                    public_link_active,
+                })
+            })())
         })
         .await;
     match result {
-        Ok(Ok(items)) => Json(serde_json::json!({ "items": items })).into_response(),
+        Ok(Ok(path)) if path.public_link_active.is_some() => private(Json(path).into_response()),
+        Ok(Ok(path)) => Json(path).into_response(),
         Ok(Err(response)) => response,
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }

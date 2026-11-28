@@ -4,7 +4,7 @@ const ALLOWED_CASES = new Set([
   'trusted_assets', 'trusted_api_routes', 'wrong_san', 'unrelated_ca', 'plaintext_and_cookie_policy',
   'accessibility_keyboard_sign_in', 'accessibility_control_names', 'accessibility_rename_escape_focus', 'accessibility_list_keyboard', 'accessibility_live_failure_retry', 'accessibility_create_account_sign_in',
   'storage_responsive_controls', 'storage_listing_states', 'storage_upload_download_roundtrip', 'storage_delayed_upload_browsing',
-  'storage_upload_resume', 'storage_upload_cancel', 'storage_lost_commit_response', 'storage_pdf_preview', 'storage_public_share',
+  'storage_upload_resume', 'storage_upload_cancel', 'storage_lost_commit_response', 'storage_pdf_preview', 'storage_public_share', 'storage_public_folder',
   'storage_text_edit_roundtrip', 'storage_text_edit_conflict', 'storage_text_edit_retry',
   'storage_private_libraries', 'storage_direct_sharing',
   'storage_library_publication',

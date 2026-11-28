@@ -11,6 +11,7 @@ pub(crate) mod library_publication;
 pub mod mutation;
 pub mod names;
 pub mod namespace;
+pub(crate) mod public_links;
 pub mod removal;
 pub mod search;
 pub mod upload;

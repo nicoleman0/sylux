@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 
+mod folder;
+
 pub(super) const DOWNLOAD_SLOTS: usize = 8;
 const OWNER_LINK_LIMIT: i64 = 50;
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -143,6 +145,7 @@ struct Link {
     id: String,
     entry_id: String,
     name: String,
+    kind: String,
     created_at: i64,
     expires_at: i64,
 }
@@ -186,15 +189,21 @@ async fn create_link(
     let link = state.workers.transact_result(move |db| {
         let time = now();
         let account = authorize_write(db, &cookie, &csrf, time)?;
-        let (name, revision, parent): (String, String, String) = db.query_row(
-            "SELECT e.original_name,r.revision_id,e.parent_id FROM entry e
-             JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id
-             JOIN blob b ON b.blob_id=r.blob_id AND b.lifecycle='live'
-             WHERE e.entry_id=?1 AND e.owner_account_id=?2 AND e.state='active' AND e.kind='file'",
+        let (name, kind, revision, parent): (String, String, Option<String>, Option<String>) = db.query_row(
+            "SELECT coalesce(e.library_display_name,e.original_name),e.kind,r.revision_id,e.parent_id
+             FROM entry e
+             LEFT JOIN revision r ON r.revision_id=e.current_revision_id AND r.entry_id=e.entry_id
+             LEFT JOIN blob b ON b.blob_id=r.blob_id AND b.lifecycle='live'
+             WHERE e.entry_id=?1 AND e.owner_account_id=?2 AND e.state='active'
+             AND (e.kind='folder' OR (e.kind='file' AND b.blob_id IS NOT NULL))",
             params![entry_id, account],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).optional()?.ok_or(Failure::EntryMissing)?;
-        require_live_parent(db, &account, &parent, Failure::EntryMissing)?;
+        if kind == "folder" {
+            require_live_parent(db, &account, &entry_id, Failure::EntryMissing)?;
+        } else {
+            require_live_parent(db, &account, parent.as_deref().ok_or(Failure::EntryMissing)?, Failure::EntryMissing)?;
+        }
         // Use short, indexed cleanup batches so old links cannot stall storage writes.
         db.execute(
             "DELETE FROM share_link WHERE share_id IN (
@@ -216,11 +225,16 @@ async fn create_link(
              VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![id.as_str(), verifier.as_slice(), account, entry_id, revision, time, expires_at],
         )?;
-        Ok(Link { id: id.as_str().to_owned(), entry_id, name, created_at: time, expires_at })
+        Ok(Link { id: id.as_str().to_owned(), entry_id, name, kind, created_at: time, expires_at })
     }).await.map_err(|_| Failure::Unavailable)??;
+    let suffix = if link.kind == "folder" { "/browse" } else { "" };
     Ok(CreatedLink {
         link,
-        url: format!("{}/share/{}", state.origin, URL_SAFE_NO_PAD.encode(token)),
+        url: format!(
+            "{}/share/{}{suffix}",
+            state.origin,
+            URL_SAFE_NO_PAD.encode(token)
+        ),
     })
 }
 
@@ -239,9 +253,11 @@ pub async fn list(State(state): State<AuthState>, headers: HeaderMap) -> Respons
             };
             let rows = {
                 let mut statement = snapshot.prepare(
-                    "SELECT s.share_id,s.entry_id,e.original_name,s.created_at,s.expires_at
+                    "SELECT s.share_id,s.entry_id,coalesce(e.library_display_name,e.original_name),e.kind,s.created_at,s.expires_at
                  FROM share_link s JOIN entry e ON e.entry_id=s.entry_id
-                 AND e.owner_account_id=s.owner_account_id AND e.current_revision_id=s.revision_id
+                 AND e.owner_account_id=s.owner_account_id
+                 AND ((e.kind='folder' AND s.revision_id IS NULL)
+                      OR (e.kind='file' AND e.current_revision_id=s.revision_id))
                  WHERE s.owner_account_id=?1 AND s.expires_at>?2 AND e.state='active'
                  ORDER BY s.created_at DESC,s.share_id",
                 )?;
@@ -251,8 +267,9 @@ pub async fn list(State(state): State<AuthState>, headers: HeaderMap) -> Respons
                             id: row.get(0)?,
                             entry_id: row.get(1)?,
                             name: row.get(2)?,
-                            created_at: row.get(3)?,
-                            expires_at: row.get(4)?,
+                            kind: row.get(3)?,
+                            created_at: row.get(4)?,
+                            expires_at: row.get(5)?,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
@@ -306,6 +323,21 @@ struct Download {
     digest: [u8; 32],
 }
 
+impl Download {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            name: row.get(0)?,
+            blob_id: row.get(1)?,
+            length: u64::try_from(row.get::<_, i64>(2)?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+            digest: row
+                .get::<_, Vec<u8>>(3)?
+                .try_into()
+                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        })
+    }
+}
+
 fn resolve(db: &Connection, verifier: [u8; 32]) -> Result<Download, Failure> {
     let snapshot = db.unchecked_transaction()?;
     let (download, account, parent) = snapshot
@@ -320,19 +352,8 @@ fn resolve(db: &Connection, verifier: [u8; 32]) -> Result<Download, Failure> {
          AND e.state='active' AND e.current_revision_id=s.revision_id",
             params![verifier.as_slice(), now()],
             |row| {
-                let length = u64::try_from(row.get::<_, i64>(2)?)
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                let digest = row
-                    .get::<_, Vec<u8>>(3)?
-                    .try_into()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 Ok((
-                    Download {
-                        name: row.get(0)?,
-                        blob_id: row.get(1)?,
-                        length,
-                        digest,
-                    },
+                    Download::from_row(row)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                 ))
@@ -349,22 +370,51 @@ pub async fn missing() -> Response {
     Failure::Missing.into_response()
 }
 
-pub async fn download(State(state): State<AuthState>, method: Method, uri: Uri) -> Response {
+pub async fn public(State(state): State<AuthState>, method: Method, uri: Uri) -> Response {
     if method != Method::GET {
         return secured((StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "GET")]).into_response());
     }
-    let Some(token) = uri.path().strip_prefix("/share/").and_then(decode_secret) else {
+    let Some(path) = uri.path().strip_prefix("/share/") else {
         return missing().await;
     };
+    let mut segments = path.split('/');
+    let Some((encoded, token)) = segments
+        .next()
+        .and_then(|value| decode_secret(value).map(|token| (value, token)))
+    else {
+        return missing().await;
+    };
+    let verifier = authz::verifier(&token);
+    match (segments.next(), segments.next(), segments.next()) {
+        (None, None, None) => download(state, verifier, None).await,
+        (Some("browse"), None, None) => {
+            folder::browse(state, encoded, verifier, None, uri.query()).await
+        }
+        (Some("folders"), Some(id), None) if validate_id(id).is_ok() => {
+            folder::browse(state, encoded, verifier, Some(id.to_owned()), uri.query()).await
+        }
+        (Some("files"), Some(id), None) if validate_id(id).is_ok() => {
+            download(state, verifier, Some(id.to_owned())).await
+        }
+        _ => missing().await,
+    }
+}
+
+async fn download(state: AuthState, verifier: [u8; 32], entry: Option<String>) -> Response {
     let Ok(permit) = Arc::clone(&state.share_downloads).try_acquire_owned() else {
         return secured(
             (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "1")]).into_response(),
         );
     };
-    let verifier = authz::verifier(&token);
     let (reference, permit) = match state
         .workers
-        .read(move |db| Ok(resolve(db, verifier).map(|reference| (reference, permit))))
+        .read(move |db| {
+            let reference = match entry {
+                Some(id) => folder::download(db, verifier, &id),
+                None => resolve(db, verifier),
+            };
+            Ok(reference.map(|reference| (reference, permit)))
+        })
         .await
     {
         Ok(Ok(resolved)) => resolved,

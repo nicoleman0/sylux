@@ -266,7 +266,7 @@ test('bulk trash requires confirmation and keeps conflicting or forbidden items 
   await page.getByRole('button', { name: 'Move selected to trash', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toContainText('3 selected items');
-  await expect(dialog).toHaveAccessibleDescription(/Direct shares rooted in selected folders or their contents are revoked permanently\./);
+  await expect(dialog).toHaveAccessibleDescription(/Public links and direct shares rooted in the selected items or their contents are revoked permanently\./);
   expect(backend.mutations).toEqual([]);
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   expect(backend.mutations).toEqual([]);

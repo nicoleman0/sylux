@@ -195,7 +195,7 @@ unit search path, run `systemctl daemon-reload`, and verify the prior binary,
 that root first. Take a fresh stopped backup and repeat the normal upgrade
 steps with the verified package after resolving the original failure.
 
-Snapshot restore can affect shared links. Before restoring, restrict recipient access at the proxy or network.
+Snapshot restore can affect public file and folder links. [Restrict recipient access](sharing.md#backup-and-restore) at the proxy or network before restoring.
 The snapshot may revive a link revoked later. Keep access restricted through
 owner review and revocation. Owners can review their own links. Keep the
 restriction if owners cannot review.

@@ -9,7 +9,7 @@ use std::{
     fs,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::PathBuf,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use sylux::persistence::{schema, sqlite};
 
@@ -823,11 +823,35 @@ fn valid_seed_passes_product_recovery_checks() {
     cleanup(owner);
 }
 
+fn seed_share_file(db: &mut Connection) -> (String, String) {
+    let (owner, root, blob, file, revision) = (id(10), id(20), id(50), id(51), id(52));
+    let tx = db.transaction().unwrap();
+    tx.execute(
+        "INSERT INTO blob (blob_id, shard, length, sha256) VALUES (?1, ?2, 0, ?3)",
+        params![blob, &blob[..2], digest()],
+    )
+    .unwrap();
+    insert_child(&tx, &file, &owner, &root, "file", "share.bin", b"share.bin").unwrap();
+    tx.execute(
+        "INSERT INTO revision (revision_id, entry_id, blob_id, length, sha256, committed_at, actor_account_id)
+         VALUES (?1, ?2, ?3, 0, ?4, 1, ?5)",
+        params![revision, file, blob, digest(), owner],
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE entry SET current_revision_id=?1 WHERE entry_id=?2",
+        params![revision, file],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    (file, revision)
+}
+
 #[test]
 fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication() {
     use sylux::domain::namespace;
     use sylux::persistence::root;
-    for version in [1, 2, 3, 4, 5, 6, 7] {
+    for version in 1..schema::SUPPORTED_SCHEMA_VERSION {
         for interrupted in [false, true] {
             let (owner, path) = fixture(&format!("legacy-v{version}-{interrupted}"));
             fs::remove_file(&path).unwrap();
@@ -850,7 +874,7 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                 .mode(0o600)
                 .open(&path)
                 .unwrap();
-            let db = sqlite::open_writer(&path, BUSY).unwrap();
+            let mut db = sqlite::open_writer(&path, BUSY).unwrap();
             db.execute_batch(schema::MIGRATION_0001_S1).unwrap();
             schema::insert_installation_row(&db, &legacy, digest()).unwrap();
             insert_account(&db, &id(10), "owner-a", "user");
@@ -897,6 +921,34 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
             if version >= 7 {
                 schema::migrate_library_publication(&db, None).unwrap();
             }
+            if version >= 8 {
+                schema::migrate_external_identity(&db, None).unwrap();
+            }
+            let saved_file_link = if version == 8 {
+                let (file, revision) = seed_share_file(&mut db);
+                let created = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                let expires = created + 86_400;
+                db.execute(
+                    "INSERT INTO share_link (share_id,verifier,owner_account_id,entry_id,revision_id,created_at,expires_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![id(53), digest(), id(10), file, revision, created, expires],
+                )
+                .unwrap();
+                Some((
+                    id(53),
+                    digest().to_vec(),
+                    id(10),
+                    file,
+                    revision,
+                    created,
+                    expires,
+                ))
+            } else {
+                None
+            };
             if interrupted {
                 use sha2::{Digest, Sha256};
                 let hash = Sha256::digest(serde_json::to_vec(&legacy).unwrap());
@@ -908,6 +960,7 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                     5 => schema::migrate_direct_grants,
                     6 => schema::migrate_library_publication,
                     7 => schema::migrate_external_identity,
+                    8 => schema::migrate_folder_links,
                     _ => unreachable!(),
                 };
                 migrate(&db, Some(hash.as_slice())).unwrap();
@@ -919,7 +972,8 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
                     4 => ("dav_credential", "TABLE"),
                     5 => ("direct_grant_trash", "TRIGGER"),
                     6 => ("library_publication_trash", "TRIGGER"),
-                    _ => ("external_identity_pending_handle", "INDEX"),
+                    7 => ("external_identity_pending_handle", "INDEX"),
+                    _ => ("share_link_identity", "TRIGGER"),
                 };
                 let create_sql: String = bound
                     .connection
@@ -944,6 +998,20 @@ fn legacy_binding_upgrade_recovers_database_commit_before_manifest_publication()
             assert_eq!(upgraded.schema_version, schema::SUPPORTED_SCHEMA_VERSION);
             assert_eq!(root::read_manifest(&product).unwrap(), upgraded);
             root::verify_binding(&bound, &product, &upgraded).unwrap();
+            if let Some(expected) = saved_file_link {
+                let actual = bound.connection.query_row(
+                    "SELECT share_id,verifier,owner_account_id,entry_id,revision_id,created_at,expires_at
+                     FROM share_link",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                ).unwrap();
+                assert_eq!(expected, actual);
+                let mut check = bound
+                    .connection
+                    .prepare("PRAGMA foreign_key_check")
+                    .unwrap();
+                assert!(check.query([]).unwrap().next().unwrap().is_none());
+            }
             let credentials = bound
                 .connection
                 .query_row("SELECT count(*) FROM dav_credential", [], |r| {
@@ -1048,6 +1116,7 @@ fn library_migration_rolls_back_schema_and_version_on_failure() {
     schema::migrate_direct_grants(&db, None).unwrap();
     schema::migrate_library_publication(&db, None).unwrap();
     schema::migrate_external_identity(&db, None).unwrap();
+    schema::migrate_folder_links(&db, None).unwrap();
     assert_eq!(
         schema::apply_migrations(&db).unwrap(),
         schema::MigrationOutcome::AlreadyCurrent
@@ -1105,12 +1174,54 @@ fn unbound_v1_migration_fails_without_writing_a_partial_transition() {
 }
 
 #[test]
+fn share_link_identity_requires_an_enabled_owner_and_the_right_target_kind() {
+    let (fixture, mut db) = product_schema("share-link-identity");
+    let owner = id(10);
+    let other = id(11);
+    let folder = id(20);
+    let disabled_folder = id(21);
+    insert_account(&db, &owner, "link-owner", "user");
+    insert_account(&db, &other, "other-owner", "user");
+    insert_root(&db, &folder, &owner);
+    insert_root(&db, &disabled_folder, &other);
+    let (file, revision) = seed_share_file(&mut db);
+
+    let insert = |n: u8, owner: &str, target: &str, revision: Option<&str>| {
+        db.execute(
+            "INSERT INTO share_link (share_id,verifier,owner_account_id,entry_id,revision_id,created_at,expires_at)
+             VALUES (?1,?2,?3,?4,?5,1,86401)",
+            params![id(n.into()), [n; 32], owner, target, revision],
+        )
+    };
+    let denied = |result: rusqlite::Result<usize>| {
+        assert!(matches!(
+            result,
+            Err(rusqlite::Error::SqliteFailure(error, Some(message)))
+                if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+                    && message == "invalid share link target"
+        ));
+    };
+    denied(insert(60, &owner, &folder, Some(&revision)));
+    denied(insert(61, &owner, &file, None));
+    denied(insert(62, &other, &file, Some(&revision)));
+    db.execute("UPDATE account SET enabled=0 WHERE account_id=?1", [&other])
+        .unwrap();
+    denied(insert(63, &other, &disabled_folder, None));
+
+    assert_eq!(insert(64, &owner, &folder, None).unwrap(), 1);
+    assert_eq!(insert(65, &owner, &file, Some(&revision)).unwrap(), 1);
+    drop(db);
+    cleanup(fixture);
+}
+
+#[test]
 fn reopening_current_schema_refuses_missing_sharing_index_or_trigger() {
     for (kind, name) in [
         ("index", "direct_grant_recipient"),
         ("trigger", "direct_grant_trash"),
         ("index", "library_publication_owner"),
         ("trigger", "library_publication_trash"),
+        ("trigger", "share_link_identity"),
     ] {
         let (owner, path) = fixture(name);
         let db = sqlite::open_writer(&path, BUSY).unwrap();

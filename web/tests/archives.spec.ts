@@ -22,6 +22,7 @@ async function workspace(page: Page) {
     if (path === '/auth/csrf') return json({ csrf_token: 'csrf' });
     if (path === '/auth/local') return json({ account_id: 'owner', handle: 'owner', role: 'user', csrf_token: 'csrf' });
     if (path === '/auth/logout') return route.fulfill({ status: 204 });
+    if (path === '/share-links' && request.method() === 'GET') return json([]);
     if (path === '/folders/children') return json({ root, items: [], next_cursor: null, has_more: false });
     if (path === '/folders/root/children') return json({ items: entries, next_cursor: null, has_more: false });
     if (path === '/archives') {
