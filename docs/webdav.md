@@ -18,9 +18,9 @@ In Thunar, enter `davs://ACCOUNT@HOST:PORT/dav/` in the location bar. In clients
 | `PUT` | Creates a file with a declared `Content-Length` up to the normal 64 GiB upload limit. A name collision returns 412. Check the remote directory before retrying an interrupted upload. |
 | `MKCOL` | Creates one folder inside an existing library or folder. |
 | `MOVE` | Renames or moves an item within the account's libraries. The destination must be on the configured HTTPS origin. A name collision returns 412 even with `Overwrite: T`. |
-| `DELETE` | Moves the file or folder to Sylux Trash. Restore it in the browser. Deleting a file or its containing folder revokes the affected public download links. |
+| `DELETE` | Moves the file or folder to Sylux Trash. Restore it in the browser. Deleting a file or its containing folder revokes affected public file and folder links. |
 
-Read-only passwords receive 403 for the supported write methods. An app password sees only libraries its account owns. Use the browser to open libraries shared by other accounts. WebDAV returns 403 for uploads, new folders and moves that would add content to a published library’s audience. Use the browser for these changes.
+Read-only passwords receive 403 for the supported write methods. An app password sees only libraries its account owns. Use the browser to open libraries shared by other accounts. WebDAV returns 403 for uploads, new folders and moves that would add content to a published library’s audience. It also returns 403 for changes that would expose content through a new public folder link audience. Use the browser for these changes.
 
 The endpoint advertises its method subset with `DAV: sylux`. Locks, lock-token conditions, property writes, `COPY`, overwriting, resumable uploads and filesystem mounts that require locking are outside this compatibility boundary. Turn off upload timestamp preservation in clients that use property writes. Unsupported methods return 405. Clients can use the ordinary `If-Match` and `If-None-Match` ETag conditions. An interrupted PUT may have committed. If the server loses the commit result and the app password is revoked before it checks that result, the client may receive 401 even though the file exists. Check the file name and bytes with the browser or a valid app password before retrying.
 

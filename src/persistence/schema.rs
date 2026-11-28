@@ -6,7 +6,7 @@ use super::{root::InstallationIdentity, sqlite};
 
 /// Versions this build understands and serves. A bound database reporting
 /// anything else refuses startup instead of migrating guesses.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 8;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 9;
 
 pub fn is_older_schema(version: i64) -> bool {
     (1..SUPPORTED_SCHEMA_VERSION).contains(&version)
@@ -149,6 +149,7 @@ pub fn apply_migrations(connection: &Connection) -> Result<MigrationOutcome, Sch
             migrate_direct_grants(connection, None)?;
             migrate_library_publication(connection, None)?;
             migrate_external_identity(connection, None)?;
+            migrate_folder_links(connection, None)?;
             Ok(MigrationOutcome::Applied)
         }
         _ => Err(SchemaError::Inconsistent("unsupported user_version")),
@@ -198,6 +199,14 @@ pub(super) fn verify_schema_at(connection: &Connection, version: i64) -> Result<
                     "share_link_replace",
                     "share_link_trash",
                 ]
+            } else {
+                &[]
+            },
+        ),
+        (
+            "trigger",
+            if version >= 9 {
+                &["share_link_identity"]
             } else {
                 &[]
             },
@@ -422,6 +431,19 @@ pub fn migrate_external_identity(
         connection,
         8,
         include_str!("../../migrations/sqlite/0008_external_identity.sql"),
+        manifest_hash,
+    )
+}
+
+pub fn migrate_folder_links(
+    connection: &Connection,
+    manifest_hash: Option<&[u8]>,
+) -> Result<(), SchemaError> {
+    verify_schema_at(connection, 8)?;
+    migrate(
+        connection,
+        9,
+        include_str!("../../migrations/sqlite/0009_folder_links.sql"),
         manifest_hash,
     )
 }

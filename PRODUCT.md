@@ -21,12 +21,11 @@ Build a pleasant, fast and efficient file server for small groups. Compete for t
 ## Capabilities and Constraints
 
 - Local accounts have administrator and user roles (`src/http/accounts.rs`).
-- Files are private to each account by default. An owner can share one file through a revocable, expiring download link that anyone holding it can use. Public links are a current capability, not an excluded feature.
+- Files are private to each account by default. An owner can create revocable, expiring public links to individual files or live folders.
 - Preserve existing upload reconciliation, replacement confirmation and recovery boundaries.
 - Instance naming belongs in administrator Settings, persists on the server and applies to all users.
 - Text and image previews are implemented in `web/src/lib/preview.ts`; PDF previews render locally, with page and zoom controls and a download fallback (`docs/pdf-preview.md`).
 - Optional WebDAV access uses revocable app passwords scoped to the account's private libraries (`docs/webdav.md`).
-- Public folder links remain planned.
 - Optional [Keycloak sign-in](docs/oidc.md) uses administrator-approved account links and independent local recovery.
 - Prototype data and account actions are simulated. The prototype is not deployment or durability evidence.
 

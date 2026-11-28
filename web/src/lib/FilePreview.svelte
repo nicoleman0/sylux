@@ -4,6 +4,7 @@
   import type { ApiClient } from './api';
   import { tick } from 'svelte';
   import { ListingApi, type Entry, type FileEntry } from './listing';
+  import PublicFolderNotice from './PublicFolderNotice.svelte';
   import { TEXT_EDIT_LIMIT, TextSave, draftBytes, editorText, preserveLineEndings, type TextEditState } from './text-edit';
   import { loadPreview, mediaPreviewKind, type MediaPreview, type Preview } from './preview';
   import { getPdfPreviewCompatibilityError } from './pdf-compatibility';
@@ -315,6 +316,7 @@
       {/if}
     </div>
     {#if editing}
+      <PublicFolderNotice {client} folder={entry?.parent_id ?? null} subject="The saved changes" />
       {#if editError || tooLarge}
         <p id="text-edit-error" role="alert" class="text-destructive shrink-0 text-sm">
           {tooLarge ? `The edit limit is ${TEXT_EDIT_LIMIT / 1024} KiB. Shorten the text or download your draft.` : editError}

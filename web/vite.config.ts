@@ -25,6 +25,14 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: false,
+    rolldownOptions: {
+      input: { index: 'index.html', 'public-folder': 'src/public-folder.css' },
+      output: {
+        assetFileNames: asset => asset.names.includes('public-folder.css')
+          ? 'public-folder.css'
+          : 'assets/[name]-[hash][extname]',
+      },
+    },
   },
   server: {
     host: '127.0.0.1',

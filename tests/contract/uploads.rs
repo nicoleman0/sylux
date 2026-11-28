@@ -613,7 +613,7 @@ fn decode_chunked(mut bytes: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn share_revoked_by_real_replacement_upload() {
+async fn replacement_revokes_file_link_and_exposes_new_file_through_folder_link() {
     let fixture = Fixture::new("syl-82-fix-replacement").await;
     let old = fixture.upload("synthetic.bin", b"old bytes").await;
     let share = fixture
@@ -641,6 +641,33 @@ async fn share_revoked_by_real_replacement_upload() {
             .as_ref(),
         b"old bytes"
     );
+    let browse = fixture
+        .mutate(
+            "POST",
+            "/share-links",
+            &owner_auth(),
+            None,
+            &[("Content-Type", "application/json".into())],
+            serde_json::to_vec(&serde_json::json!({"entry_id":OWNER_ROOT})).unwrap(),
+        )
+        .await;
+    assert_eq!(browse.status, 201);
+    let folder = browse.json();
+    let browse_path = folder["url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix(&fixture.origin)
+        .unwrap();
+    let base = browse_path.strip_suffix("/browse").unwrap();
+    let old_download = format!("{base}/files/{}", old["id"].as_str().unwrap());
+    assert_eq!(
+        fixture
+            .request("GET", &old_download, None, &[], vec![])
+            .await
+            .body
+            .as_ref(),
+        b"old bytes"
+    );
     let (id, ticket, admission) = fixture.replacement(&old, b"new bytes").await;
     assert_eq!(
         fixture
@@ -649,12 +676,31 @@ async fn share_revoked_by_real_replacement_upload() {
             .status,
         200
     );
+    let committed = fixture.replacement_commit(&id, &ticket, &admission).await;
+    assert_eq!(committed.status, 201);
+    let new_download = format!(
+        "{base}/files/{}",
+        committed.json()["entry_id"].as_str().unwrap()
+    );
+    assert_ne!(old_download, new_download);
     assert_eq!(
         fixture
-            .replacement_commit(&id, &ticket, &admission)
+            .request("GET", &old_download, None, &[], vec![])
             .await
             .status,
-        201
+        404
+    );
+    let listing = fixture.request("GET", browse_path, None, &[], vec![]).await;
+    assert_eq!(listing.status, 200);
+    assert!(listing.text().contains(&new_download));
+    assert!(!listing.text().contains(&old_download));
+    assert_eq!(
+        fixture
+            .request("GET", &new_download, None, &[], vec![])
+            .await
+            .body
+            .as_ref(),
+        b"new bytes"
     );
     assert_eq!(
         fixture.request("GET", path, None, &[], vec![]).await.status,

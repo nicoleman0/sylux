@@ -12,7 +12,7 @@ use crate::domain::{
     dav_credentials::{DavGrant, DavProof},
     library_publication,
     names::EntryName,
-    namespace as storage_namespace,
+    namespace as storage_namespace, public_links,
     upload::{MAX_UPLOAD_LENGTH, UploadAdmission},
 };
 use axum::{
@@ -378,8 +378,7 @@ impl NamespaceWrite {
             if existing.is_some() {
                 return Err(StatusCode::METHOD_NOT_ALLOWED);
             }
-            library_publication::require_unpublished_parent(db, owner, &parent.id)
-                .map_err(namespace_error)?;
+            require_unshared_destination(db, owner, &parent.id)?;
             storage_namespace::create_folder(db, owner, &parent.id, &name.display)
                 .map_err(namespace_error)?;
             return Ok(StatusCode::CREATED);
@@ -461,8 +460,7 @@ async fn put(
         if existing.is_some() {
             return Err(StatusCode::PRECONDITION_FAILED);
         }
-        library_publication::require_unpublished_parent(db, &grant.account_id, &parent.id)
-            .map_err(namespace_error)?;
+        require_unshared_destination(db, &grant.account_id, &parent.id)?;
         let admission = UploadAdmission {
             parent_id: parent.id,
             parent_etag: parent.etag,
@@ -489,10 +487,19 @@ pub(super) fn check_upload_path(
 ) -> Result<(), StatusCode> {
     match resolve(db, account, path) {
         Ok(resource) if resource.entry.as_ref().is_some_and(|entry| entry.id == id) => {
-            library_publication::require_unpublished_parent(db, account, id)
-                .map_err(namespace_error)
+            require_unshared_destination(db, account, id)
         }
         Err(status) if status != StatusCode::NOT_FOUND => Err(status),
         _ => Err(StatusCode::PRECONDITION_FAILED),
     }
+}
+
+fn require_unshared_destination(
+    db: &Connection,
+    account: &str,
+    id: &str,
+) -> Result<(), StatusCode> {
+    library_publication::require_unpublished_parent(db, account, id).map_err(namespace_error)?;
+    public_links::require_private_parent(db, account, id, super::auth::now())
+        .map_err(namespace_error)
 }

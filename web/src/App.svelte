@@ -18,7 +18,9 @@
   import UserRoundIcon from '@lucide/svelte/icons/user-round';
   import UsersRoundIcon from '@lucide/svelte/icons/users-round';
   import LogOutIcon from '@lucide/svelte/icons/log-out';
-  import EntryOptions from './lib/EntryOptions.svelte';
+  import EntryOptions, { type EntryAction } from './lib/EntryOptions.svelte';
+  import PublicFolderNotice from './lib/PublicFolderNotice.svelte';
+  import { publicFolderLinkStatus } from './lib/public-folder-links';
   import ShareLinks from './lib/ShareLinks.svelte';
   import AccountOptions from './lib/AccountOptions.svelte';
   import AccountStatus from './lib/AccountStatus.svelte';
@@ -951,6 +953,7 @@
   let resumeFile = $state<File | null>(null);
   let reselectInput = $state<HTMLInputElement>();
   let controller: AbortController | null = null;
+  let publicUploadCheck: AbortController | null = null;
   let uploadBatchBusy = $state(false);
   let uploadBatchStatus = $state('');
   type UploadResult = { path: string; kind: 'file' | 'folder'; size: number; sent: number; sentComplete: boolean; parent?: Folder; inspected?: boolean; inspectionError?: string; status: 'waiting' | 'active' | 'saved' | 'created' | 'failed' | 'unknown' | 'canceled' };
@@ -1699,6 +1702,7 @@
     historyReady = false; navigationRequest++; restorationPending = false; restorationFailed = false; restorationUnavailable = false; deferredNavigation = false; deferredAccountOperation = false; deferredInstanceOperation = false; deferredShareOperation = false;
     window.history.replaceState(null, '', '#files');
     controller?.abort(); controller = null;
+    publicUploadCheck?.abort(); publicUploadCheck = null;
     dismissReplacement(); uploadReplacement = false;
     uploadBatchCanceled = true; uploadBatchBusy = false; uploadBatchStatus = '';
     uploadResults = []; uploadResultsExpanded = false; uploadReportVisible = false; previousUploadReports = []; uploadNotice = ''; unresolvedUploadResult = null;
@@ -1898,7 +1902,7 @@
 
   type TreeSharingPrompt = {
     action: 'move' | 'restore'; item: Entry; destination?: string; audience: SharingConfirmation; changed: boolean;
-  };
+  } | { action: 'upload'; item: Folder; audienceKnown: boolean; audience?: undefined; changed?: undefined; destination?: undefined };
   let treeSharingPrompt = $state<TreeSharingPrompt | null>(null);
   let treeSharingAnswer: ((answer: boolean) => void) | undefined;
   let treeSharingFocus: HTMLElement | null = null;
@@ -1908,6 +1912,12 @@
     const resolve = treeSharingAnswer;
     treeSharingAnswer = undefined;
     resolve?.(answer);
+  }
+
+  function askAboutSharing(prompt: TreeSharingPrompt): Promise<boolean> {
+    treeSharingFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    treeSharingPrompt = prompt;
+    return new Promise(resolve => { treeSharingAnswer = resolve; });
   }
 
   async function withTreeSharingConfirmation(
@@ -1924,9 +1934,7 @@
         const audience = sharingConfirmation(error);
         if (!audience) throw error;
         if (generation !== sessionGeneration || navigation !== navigationRequest) return false;
-        treeSharingFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        treeSharingPrompt = { action, item, destination, audience, changed: token !== undefined };
-        const approved = await new Promise<boolean>(resolve => { treeSharingAnswer = resolve; });
+        const approved = await askAboutSharing({ action, item, destination, audience, changed: token !== undefined });
         if (!approved) return false;
         token = audience.token;
       }
@@ -2340,7 +2348,9 @@
   function cancelUploadBatch(): void {
     uploadBatchCanceled = true;
     if (uploadCancelable) controller?.abort();
+    publicUploadCheck?.abort();
     dismissReplacement();
+    if (treeSharingPrompt?.action === 'upload') settleTreeSharing(false);
   }
 
   async function freshUploadFolder(folder: Folder): Promise<Folder> {
@@ -2377,6 +2387,20 @@
     let currentIndex = -1;
     let creatingFolder = false;
     try {
+      const navigation = navigationRequest;
+      const check = new AbortController();
+      publicUploadCheck = check;
+      const publiclyShared = await publicFolderLinkStatus(client, destination.id, check.signal).catch(() => null);
+      if (publicUploadCheck === check) publicUploadCheck = null;
+      if (generation !== sessionGeneration) return;
+      if (uploadBatchCanceled) { uploadBatchStatus = 'Upload canceled.'; return; }
+      if (publiclyShared !== false && (navigation !== navigationRequest || !await askAboutSharing({ action: 'upload', item: destination, audienceKnown: publiclyShared === true }))) {
+        if (generation === sessionGeneration) {
+          uploadBatchCanceled = true;
+          uploadBatchStatus = 'Upload canceled.';
+        }
+        return;
+      }
       const items = await read(() => uploadBatchCanceled || generation !== sessionGeneration);
       if (generation !== sessionGeneration) return;
       if (!items.length) { uploadBatchStatus = 'No files or folders were selected.'; return; }
@@ -2495,7 +2519,7 @@
     share = null;
     void tick().then(() => {
       if (generation === sessionGeneration && navigation === navigationRequest) {
-        restoreFocus(trigger, accountView ? 'account-title' : 'folder-title');
+        restoreFocus(trigger, accountView ? 'account-title' : librariesView ? 'libraries-title' : 'folder-title');
       }
     });
   }
@@ -2512,13 +2536,14 @@
     });
   }
 
-  function entryAction(action: 'download' | 'share' | 'rename' | 'move' | 'copy' | 'delete', entry: Entry, trigger: HTMLElement): void {
+  function entryAction(action: EntryAction, entry: Entry, trigger: HTMLElement): void {
     if (bulkBusy || ((bulkNeedsRefresh || namespaceUnknown) && action !== 'download')) return;
     if (action === 'download') void (entry.kind === 'folder' ? downloadArchive([entry]) : download(entry));
     else if (action === 'share') {
       if (entry.kind === 'folder') directShare = { folder: entry, trigger };
       else share = { entry, trigger };
     }
+    else if (action === 'public-link') share = { entry, trigger };
     else if (action === 'rename') beginRename(entry, trigger);
     else if (action === 'move' || action === 'copy') void beginDestination(entry, trigger, action);
     else { trashError = ''; trashTarget = entry; trashTrigger = trigger; }
@@ -3376,7 +3401,7 @@
             <h1 id="account-title" tabindex="-1">Account</h1>
             <section class="settings-section"><h2>Your account</h2><dl class="account-details"><dt>Account name</dt><dd>{user.handle}</dd><dt>Role</dt><dd>{user.role === 'administrator' ? 'Administrator' : 'User'}</dd></dl></section>
             <section class="settings-section" aria-labelledby="usage-heading" aria-busy={routeName === 'account' || ownUsageState === 'loading'}><h2 id="usage-heading" tabindex="-1">Storage</h2><p class="section-description">Total size of your files. Trash includes files replaced by uploads.</p><dl class="account-details usage-details"><dt>Files</dt><dd>{ownUsageState === 'loading' && pendingRoute && !routeFeedback ? '—' : usageLabel(ownUsageState, ownUsage?.files_bytes)}</dd><dt>Trash</dt><dd>{ownUsageState === 'loading' && pendingRoute && !routeFeedback ? '—' : usageLabel(ownUsageState, ownUsage?.trash_bytes)}</dd></dl>{#if ownUsageState === 'error'}<p class="form-notice" role="alert">Could not load storage use.</p>{/if}{#if ownUsageState === 'error' || ownUsageRetrying}<RefreshButton variant="outline" class="mt-3" label="Try again" busyLabel="Loading…" keepFocus busy={ownUsageRetrying} onclick={() => void retryOwnUsage()} />{/if}</section>
-            <section class="settings-section account-setting-row"><div><h2>Public links</h2><p class="section-description">Review and revoke active download links.</p></div><Button variant="outline" onclick={(event) => { share = { entry: null, trigger: event.currentTarget }; }}>Shared links</Button></section>
+            <section class="settings-section account-setting-row"><div><h2>Public links</h2><p class="section-description">Review and revoke public links to files and folders.</p></div><Button variant="outline" onclick={(event) => { share = { entry: null, trigger: event.currentTarget }; }}>Shared links</Button></section>
             {#if webdavAvailable && !user.external}
               <section class="settings-section account-setting-row">
                 <div><h2>WebDAV</h2><p class="section-description">Connect a desktop client to your private libraries.</p></div>
@@ -3430,7 +3455,8 @@
             <LibraryHome items={libraries} pending={restorationPending} error={librariesError}
               onopen={(folder) => void navigate('files', [folder])}
               onretry={() => void navigate('libraries')} oncreate={createLibrary}
-              onshare={(folder, trigger) => directShare = { folder, trigger }} />
+              onshare={(folder, trigger) => directShare = { folder, trigger }}
+              onpubliclink={(folder, trigger) => share = { entry: folder, trigger }} />
             {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{/if}
           </section>
         {:else if sharedView}
@@ -3577,7 +3603,7 @@
     <Dialog.Root open={createOpen} onOpenChange={(open) => { if (!folderBusy) createOpen = open; }}>
       <Dialog.Content showCloseButton={!folderBusy} onOpenAutoFocus={(event) => { event.preventDefault(); folderInput?.focus(); }} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(createTrigger); createTrigger = null; }}>
         <Dialog.Header><Dialog.Title>Create folder</Dialog.Title><Dialog.Description>Add a folder to {currentFolder.name}.</Dialog.Description></Dialog.Header>
-        <form class="grid gap-6" aria-busy={folderBusy} onsubmit={createFolder}><div class="grid gap-2"><Label for="new-folder">Folder name</Label><Input id="new-folder" bind:ref={folderInput} bind:value={folderName} disabled={folderBusy} maxlength={255} aria-invalid={!!folderError} aria-describedby={folderError ? 'folder-error' : undefined} required /></div>{#if folderError}<p id="folder-error" role="alert">{folderError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={folderBusy} onclick={() => createOpen = false}>Cancel</Button><Button type="submit" disabled={folderBusy}>{folderBusy ? 'Creating…' : 'Create folder'}</Button></Dialog.Footer></form>
+        <form class="grid gap-6" aria-busy={folderBusy} onsubmit={createFolder}><div class="grid gap-2"><Label for="new-folder">Folder name</Label><Input id="new-folder" bind:ref={folderInput} bind:value={folderName} disabled={folderBusy} maxlength={255} aria-invalid={!!folderError} aria-describedby={folderError ? 'folder-error' : undefined} required /></div><PublicFolderNotice {client} folder={currentFolder.id} subject="The new folder" />{#if folderError}<p id="folder-error" role="alert">{folderError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={folderBusy} onclick={() => createOpen = false}>Cancel</Button><Button type="submit" disabled={folderBusy}>{folderBusy ? 'Creating…' : 'Create folder'}</Button></Dialog.Footer></form>
       </Dialog.Content>
     </Dialog.Root>
     {#key user.id}
@@ -3631,6 +3657,7 @@
           {#if moveCursor}<Button variant="outline" disabled={moveCloseRefreshBusy || moveLoading || destinationBusy} onclick={() => loadMoveFolder(movePath, moveCursor)}>More destination folders</Button>{/if}
         </div>
         {#if destinationAction === 'copy'}
+          <PublicFolderNotice {client} folder={movePath.at(-1)?.id ?? null} subject="The copy" />
           <p class="text-sm break-all">Destination: {movePath.map((folder) => folder.name).join(' / ') || 'Choose a folder'}</p>
           {#if moveAlreadyHere}<p class="text-muted-foreground text-sm">This item is already here. Open another folder or choose an ancestor above.</p>{/if}
         {:else if moveDestinationReady && moveAlreadyHere && (destinationFolders.length || moveCursor)}
@@ -3658,41 +3685,46 @@
           if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus();
         }}>
         <Dialog.Header>
-          <Dialog.Title class="[overflow-wrap:anywhere]">{treeSharingPrompt?.action === 'restore' ? 'Restore' : 'Move'} {treeSharingPrompt?.item.name}?</Dialog.Title>
+          <Dialog.Title class="[overflow-wrap:anywhere]">{treeSharingPrompt?.action === 'upload' ? 'Upload to' : treeSharingPrompt?.action === 'restore' ? 'Restore' : 'Move'} {treeSharingPrompt?.item.name}?</Dialog.Title>
           <Dialog.Description>
-            {#if treeSharingPrompt?.changed}Sharing changed. Check who will have access.{:else if treeSharingPrompt?.destination}Move to {treeSharingPrompt.destination}.{:else}This item will return to its original folder.{/if}
+            {#if treeSharingPrompt?.action === 'upload'}
+              {#if !treeSharingPrompt.audienceKnown}Could not check for public folder links. {/if}Anyone with a public link to this location can browse and download items you add.
+            {:else if treeSharingPrompt?.changed}Sharing changed. Check who will have access.{:else if treeSharingPrompt?.destination}Move to {treeSharingPrompt.destination}.{:else}This item will return to its original folder.{/if}
           </Dialog.Description>
         </Dialog.Header>
-        {#if treeSharingPrompt?.audience.exposes_to_all}
+        {#if treeSharingPrompt?.audience?.exposes_to_all}
           <p>Everyone signed in now or in the future will be able to open and download {treeSharingPrompt.item.kind === 'folder' ? 'files in this folder' : 'this file'}{treeSharingPrompt.action === 'restore' ? ' after restore' : ' in the new location'}.</p>
         {/if}
-        {#if treeSharingPrompt?.audience.removes_access_for_all}
+        {#if treeSharingPrompt?.audience?.exposes_to_public_links}
+          <p>Anyone with a public link to this location will be able to {treeSharingPrompt.item.kind === 'folder' ? 'browse this folder and download its files' : 'download this file'}.</p>
+        {/if}
+        {#if treeSharingPrompt?.audience?.removes_access_for_all}
           <p>Access through Shared with all will end. Separate direct shares may still apply.</p>
         {/if}
-        {#if treeSharingPrompt?.audience.new_recipients.length && !treeSharingPrompt.audience.exposes_to_all}
+        {#if treeSharingPrompt?.audience?.new_recipients.length && !treeSharingPrompt.audience.exposes_to_all}
           <div class="grid gap-1"><p>New access</p><ul class="list-disc pl-5 [overflow-wrap:anywhere]">
             {#each treeSharingPrompt.audience.new_recipients as handle (handle)}<li>{handle}</li>{/each}
           </ul></div>
         {/if}
-        {#if treeSharingPrompt?.audience.carried_recipients.length}
+        {#if treeSharingPrompt?.audience?.carried_recipients.length}
           <div class="grid gap-1"><p>Access that moves with this item</p><ul class="list-disc pl-5 [overflow-wrap:anywhere]">
             {#each treeSharingPrompt.audience.carried_recipients as handle (handle)}<li>{handle}</li>{/each}
           </ul></div>
         {/if}
-        {#if treeSharingPrompt?.audience.lost_recipients.length}
+        {#if treeSharingPrompt?.audience?.lost_recipients.length}
           <div class="grid gap-1"><p>Access from the original folder ends</p><ul class="list-disc pl-5 [overflow-wrap:anywhere]">
             {#each treeSharingPrompt.audience.lost_recipients as handle (handle)}<li>{handle}</li>{/each}
           </ul></div>
         {/if}
         <Dialog.Footer>
           <Button id="cancel-tree-sharing" variant="outline" onclick={() => settleTreeSharing(false)}>Cancel</Button>
-          <Button onclick={() => settleTreeSharing(true)}>{treeSharingPrompt?.action === 'restore' ? 'Restore and share' : treeSharingPrompt?.audience.exposes_to_all ? 'Move and share' : 'Confirm move'}</Button>
+          <Button onclick={() => settleTreeSharing(true)}>{treeSharingPrompt?.action === 'upload' ? 'Upload' : treeSharingPrompt?.action === 'restore' ? 'Restore and share' : treeSharingPrompt?.audience?.exposes_to_all || treeSharingPrompt?.audience?.exposes_to_public_links ? 'Move and share' : 'Confirm move'}</Button>
         </Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={bulkAction === 'trash'} onOpenChange={(open) => { if (!open) closeBulk(); }}>
       <Dialog.Content showCloseButton={!bulkBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(bulkTrigger); bulkTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Move {bulkTargets.length} selected items to trash?</Dialog.Title><Dialog.Description>Folders include their contents. You can restore these items later. Direct shares rooted in selected folders or their contents are revoked permanently. Each selected item is handled separately; some items may stay in place.</Dialog.Description></Dialog.Header>
+        <Dialog.Header><Dialog.Title>Move {bulkTargets.length} selected items to trash?</Dialog.Title><Dialog.Description>Folders include their contents. You can restore these items later. Public links and direct shares rooted in the selected items or their contents are revoked permanently. Each selected item is handled separately; some items may stay in place.</Dialog.Description></Dialog.Header>
         <ul class="bulk-confirm-items">{#each bulkTargets as entry (entry.id)}<li>{entry.name}</li>{/each}</ul>
         <Dialog.Footer><Button variant="outline" disabled={bulkBusy} onclick={closeBulk}>Cancel</Button><Button disabled={bulkBusy} onclick={runBulk}>{bulkBusy ? 'Moving to trash…' : 'Move to trash'}</Button></Dialog.Footer>
       </Dialog.Content>
@@ -3700,6 +3732,7 @@
     <Dialog.Root open={!!replacementPrompt} onOpenChange={(open) => { if (!open) dismissReplacement(); }}>
       <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); const choose = document.getElementById('choose-file') as HTMLButtonElement | null; restoreFocus(choose && !choose.disabled ? choose : null); }}>
         <Dialog.Header><Dialog.Title>Replace {replacementPrompt?.target.name}?</Dialog.Title><Dialog.Description>A file with this name already exists in {replacementPrompt?.folder.name}. The previous file will move to trash and stay there until restored. Rename the current file before restoring it. If this upload fails or is canceled before saving, the previous file stays unchanged.</Dialog.Description></Dialog.Header>
+        <PublicFolderNotice {client} folder={replacementPrompt?.folder.id ?? null} subject="The replacement file" />
         <Dialog.Footer><Button variant="outline" onclick={dismissReplacement}>Keep existing file</Button><Button onclick={confirmReplacement}>Replace file</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
@@ -3711,7 +3744,7 @@
     </Dialog.Root>
     <Dialog.Root open={!!trashTarget} onOpenChange={(open) => { if (!open && !trashBusy) trashTarget = null; }}>
       <Dialog.Content showCloseButton={!trashBusy} aria-busy={trashBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(trashTrigger); trashTrigger = null; }}>
-        <Dialog.Header><Dialog.Title>Delete {trashTarget?.name}?</Dialog.Title><Dialog.Description>{trashTarget?.kind === 'folder' ? 'Move this folder and its contents to trash. You can restore the folder later. Direct shares rooted here or in its contents are revoked.' : 'Move this file to trash. You can restore it later.'}</Dialog.Description></Dialog.Header>
+        <Dialog.Header><Dialog.Title>Delete {trashTarget?.name}?</Dialog.Title><Dialog.Description>{trashTarget?.kind === 'folder' ? 'Move this folder and its contents to trash. You can restore the folder later. Public links and direct shares rooted here or in its contents are permanently revoked.' : 'Move this file to trash. You can restore it later. Public links to this file are permanently revoked.'}</Dialog.Description></Dialog.Header>
         {#if trashError}<p role="alert">{trashError}</p>{/if}
         <Dialog.Footer><Button variant="outline" disabled={trashBusy} onclick={() => trashTarget = null}>Cancel</Button><Button disabled={trashBusy} aria-busy={trashBusy} onclick={deleteEntry}>{trashBusy ? 'Moving to trash…' : 'Move to trash'}</Button></Dialog.Footer>
       </Dialog.Content>
@@ -3763,7 +3796,7 @@
         <Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => authorityTarget = null}>Cancel</Button><Button disabled={accountBusy} aria-busy={accountBusy} onclick={changeAccountAuthority}>{accountBusy ? 'Updating…' : authorityTarget?.action === 'enable' ? 'Enable account' : authorityTarget?.account.role === 'user' ? 'Make administrator' : 'Make user'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
-    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. Direct shares to and from this account end, and their published libraries are withdrawn. Enabling the account again does not restore sharing.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} aria-busy={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
+    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. Public links and direct shares end, and their published libraries are withdrawn. Enabling the account again does not restore sharing.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} aria-busy={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
   {/if}
   {#if !user || loggingOut}{@render betaNotice(false)}{/if}
 </div>

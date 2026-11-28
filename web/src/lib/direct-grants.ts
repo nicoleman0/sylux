@@ -14,6 +14,7 @@ export type SharingConfirmation = {
   lost_recipients: string[];
   carried_recipients: string[];
   exposes_to_all: boolean;
+  exposes_to_public_links?: boolean;
   removes_access_for_all: boolean;
 };
 
@@ -21,6 +22,7 @@ export function sharingConfirmation(error: unknown): SharingConfirmation | undef
   if (!(error instanceof HttpError) || error.code !== 'sharing_confirmation_required') return;
   const value = error.details?.confirmation;
   if (!value || !/^[A-Za-z0-9_-]{43}$/.test(value.token) ||
+      (value.exposes_to_public_links !== undefined && typeof value.exposes_to_public_links !== 'boolean') ||
       typeof value.exposes_to_all !== 'boolean' || typeof value.removes_access_for_all !== 'boolean' ||
       ![value.new_recipients, value.lost_recipients, value.carried_recipients]
         .every(group => Array.isArray(group) && group.every(handle => typeof handle === 'string'))) return;

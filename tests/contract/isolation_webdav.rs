@@ -1171,3 +1171,76 @@ async fn webdav_publication_preserves_owner_reads_and_blocks_unconfirmed_exposur
     assert_eq!(read().await.0, 404);
     f.close().await;
 }
+
+#[tokio::test]
+async fn webdav_cannot_add_content_to_a_public_folder_without_owner_warning() {
+    use serde_json::{Value, json};
+
+    let f = Fixture::with_webdav(true).await;
+    let (_, owner) = f.credential(0, "Public link desktop", false).await;
+    let mutation = f.mutation_headers(CSRF);
+    let (status, _, body) = f
+        .request(
+            "POST",
+            "/libraries",
+            cookie(0),
+            &mutation,
+            r#"{"name":"Recipient folder"}"#,
+        )
+        .await;
+    assert_eq!(status, 201);
+    let root: Value = serde_json::from_slice(&body).unwrap();
+    let share = json!({"entry_id":root["id"]}).to_string();
+    let existing = "/dav/Files/private-file.bin";
+    let destination = "/dav/Recipient%20folder/moved.bin";
+    let pending = "/dav/Recipient%20folder/pending.bin";
+    let dav = async |method, path, body| {
+        f.request(method, path, None, std::slice::from_ref(&owner), body)
+            .await
+    };
+    let move_to = async |from, to: &str| {
+        f.request(
+            "MOVE",
+            from,
+            None,
+            &[owner.clone(), ("Destination", to.into())],
+            "",
+        )
+        .await
+        .0
+    };
+
+    f.upload_commit.arm();
+    let (put, (status, _, body)) = tokio::join!(dav("PUT", pending, "still private"), async {
+        tokio::time::timeout(Duration::from_secs(5), f.upload_commit.wait_paused())
+            .await
+            .unwrap();
+        let issued = f
+            .request("POST", "/share-links", cookie(0), &mutation, &share)
+            .await;
+        f.upload_commit.release();
+        issued
+    });
+    assert_eq!(status, 201);
+    let link = serde_json::from_slice::<Value>(&body).unwrap();
+    assert_eq!(put.0, 403);
+    assert_eq!(dav("GET", pending, "").await.0, 404);
+    assert_eq!(dav("PUT", pending, "new contents").await.0, 403);
+    assert_eq!(
+        dav("MKCOL", "/dav/Recipient%20folder/new/", "").await.0,
+        403
+    );
+    assert_eq!(move_to(existing, destination).await, 403);
+    assert_eq!(dav("GET", existing, "").await.0, 200);
+
+    let revoke = format!("/share-links/{}", link["id"].as_str().unwrap());
+    assert_eq!(
+        f.request("DELETE", &revoke, cookie(0), &mutation, "")
+            .await
+            .0,
+        204
+    );
+    assert_eq!(move_to(existing, destination).await, 201);
+    assert_eq!(dav("PUT", pending, "now private").await.0, 201);
+    f.close().await;
+}

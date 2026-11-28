@@ -1034,6 +1034,174 @@ test('owner shares and revokes a file downloaded in a separate signed-out TLS co
   }
 });
 
+test('public folder link browses live content in a signed-out TLS context', {
+  annotation: { type: 'harness_case', description: 'storage_public_folder' },
+}, async () => {
+  await signIn();
+  const folder = `Client delivery ${phase}`;
+  const nested = 'Ready to download';
+  const filename = `draft-${phase}.txt`;
+  const moveName = `moved-${phase}.txt`;
+  const addition = `added-${phase}.txt`;
+  const original = Buffer.from('Original shared bytes');
+  const replacement = Buffer.from('Replacement shared bytes');
+  const button = (tab: Pick<Page, 'getByRole'>, name: string) => tab.getByRole('button', { name, exact: true });
+  const options = async (name: string, action: string) => {
+    await button(page, `Options for ${name}`).press('Enter');
+    await page.getByRole('menuitem', { name: action, exact: true }).click();
+  };
+  const createFolder = async (name: string) => {
+    await button(page, 'New folder').click();
+    const form = page.getByRole('dialog', { name: 'Create folder' });
+    await form.getByLabel('Folder name').fill(name);
+    await button(form, 'Create folder').click();
+    await expect(form).toBeHidden();
+    await expect(button(page, `Open ${name}`)).toBeVisible();
+  };
+  const openFolder = async (name: string) => {
+    await button(page, `Open ${name}`).click();
+    await expect(page.getByRole('heading', { name, level: 1, exact: true })).toBeVisible();
+  };
+  const confirmUpload = async (name: string, bytes: Buffer, confirm?: boolean) => {
+    await page.locator('#upload-file').setInputFiles({ name, mimeType: 'text/plain', buffer: bytes });
+    const warning = page.getByRole('dialog', { name: `Upload to ${nested}?` });
+    await expect(warning).toContainText('Anyone with a public link');
+    await expect(button(warning, 'Cancel')).toBeFocused();
+    await button(warning, confirm ? 'Upload' : 'Cancel').press('Enter');
+    await expect(warning).toBeHidden();
+  };
+
+  await chooseUpload({ name: moveName, mimeType: 'text/plain', buffer: original });
+  await expect(button(page, `Preview ${moveName}`)).toBeVisible();
+  await createFolder(folder);
+  await openFolder(folder);
+  await createFolder(nested);
+  await openFolder(nested);
+  await chooseUpload({ name: filename, mimeType: 'text/plain', buffer: original });
+  await expect(button(page, `Preview ${filename}`)).toBeVisible();
+  await button(page.getByRole('navigation', { name: 'Files' }), 'Files').click();
+  await options(folder, 'Public link');
+  const dialog = page.getByRole('dialog', { name: `Share ${folder}` });
+  await expect(dialog).toContainText('Files you add, restore or replace become available');
+  await expect(dialog.getByLabel('Expires after')).toHaveValue('7');
+  await button(dialog, 'Create link').click();
+  const field = dialog.getByRole('textbox', { name: 'Folder link' });
+  await expect(field).toBeFocused();
+  const url = await field.inputValue();
+  await button(dialog, 'Done').click();
+  await expect(button(page, `Options for ${folder}`)).toBeFocused();
+
+  const signedOut = await storageContext();
+  try {
+    const tab = await signedOut.newPage();
+    const listing = await tab.goto(url);
+    expect(listing?.status()).toBe(200);
+    expect((await listing?.allHeaders())?.['referrer-policy']).toBe('no-referrer');
+    expect(await signedOut.cookies()).toHaveLength(0);
+    await expect(tab.getByRole('heading', { level: 1 })).toHaveText(folder);
+    const style = tab.locator('link[rel="stylesheet"]');
+    expect(await style.getAttribute('href')).toBe('/public-folder.css');
+    await tab.getByRole('link', { name: `${nested} Open folder` }).press('Enter');
+    await expect(tab.getByRole('heading', { level: 1 })).toHaveText(nested);
+    const probe = await signedOut.newPage();
+    const freshStatus = async (saved: string) => {
+      const response = await probe.goto(new URL(saved, url).href);
+      return [response?.status(), await response?.json()];
+    };
+    const missing = [404, { code: 'share_not_found' }];
+    const breadcrumb = tab.getByRole('navigation', { name: 'Folder path' });
+    await expect(breadcrumb.getByRole('link')).toHaveText([folder]);
+    await expect(tab.getByRole('searchbox')).toHaveCount(0);
+
+    const entry = (name: string) => tab.getByRole('link', { name: `${name} Download`, exact: true });
+    const download = async (file: string, bytes: Buffer) => {
+      const response = tab.waitForEvent('download');
+      await entry(file).press('Enter');
+      const saved = await response;
+      expect(saved.suggestedFilename()).toBe(file);
+      expect(fs.readFileSync((await saved.path())!)).toEqual(bytes);
+    };
+    for (const [width, colorScheme] of [[1280, 'light'], [390, 'dark']] as const) {
+      await tab.setViewportSize({ width, height: 850 });
+      await tab.emulateMedia({ colorScheme });
+      await expect(entry(filename)).toBeVisible();
+      expect(await tab.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      expect(await tab.locator('body').evaluate(body => getComputedStyle(body).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+    }
+    const oldUrl = (await entry(filename).getAttribute('href'))!;
+    await download(filename, original);
+
+    await options(moveName, 'Move');
+    const picker = page.getByRole('dialog', { name: `Move ${moveName}`, exact: true });
+    await picker.getByRole('button', { name: folder, exact: true }).click();
+    await picker.getByRole('button', { name: nested, exact: true }).click();
+    const moveHere = button(picker, 'Move here');
+    await expect(moveHere).toBeEnabled();
+    await moveHere.click();
+    const moveWarning = page.getByRole('dialog', { name: `Move ${moveName}?` });
+    await expect(moveWarning).toContainText('Anyone with a public link');
+    await button(moveWarning, 'Cancel').press('Enter');
+    await tab.reload();
+    await expect(entry(moveName)).toHaveCount(0);
+    await expect(moveHere).toBeEnabled();
+    await moveHere.click();
+    await button(moveWarning, 'Move and share').press('Enter');
+    await expect(picker).toBeHidden();
+    await tab.reload();
+    await download(moveName, original);
+
+    await openFolder(folder);
+    await openFolder(nested);
+    await confirmUpload(addition, original);
+    await expect(button(page, 'Choose files')).toBeEnabled();
+    await tab.reload();
+    await expect(entry(addition)).toHaveCount(0);
+    await confirmUpload(addition, original, true);
+    await expect(button(page, `Preview ${addition}`)).toBeVisible();
+    await tab.reload();
+    await download(addition, original);
+
+    await confirmUpload(filename, replacement, true);
+    const replace = page.getByRole('dialog', { name: `Replace ${filename}?` });
+    await expect(replace).toContainText('The replacement file will be available');
+    await button(replace, 'Replace file').press('Enter');
+    await expect(button(page, 'Choose files')).toBeEnabled();
+    await tab.reload();
+    await download(filename, replacement);
+    expect(await freshStatus(oldUrl)).toEqual(missing);
+
+    const downloadUrl = (await entry(addition).getAttribute('href'))!;
+    await options(addition, 'Delete');
+    await button(page, 'Move to trash').press('Enter');
+    await expect(button(page, `Preview ${addition}`)).toHaveCount(0);
+    expect(await freshStatus(downloadUrl)).toEqual(missing);
+    await button(page, 'Trash').click();
+    const restore = button(page, `Restore ${addition}`);
+    await restore.press('Enter');
+    const restoring = page.getByRole('dialog', { name: `Restore ${addition}?` });
+    await expect(restoring).toContainText('Anyone with a public link');
+    await button(restoring, 'Cancel').press('Enter');
+    await expect(restore).toBeVisible();
+    expect(await freshStatus(downloadUrl)).toEqual(missing);
+    await restore.press('Enter');
+    await button(restoring, 'Restore and share').press('Enter');
+    await expect(restore).toHaveCount(0);
+    await tab.reload();
+    await download(addition, original);
+
+    await button(page, 'Account').click();
+    await button(page, 'Shared links').click();
+    const all = page.getByRole('dialog', { name: 'Shared links' });
+    await all.getByRole('button', { name: new RegExp(`Revoke link .* for ${folder}`) }).click();
+    await expect(all.getByRole('status')).toHaveText('Link revoked.');
+    for (const saved of [url, downloadUrl]) {
+      expect(await freshStatus(saved)).toEqual(missing);
+    }
+  } finally {
+    await signedOut.close();
+  }
+});
+
 async function openTextEditor(tab: Page, name: string) {
   await tab.getByRole('button', { name: `Preview ${name}`, exact: true }).click();
   await tab.getByRole('dialog', { name: `Preview ${name}` }).getByRole('button', { name: 'Edit', exact: true }).click();

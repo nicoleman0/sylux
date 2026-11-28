@@ -8,7 +8,7 @@
   import { HttpError } from '$lib/api';
   import type { Folder } from '$lib/listing';
 
-  let { items, pending, error, onopen, onretry, oncreate, onshare }: {
+  let { items, pending, error, onopen, onretry, oncreate, onshare, onpubliclink }: {
     items: Folder[];
     pending: boolean;
     error: string;
@@ -16,6 +16,7 @@
     onretry: () => void;
     oncreate: (name: string) => Promise<Folder>;
     onshare: (folder: Folder, trigger: HTMLElement) => void;
+    onpubliclink: (folder: Folder, trigger: HTMLElement) => void;
   } = $props();
 
   let open = $state(false);
@@ -72,7 +73,7 @@
           href={`#files/${encodeURIComponent(folder.id)}`} onclick={(event) => openFromLink(event, folder)}>
           <FolderIcon class="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
           <span class="min-w-0 [overflow-wrap:anywhere]">{folder.name}</span>
-        </a><Button variant="ghost" size="sm" aria-label={`Share ${folder.name}`} onclick={(event) => onshare(folder, event.currentTarget)}>Share</Button></li>
+        </a><Button variant="ghost" size="sm" aria-label={`Public link for ${folder.name}`} onclick={(event) => onpubliclink(folder, event.currentTarget)}>Public link</Button><Button variant="ghost" size="sm" aria-label={`Share ${folder.name}`} onclick={(event) => onshare(folder, event.currentTarget)}>Share</Button></li>
       {/each}
     </ul>
   {/if}

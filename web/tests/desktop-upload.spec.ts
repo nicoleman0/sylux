@@ -1032,13 +1032,14 @@ for (const width of [1280, 390]) {
     const store = await backend(page);
     const requests: string[] = [];
     page.on('request', request => {
-      const path = new URL(request.url()).pathname;
-      if (request.method() === 'GET' && path.startsWith('/folders/')) requests.push(path);
+      const url = new URL(request.url());
+      if (request.method() === 'GET' && url.pathname.startsWith('/folders/')) requests.push(`${url.pathname}${url.searchParams.has('public_links') ? url.search : ''}`);
     });
     await page.getByLabel('Choose files to upload').setInputFiles(Array.from({ length: 60 }, (_, n) => ({ name: `batch-${n}.txt`, mimeType: 'text/plain', buffer: Buffer.from('contents') })));
     await expect(completed(page)).toHaveText('60 items uploaded');
     await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
     expect(store.sent).toHaveLength(60);
+    expect(requests.filter(path => path === '/folders/root/path?public_links=true')).toHaveLength(1);
     expect(requests.filter(path => path === '/folders/root/path')).toHaveLength(60);
     expect(requests.filter(path => path.endsWith('/children'))).toEqual(['/folders/children', '/folders/root/children']);
     await expect(page.getByRole('row', { name: 'batch-59.txt', exact: true })).toBeVisible();

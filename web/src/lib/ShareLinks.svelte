@@ -7,7 +7,7 @@
   import { HttpError, type ApiClient } from './api';
   import type { Entry } from './listing';
 
-  type Link = { id: string; entry_id: string; name: string; created_at: number; expires_at: number };
+  type Link = { kind: 'file' | 'folder'; id: string; entry_id: string; name: string; created_at: number; expires_at: number };
   type CreatedLink = Link & { url: string };
 
   let { client, entry, onclose, busy = $bindable(false) }: { client: ApiClient; entry: Entry | null; onclose: () => void; busy?: boolean } = $props();
@@ -66,7 +66,7 @@
       if (failure instanceof HttpError && failure.code === 'share_link_limit') {
         error = 'You have 50 active links. Revoke one in Account to create another.';
       } else if (failure instanceof HttpError && failure.code === 'entry_not_found') {
-        error = 'This file is no longer available to share.';
+        error = 'This item is no longer available to share.';
       } else if (failure instanceof HttpError && failure.status >= 400 && failure.status < 500) {
         error = 'Could not create the link. Check your access and try again.';
       } else {
@@ -125,7 +125,15 @@
   >
     <Dialog.Header class="min-w-0 text-left">
       <Dialog.Title class="break-all">{entry ? `Share ${entry.name}` : 'Shared links'}</Dialog.Title>
-      <Dialog.Description>Anyone with a link can download the file until the link expires or you revoke it.</Dialog.Description>
+      <Dialog.Description>
+        {#if entry?.kind === 'folder'}
+          Anyone with the link can browse this folder and download individual files. Files you add, restore or replace become available until the link expires or you revoke it.
+        {:else if entry}
+          Anyone with a link can download the file until the link expires or you revoke it.
+        {:else}
+          Review public links to files and folders.
+        {/if}
+      </Dialog.Description>
     </Dialog.Header>
 
     {#if entry}
@@ -145,7 +153,7 @@
         </div>
         {#if created}
           <div class="grid min-w-0 gap-2">
-            <Label for="share-url">Download link</Label>
+            <Label for="share-url">{entry.kind === 'folder' ? 'Folder link' : 'Download link'}</Label>
             <div class="flex min-w-0 flex-wrap gap-2">
               <Input id="share-url" class="min-w-0 flex-1" readonly value={created.url} bind:ref={urlField} />
               <Button type="button" variant="outline" disabled={busy} onclick={copyLink}>Copy link</Button>
@@ -170,7 +178,7 @@
           {#each visibleLinks as link, index (link.id)}
             <li class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2">
               <div class="min-w-0 break-words">
-                {#if !entry}<p class="break-all font-medium">{link.name}</p>{/if}
+                {#if !entry}<p class="break-all font-medium">{link.name}</p>{#if link.kind === 'folder'}<p class="text-xs text-muted-foreground">Folder</p>{/if}{/if}
                 <p class="text-xs text-muted-foreground">Created {dates.format(link.created_at * 1000)}</p>
                 <p class="text-xs text-muted-foreground">Expires {dates.format(link.expires_at * 1000)}</p>
               </div>

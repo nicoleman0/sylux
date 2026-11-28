@@ -1,27 +1,45 @@
-# Share a file
+# Share files and folders with a public link
 
-Open a file’s options menu and choose **Share**. Choose 1, 7 or 30 days, then select **Create link**. The default is 7 days. Copy the link before closing the dialog. Anyone who receives the link can download the file without signing in.
+Open an item's options menu. For a file, choose **Share**. For a folder, choose **Public link**. You can also use **Public link** beside a library in **My libraries**. Choose 1, 7 or 30 days and select **Create link**. The default is 7 days. Copy the address before closing the dialog. Sylux shows the full URL only at creation.
 
-Use **Share** to see a file’s active links or **Account → Shared links** to see all your active links. Select **Revoke** to stop new downloads. Each link expires independently. Sylux shows the full URL only when it creates the link.
+Anyone with the address can use it without signing in. A file link downloads one file. A folder link lets recipients browse the shared folder and its current subfolders and download individual files. The recipient view ends at the shared root, even in a signed-in browser. It offers no search, previews, archives or changes to files. File contents can still include information such as author metadata.
+
+Use the item's link dialog or **Account → Shared links** to review and revoke your active links. Direct sharing with other accounts has its own controls.
+
+## Live folder contents
+
+- Add, copy, move in, restore or replace content to make it available to anyone with an active public link to the destination. The web app warns at the operation. Moving or restoring into a newly shared location requires confirmation. Cancel to leave the item in place or in Trash.
+- Moving items out or sending them to Trash makes them inaccessible through that folder link, including from saved descendant URLs. The rest of the folder remains available. Restoring a descendant into the shared tree makes it visible again.
+- Replacement uploads create a new file entry. Recipients reopen the listing to get its new download address. The original file's standalone links are revoked.
+- Renaming or moving the shared root keeps its link working. Recipients see its current name and only the path from that root.
+- WebDAV refuses changes that would add content to a new public audience when the client cannot show the Sylux warning. Use the web app for those changes.
 
 ## When links stop working
 
-- Expiry and revocation apply to the next request. A download already authorized may finish. Revocation has no effect on copies already downloaded.
-- Replacing the file, moving it or any of its parent folders to Trash, or disabling the owner revokes affected links. Restoring files and re-enabling accounts do not bring old links back.
-- Renaming or moving a live file keeps its links. A copy is a separate file with its own links.
-- The recipient gets one attachment with the current filename. Sylux adds no surrounding folder path, account details, preview or listing. The file itself can contain information such as author metadata.
+- Expiry and revocation apply to the next request. An authorized download may finish. Copies already downloaded stay with recipients.
+- Sending the shared item or any ancestor to Trash, or disabling its owner, permanently revokes affected links. Restoring those items or enabling the owner again leaves the old URLs revoked.
+- Replacing a directly shared file revokes its file links. Renaming or moving a live file keeps them. A copy is a separate item with its own links.
 
-## Server contract
+## Server and proxy handling
 
 | Method and route | Contract |
 | --- | --- |
-| `POST /share-links` | Owner session, same Origin and CSRF token required. Submit `entry_id` and optionally `expiry_days`. Returns 201 with the link metadata and URL. |
-| `GET /share-links` | Owner session required. Lists that account’s active links, with file name, link ID, entry ID, creation time and expiry. |
-| `DELETE /share-links/{id}` | Owner session, same Origin and CSRF token required. Returns 204 for an authorized revoke, including a repeated revoke or a link outside the owner’s account. |
-| `GET /share/{token}` | The bearer authorizes one full attachment with `no-store` and `no-referrer`. Unknown, expired, revoked, trashed and disabled-owner links return the same 404. |
+| `POST /share-links` | Enabled owner session, matching Origin and CSRF token. Submit `entry_id` and optionally `expiry_days`. Returns 201 with link metadata and the URL. |
+| `GET /share-links` | Owner session. Lists active file and folder links with kind, name, link ID, entry ID, creation time and expiry. |
+| `DELETE /share-links/{id}` | Owner session, matching Origin and CSRF token. Returns 204 for an authorized revoke, including repeated requests and IDs outside the owner's account. |
+| `GET /share/{token}` | One full attachment for an existing file link. |
+| `GET /share/{token}/browse` | Folder link landing page. |
+| `GET /share/{token}/folders/{id}` | Browse a folder in the live subtree. |
+| `GET /share/{token}/files/{id}` | Download one file in the live subtree as a full attachment. |
 
-The server issues a random 256-bit token and stores its SHA-256 verifier. Share routes do not emit URLs, request paths or tokens to application logs or lifecycle events. If you run a reverse proxy or CDN, redact the entire request target for `/share/` in access and error logs and leave caching disabled for those paths. Treat link URLs as credentials.
+Every public response uses `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. Unknown, expired, revoked, out-of-scope and unavailable targets get the same 404. Each request checks the owner, link and current ancestry in one SQLite snapshot. Payload verification and streaming run outside SQLite.
 
-The server allows 50 active links per owner. Up to eight public download requests per server can hold a slot from metadata lookup through verified payload streaming. Each slot remains held until the download completes or disconnects, including during slow or idle reads. While all slots are occupied, new public requests receive 429 with `Retry-After: 1`; owner controls remain available. A fresh request checks the link, account and file in one SQLite snapshot. Payload verification and streaming run outside SQLite.
+The 50 active links per owner include files and folders. File downloads share eight slots per server. Each request holds one from metadata lookup until verified streaming completes or disconnects. If all slots are occupied, new download requests receive 429 with `Retry-After: 1`. Folder browsing and owner controls remain available.
 
-Schema 3 adds the link table. Follow the [stopped-service backup and upgrade procedure](docker-beta.md#5-upgrade-and-roll-back) before starting a newer release. A restored snapshot can make an unexpired link revoked after the snapshot usable again. Before restoring, restrict recipient access at the proxy or network and keep it restricted while owners review and revoke their own links. There is no administrator-wide link inventory. If owners cannot review, retain the recipient access restriction.
+Sylux issues a random 256-bit token and stores its SHA-256 verifier. Treat the full URL as a credential. Share routes omit URLs, request targets and tokens from application logs and lifecycle events. At a reverse proxy or CDN, pass through the configured public origin and keep caching disabled for `/share` and all `/share/` paths. Suppress or redact the whole request target, including its query, in access and error logs, tracing and analytics for those paths. Exclude cookies, referrers and share-management response bodies from those logs. Test the logging configuration with disposable links before exposing the service.
+
+## Backup and restore
+
+Schema 9 extends the link table and preserves existing file links. Follow the [stopped-service backup and upgrade procedure](docker-beta.md#5-upgrade-and-roll-back) before starting a newer release.
+
+A restored snapshot can revive unexpired links that owners revoked after the snapshot. Folder links can expose the subtree as it existed in that snapshot. Before restoring, restrict recipient access at the proxy or network, including all `/share/` paths. Keep access restricted while owners review and revoke links in **Account → Shared links**. If owners cannot review their links, keep the restriction. Keep backup files private.
