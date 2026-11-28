@@ -100,6 +100,7 @@ async function backend(page: Page, administrator = false) {
     const url = new URL(route.request().url());
     const json = (value: unknown) => route.fulfill({ json: value });
     if (url.pathname === '/instance') return json({ name: 'Sylux' });
+    if (url.pathname === '/libraries') return json({ items: [root] });
     if (url.pathname === '/auth/csrf') return json({ csrf_token: 'csrf' });
     if (url.pathname === '/auth/local') {
       const handle = route.request().postDataJSON().handle;
@@ -522,7 +523,7 @@ test('clearing search after interrupting a folder load fetches that folder inste
 });
 
 for (const action of ['Home', 'Files sidebar']) {
-  test(`${action} completion cannot cancel Back while its root listing is pending`, async ({ page }) => {
+  test(`${action} completion cannot cancel Back while its destination is pending`, async ({ page }) => {
     await backend(page); await page.goto('/#files/projects'); await signIn(page);
     await expect(page.getByRole('button', { name: 'Preview Match 0.txt', exact: true })).toBeVisible();
     let releaseRoot!: () => void;
@@ -533,9 +534,10 @@ for (const action of ['Home', 'Files sidebar']) {
     const rootPending = new Promise<void>(resolve => { requestedRoot = resolve; });
     const pathGate = new Promise<void>(resolve => { releasePath = resolve; });
     const pathPending = new Promise<void>(resolve => { requestedPath = resolve; });
-    await page.route('**/folders/root/children*', async route => {
+    const destination = action === 'Home' ? '/libraries' : '/folders/root/children';
+    await page.route(url => url.pathname === destination, async route => {
       requestedRoot(); await rootGate;
-      await route.fulfill({ json: { items: [child], next_cursor: null, has_more: false } });
+      await route.fulfill({ json: action === 'Home' ? { items: [root] } : { items: [child], next_cursor: null, has_more: false } });
     });
     await page.route('**/folders/projects/path', async route => {
       requestedPath(); await pathGate;
@@ -544,8 +546,9 @@ for (const action of ['Home', 'Files sidebar']) {
     if (action === 'Home') await page.getByRole('link', { name: 'Sylux', exact: true }).click();
     else await page.getByRole('navigation', { name: 'Files', exact: true }).getByRole('button', { name: 'Files', exact: true }).click();
     await rootPending;
-    await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
-    const canceled = page.waitForEvent('requestfailed', request => new URL(request.url()).pathname === '/folders/root/children');
+    if (action === 'Home') await expect(page.getByRole('status')).toHaveText('Opening My libraries…');
+    else await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
+    const canceled = page.waitForEvent('requestfailed', request => new URL(request.url()).pathname === destination);
     await page.goBack(); await pathPending;
     await canceled; releaseRoot();
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
