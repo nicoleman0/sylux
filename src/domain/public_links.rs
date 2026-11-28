@@ -2,7 +2,7 @@
 
 use rusqlite::{Connection, params};
 
-use super::namespace::{self, Entry, NamespaceError};
+use super::namespace::{Entry, NamespaceError};
 
 pub(crate) fn inherited(
     db: &Connection,
@@ -27,18 +27,4 @@ pub(crate) fn inherited(
         );
     }
     Ok(links)
-}
-
-pub(crate) fn require_private_parent(
-    db: &Connection,
-    owner: &str,
-    parent: &str,
-    now: i64,
-) -> Result<(), NamespaceError> {
-    let path = namespace::folder_path(db, owner, parent)?;
-    if inherited(db, owner, &path, now)?.is_empty() {
-        Ok(())
-    } else {
-        Err(NamespaceError::SharingConfirmationRequired)
-    }
 }

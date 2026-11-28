@@ -8,8 +8,9 @@
   import { HttpError } from '$lib/api';
   import type { Folder } from '$lib/listing';
 
-  let { items, pending, error, onopen, onretry, oncreate, onshare, onpubliclink }: {
+  let { items, publicFolderIds, pending, error, onopen, onretry, oncreate, onshare, onpubliclink }: {
     items: Folder[];
+    publicFolderIds: ReadonlySet<string>;
     pending: boolean;
     error: string;
     onopen: (folder: Folder) => void;
@@ -69,11 +70,11 @@
   {#if items.length}
     <ul aria-label="My libraries" class="divide-y rounded-lg border">
       {#each items as folder (folder.id)}
-        <li class="flex items-center gap-2 pr-2"><a class="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-md px-3 py-2 font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+        <li class="flex flex-wrap items-center gap-x-2 pr-2"><a class="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-md px-3 py-2 font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
           href={`#files/${encodeURIComponent(folder.id)}`} onclick={(event) => openFromLink(event, folder)}>
           <FolderIcon class="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
           <span class="min-w-0 [overflow-wrap:anywhere]">{folder.name}</span>
-        </a><Button variant="ghost" size="sm" aria-label={`Public link for ${folder.name}`} onclick={(event) => onpubliclink(folder, event.currentTarget)}>Public link</Button><Button variant="ghost" size="sm" aria-label={`Share ${folder.name}`} onclick={(event) => onshare(folder, event.currentTarget)}>Share</Button></li>
+        </a><Button variant="ghost" size="sm" aria-label={publicFolderIds.has(folder.id) ? `Public link active for ${folder.name}. Manage public links` : `Public link for ${folder.name}`} onclick={(event) => onpubliclink(folder, event.currentTarget)}>{publicFolderIds.has(folder.id) ? 'Public link active' : 'Public link'}</Button><Button variant="ghost" size="sm" aria-label={`Share ${folder.name}`} onclick={(event) => onshare(folder, event.currentTarget)}>Share</Button></li>
       {/each}
     </ul>
   {/if}

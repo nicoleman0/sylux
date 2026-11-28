@@ -7,10 +7,10 @@
   import { HttpError, type ApiClient } from './api';
   import type { Entry } from './listing';
 
-  type Link = { kind: 'file' | 'folder'; id: string; entry_id: string; name: string; created_at: number; expires_at: number };
+  import type { PublicLink as Link } from './public-folder-links';
   type CreatedLink = Link & { url: string };
 
-  let { client, entry, onclose, busy = $bindable(false) }: { client: ApiClient; entry: Entry | null; onclose: () => void; busy?: boolean } = $props();
+  let { client, entry, onclose, onchanged, busy = $bindable(false) }: { client: ApiClient; entry: Entry | null; onclose: () => void; onchanged: (links?: Link[]) => void; busy?: boolean } = $props();
   let days = $state(7);
   let links = $state<Link[] | null>(null);
   let created = $state<CreatedLink | null>(null);
@@ -59,6 +59,7 @@
       created = result;
       if (links) links = [result, ...links];
       else await load();
+      if (result.kind === 'folder') onchanged(listError ? undefined : links ?? undefined);
       await tick();
       urlField?.focus();
     } catch (failure) {
@@ -72,6 +73,7 @@
       } else {
         error = 'Could not confirm the new link. Check Active links before creating another. An unconfirmed link cannot be copied; revoke it if it appears.';
         await load();
+        if (entry.kind === 'folder') onchanged(listError ? undefined : links ?? undefined);
       }
     } finally {
       busy = false;
@@ -103,11 +105,15 @@
       const focused = document.activeElement === button;
       if (created?.id === link.id) created = null;
       links = links?.filter(item => item.id !== link.id) ?? null;
+      if (link.kind === 'folder') onchanged(links ?? undefined);
       status = 'Link revoked.';
       await tick();
       if (focused) done?.focus();
     } catch {
-      if (!controller.signal.aborted) error = 'Could not confirm revocation. Select Revoke again to make sure the link is removed.';
+      if (!controller.signal.aborted) {
+        if (link.kind === 'folder') onchanged();
+        error = 'Could not confirm revocation. Select Revoke again to make sure the link is removed.';
+      }
     } finally {
       busy = false;
       revoking = null;
@@ -127,7 +133,7 @@
       <Dialog.Title class="break-all">{entry ? `Share ${entry.name}` : 'Shared links'}</Dialog.Title>
       <Dialog.Description>
         {#if entry?.kind === 'folder'}
-          Anyone with the link can browse this folder and download individual files. Files you add, restore or replace become available until the link expires or you revoke it.
+          Anyone with the link can browse this folder and download individual files. They can see files added, restored or replaced, including through WebDAV sync, until the link expires or you revoke it.
         {:else if entry}
           Anyone with a link can download the file until the link expires or you revoke it.
         {:else}

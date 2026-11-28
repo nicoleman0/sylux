@@ -12,8 +12,8 @@ use crate::domain::{
     dav_credentials::{DavGrant, DavProof},
     library_publication,
     names::EntryName,
-    namespace as storage_namespace, public_links,
-    upload::{MAX_UPLOAD_LENGTH, UploadAdmission},
+    namespace as storage_namespace,
+    upload::{MAX_UPLOAD_LENGTH, Replacement, UploadAdmission},
 };
 use axum::{
     body::{Body, Bytes, to_bytes},
@@ -378,7 +378,8 @@ impl NamespaceWrite {
             if existing.is_some() {
                 return Err(StatusCode::METHOD_NOT_ALLOWED);
             }
-            require_unshared_destination(db, owner, &parent.id)?;
+            library_publication::require_unpublished_parent(db, owner, &parent.id)
+                .map_err(namespace_error)?;
             storage_namespace::create_folder(db, owner, &parent.id, &name.display)
                 .map_err(namespace_error)?;
             return Ok(StatusCode::CREATED);
@@ -453,21 +454,30 @@ async fn put(
         }
         let (parent, name) = writable_parent(db, &grant.account_id, &path.names)?;
         let existing = child(db, &grant.account_id, Some(&parent.id), name)?;
-        conditions.check(
-            existing.as_ref().map(|entry| entry.http_etag()).as_deref(),
-            existing.is_some(),
-        )?;
-        if existing.is_some() {
-            return Err(StatusCode::PRECONDITION_FAILED);
-        }
-        require_unshared_destination(db, &grant.account_id, &parent.id)?;
+        let http_etag = existing.as_ref().map(|entry| entry.http_etag());
+        conditions.check(http_etag.as_deref(), existing.is_some())?;
+        let replacement = match existing {
+            Some(entry) => {
+                if entry.folder || matches!(conditions.if_match.as_deref(), None | Some("*")) {
+                    return Err(StatusCode::PRECONDITION_FAILED);
+                }
+                Some(Replacement {
+                    entry_id: entry.id,
+                    etag: entry.etag,
+                    text_revision: None,
+                })
+            }
+            None => None,
+        };
+        library_publication::require_unpublished_parent(db, &grant.account_id, &parent.id)
+            .map_err(namespace_error)?;
         let admission = UploadAdmission {
             parent_id: parent.id,
             parent_etag: parent.etag,
             name: name.display.clone(),
             length,
             sha256: None,
-            replacement: None,
+            replacement,
         };
         Ok((
             grant.clone(),
@@ -487,19 +497,10 @@ pub(super) fn check_upload_path(
 ) -> Result<(), StatusCode> {
     match resolve(db, account, path) {
         Ok(resource) if resource.entry.as_ref().is_some_and(|entry| entry.id == id) => {
-            require_unshared_destination(db, account, id)
+            library_publication::require_unpublished_parent(db, account, id)
+                .map_err(namespace_error)
         }
         Err(status) if status != StatusCode::NOT_FOUND => Err(status),
         _ => Err(StatusCode::PRECONDITION_FAILED),
     }
-}
-
-fn require_unshared_destination(
-    db: &Connection,
-    account: &str,
-    id: &str,
-) -> Result<(), StatusCode> {
-    library_publication::require_unpublished_parent(db, account, id).map_err(namespace_error)?;
-    public_links::require_private_parent(db, account, id, super::auth::now())
-        .map_err(namespace_error)
 }

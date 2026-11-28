@@ -1508,6 +1508,11 @@ pub(super) async fn dav_put(
     let Ok(storage) = storage(&state) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    let success = if admission.replacement.is_some() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CREATED
+    };
     let owned_storage = storage.clone();
     let task = storage.spawn_owned(async move {
         let epoch = match state.workers.read(|db| Ok(recovery_epoch(db))).await {
@@ -1537,7 +1542,7 @@ pub(super) async fn dav_put(
         if let Some(etag) = result.headers().get(ETAG).cloned()
             && result.status() == StatusCode::CREATED
         {
-            return (StatusCode::CREATED, [(ETAG, etag)]).into_response();
+            return (success, [(ETAG, etag)]).into_response();
         }
 
         // A worker failure can leave COMMIT uncertain. Check this mutation under
@@ -1559,7 +1564,7 @@ pub(super) async fn dav_put(
             }
         }).await;
         match settled {
-            Ok(Ok(Some(revision))) => (StatusCode::CREATED, [(ETAG, revision_etag(&revision))]).into_response(),
+            Ok(Ok(Some(revision))) => (success, [(ETAG, revision_etag(&revision))]).into_response(),
             Ok(Ok(None)) if result.status().is_client_error() => result.status().into_response(),
             Ok(Err(status)) => status.into_response(),
             _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),

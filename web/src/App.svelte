@@ -21,7 +21,7 @@
   import EntryOptions, { type EntryAction } from './lib/EntryOptions.svelte';
   import PublicFolderNotice from './lib/PublicFolderNotice.svelte';
   import { publicFolderNotice } from './lib/public-folder-notice.svelte';
-  import { publicFolderLinkStatus } from './lib/public-folder-links';
+  import { publicFolderLinkStatus, type PublicLink } from './lib/public-folder-links';
   import ShareLinks from './lib/ShareLinks.svelte';
   import AccountOptions from './lib/AccountOptions.svelte';
   import AccountStatus from './lib/AccountStatus.svelte';
@@ -1042,6 +1042,7 @@
     const request = ++workspaceRefreshRequest;
     const generation = sessionGeneration;
     clearCompletedFeedback();
+    publicLinksRefresh++;
     workspaceRefreshing = true; refreshSourceFolder = currentFolder.id;
     try {
       if (bulkNeedsRefresh) await reconcileBulk();
@@ -2517,6 +2518,49 @@
   let webdavTrigger: HTMLElement | null = null;
   let shareBusy = $state(false);
 
+  let ownedFolderLinks = $state<PublicLink[]>([]);
+  let publicLinksRefresh = $state(0);
+  let folderLinkClock = $state(Date.now());
+  const activeFolderLinks = $derived(ownedFolderLinks.filter(link => link.expires_at * 1000 > folderLinkClock));
+  const publicFolderIds = $derived(new Set(activeFolderLinks.map(link => link.entry_id)));
+
+  function updateFolderLinks(links: PublicLink[]): void {
+    ownedFolderLinks = links.filter(link => link.kind === 'folder');
+    folderLinkClock = Date.now();
+  }
+
+  $effect(() => {
+    const scope = librariesView ? 'libraries' : filesView ? currentFolder.id : '';
+    const generation = sessionGeneration;
+    const refresh = publicLinksRefresh;
+    if (!user || !scope || restorationPending) {
+      updateFolderLinks([]);
+      return;
+    }
+    const controller = new AbortController();
+    void client.request<PublicLink[]>('/share-links', { signal: controller.signal }).then(links => {
+      if (!controller.signal.aborted && generation === sessionGeneration && refresh === publicLinksRefresh) {
+        updateFolderLinks(links);
+      }
+    }).catch(() => {
+      if (!controller.signal.aborted) updateFolderLinks([]);
+    });
+    return () => controller.abort();
+  });
+
+  $effect(() => {
+    if (!activeFolderLinks.length) return;
+    const nextExpiry = Math.min(...activeFolderLinks.map(link => link.expires_at * 1000));
+    const timer = window.setTimeout(() => { folderLinkClock = Date.now(); },
+      Math.min(Math.max(0, nextExpiry - Date.now()), 2_147_483_647));
+    return () => window.clearTimeout(timer);
+  });
+
+  function folderLinksChanged(links?: PublicLink[]): void {
+    if (links) updateFolderLinks(links);
+    publicLinksRefresh++;
+  }
+
   function closeShare(): void {
     const trigger = share?.trigger ?? null;
     const generation = sessionGeneration;
@@ -3457,7 +3501,7 @@
           </section>
         {:else if librariesView}
           <section class="libraries-content grid gap-4" aria-labelledby="libraries-title" inert={retainingRoute} aria-busy={restorationPending}>
-            <LibraryHome items={libraries} pending={restorationPending} error={librariesError}
+            <LibraryHome items={libraries} {publicFolderIds} pending={restorationPending} error={librariesError}
               onopen={(folder) => void navigate('files', [folder])}
               onretry={() => void navigate('libraries')} oncreate={createLibrary}
               onshare={(folder, trigger) => directShare = { folder, trigger }}
@@ -3519,6 +3563,9 @@
             <div class="page-heading">
               {#if folderPath.length > 1}<nav class="breadcrumb" aria-label="Folder path">{#each folderPath.slice(0, -1) as folder (folder.id)}<Button variant="link" class="h-auto p-0 break-all whitespace-normal" onclick={() => openFolder(folder)}>{folder.name}</Button><span aria-hidden="true">/</span>{/each}</nav>{/if}
               <h1 id="folder-title" tabindex="-1">{currentFolder.name}</h1>
+              {#if publicFolderIds.has(currentFolder.id)}
+                <Button variant="link" size="sm" class="px-0" aria-label={`Public link active for ${currentFolder.name}. Manage public links`} onclick={(event) => { share = { entry: currentFolder, trigger: event.currentTarget }; }}>Public link active</Button>
+              {/if}
             </div>
             <div class="search-toolbar">
               <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || (restorationPending && !searchDuringRoute) || restorationFailed} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : namedLibrary ? 'Search this library by name' : 'Search all libraries by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
@@ -3541,7 +3588,7 @@
                   {#each searchItems as hit (hit.entry.id)}
                     <div role="row" aria-label={hit.entry.name} data-entry-id={hit.entry.id} class={`file-row search-row selectable-row modified-row ${selectedIds.includes(hit.entry.id) ? 'selected-row' : ''}`}>
                       <div role="cell" class="entry-selection"><label><input type="checkbox" aria-label={`Select ${hit.entry.name} in ${searchLocation(hit)}`} checked={selectedIds.includes(hit.entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(hit.entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, hit.entry.id)} /></label></div>
-                      <div role="cell" class="search-item-main name-cell"><button type="button" class="item-name" disabled={bulkBusy} title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{hit.entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : 'Size unknown'} · {@render modifiedDateLabel(hit.entry)}</span></span></button></div>
+                      <div role="cell" class="search-item-main name-cell"><button type="button" class="item-name" disabled={bulkBusy} title={hit.entry.name} aria-label={`${hit.entry.kind === 'folder' ? 'Open' : 'Preview'} ${hit.entry.name}`} aria-describedby={publicFolderIds.has(hit.entry.id) ? `search-row-public-link-${hit.entry.id}` : undefined} onclick={(event) => hit.entry.kind === 'folder' ? openSearchFolder(hit) : openPreview(hit.entry, event.currentTarget)}><span class:folder-icon={hit.entry.kind === 'folder'} aria-hidden="true">{#if hit.entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{hit.entry.name}</span>{#if publicFolderIds.has(hit.entry.id)}<span id={`search-row-public-link-${hit.entry.id}`} class="text-xs text-muted-foreground">Public link active</span>{/if}<span class="mobile-file-size" aria-hidden="true">{typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : 'Size unknown'} · {@render modifiedDateLabel(hit.entry)}</span></span></button></div>
                         <div role="cell" class="search-location file-location"><span>{searchLocation(hit)}</span><Button variant="link" size="sm" disabled={bulkBusy} onclick={() => openSearchFolder(hit, true)} aria-label={`Open containing folder for ${hit.entry.name}`}>Open folder</Button></div>
                       <span role="cell" class="file-modified">{@render modifiedDateLabel(hit.entry)}</span><span role="cell" class="file-size">{hit.entry.kind === 'folder' ? '—' : typeof hit.entry.size === 'number' ? formatSize(hit.entry.size) : '—'}</span>
                       <div role="cell" class="options-cell"><EntryOptions entry={hit.entry} disabled={bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} copyDisabled={moveNeedsRefresh || !!pendingCopy} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(hit.entry.id)} onaction={(action, trigger) => entryAction(action, hit.entry, trigger)} /></div>
@@ -3586,7 +3633,7 @@
             {:else}<div role="rowgroup" class="file-list">{#each entries as entry (entry.id)}
               <div role="row" tabindex="-1" aria-label={entry.name} data-entry-id={entry.id} draggable={!fileMutationBusy && !moveNeedsRefresh} ondragstart={(event) => startDrag(event, entry)} ondragend={endDrag} ondragover={(event) => entry.kind === 'folder' && dragOver(event, entry)} ondragleave={(event) => entry.kind === 'folder' && dragLeave(event, entry)} ondrop={(event) => entry.kind === 'folder' && dropEntry(event, entry)} data-drop-target={entry.kind === 'folder' ? entry.id : undefined} data-drop-active={dropTarget === entry.id} class={`file-row selectable-row modified-row ${selectedIds.includes(entry.id) ? 'selected-row' : ''} ${dropTarget === entry.id ? 'drop-active' : ''}`}>
                 <div role="cell" class="entry-selection"><label><input type="checkbox" aria-label={`Select ${entry.name}`} checked={selectedIds.includes(entry.id)} disabled={fileMutationBusy} onclick={(event) => selectEntry(entry.id, event.currentTarget.checked, event.shiftKey)} onkeydown={(event) => selectionKeydown(event, entry.id)} /></label></div>
-                <div role="cell" class="name-cell"><button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span><span class="mobile-file-size" aria-hidden="true">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'} · {@render modifiedDateLabel(entry)}</span></span></button></div><span role="cell" class="file-modified">{@render modifiedDateLabel(entry)}</span><span role="cell" class="file-size">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span>
+                <div role="cell" class="name-cell"><button type="button" class="item-name" title={entry.name} aria-label={`${entry.kind === 'folder' ? 'Open' : 'Preview'} ${entry.name}`} aria-describedby={publicFolderIds.has(entry.id) ? `folder-row-public-link-${entry.id}` : undefined} disabled={loading || bulkBusy} onclick={(event) => entry.kind === 'folder' ? openFolder(entry) : openPreview(entry, event.currentTarget)}><span class:folder-icon={entry.kind === 'folder'} aria-hidden="true">{#if entry.kind === 'folder'}<FolderIcon />{:else}<FileIcon />{/if}</span><span class="item-label"><span class="filename">{entry.name}</span>{#if publicFolderIds.has(entry.id)}<span id={`folder-row-public-link-${entry.id}`} class="text-xs text-muted-foreground">Public link active</span>{/if}<span class="mobile-file-size" aria-hidden="true">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'} · {@render modifiedDateLabel(entry)}</span></span></button></div><span role="cell" class="file-modified">{@render modifiedDateLabel(entry)}</span><span role="cell" class="file-size">{typeof entry.size === 'number' && Number.isFinite(entry.size) ? formatSize(entry.size) : 'Size unknown'}</span>
                 <div role="cell" class="options-cell"><EntryOptions {entry} disabled={loading || bulkBusy || bulkNeedsRefresh || !!dropPending || moveBusy} moveDisabled={moveNeedsRefresh} copyDisabled={moveNeedsRefresh || !!pendingCopy} downloadDisabled={archiveBusy} downloading={archiveBusy && archiveTargets.includes(entry.id)} onaction={(action, trigger) => entryAction(action, entry, trigger)} /></div>
               </div>
             {/each}</div>{/if}
@@ -3616,7 +3663,7 @@
         bind:available={webdavAvailable} bind:open={webdavOpen}
         onrestorefocus={() => restoreFocus(webdavTrigger, 'account-title')} />
     {/key}
-    {#if share}<ShareLinks {client} entry={share.entry} bind:busy={shareBusy} onclose={closeShare} />{/if}
+    {#if share}<ShareLinks {client} entry={share.entry} bind:busy={shareBusy} onclose={closeShare} onchanged={folderLinksChanged} />{/if}
     {#if directShare}<DirectShareDialog {client} folder={directShare.folder} bind:busy={directShareBusy} onclose={closeDirectShare} />{/if}
 
     <Dialog.Root open={!!moveTarget || bulkAction === 'move'} onOpenChange={(open) => { if (!open && !destinationBusy) closeMove(); }}>

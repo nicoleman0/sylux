@@ -12,7 +12,7 @@ Use the item's link dialog or **Account → Shared links** to review and revoke 
 - Moving items out or sending them to Trash makes them inaccessible through that folder link, including from saved descendant URLs. The rest of the folder remains available. Restoring a descendant into the shared tree makes it visible again.
 - Replacement uploads create a new file entry. Recipients reopen the listing to get its new download address. The original file's standalone links are revoked.
 - Renaming or moving the shared root keeps its link working. Recipients see its current name and only the path from that root.
-- WebDAV refuses changes that would add content to a new public audience when the client cannot show the Sylux warning. Use the web app for those changes.
+- WebDAV uploads, replacements and new folders become visible through active folder links. Use the web app to confirm moves that introduce a new audience. Owners can open **Public link active** on a shared folder to revoke its links.
 
 ## When links stop working
 
