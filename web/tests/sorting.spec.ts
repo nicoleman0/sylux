@@ -428,8 +428,15 @@ test('folder creation refresh carries a pending sort', async ({ page }) => {
 test('desktop size heading aligns right while narrow sorting remains visible', async ({ page }) => {
   await installSortingBackend(page);
   const size = folderSortHeader(page, 'Size');
-  expect(await size.evaluate(el => getComputedStyle(el).textAlign)).toBe('right');
+  const button = size.getByRole('button');
+  const rightInset = await button.locator('svg').evaluate(icon => {
+    const button = icon.closest('button')!;
+    const style = getComputedStyle(button);
+    return button.getBoundingClientRect().right - icon.getBoundingClientRect().right
+      - parseFloat(style.paddingRight) - parseFloat(style.borderRightWidth);
+  });
+  expect(rightInset).toBeCloseTo(0, 0);
   await page.setViewportSize({ width: 320, height: 812 });
-  await expect(size.getByRole('button')).toBeVisible();
+  await expect(button).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
