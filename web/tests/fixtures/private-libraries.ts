@@ -7,7 +7,7 @@ const root = folder('root', 'Files');
 const library = folder('field-work', 'Field work');
 const studio = folder('studio', 'Studio');
 
-export async function mockPrivateLibraries(page: Page): Promise<void> {
+export async function mockPrivateLibraries(page: Page, options: { name?: string; logoUrl?: string; admin?: boolean } = {}): Promise<void> {
   const libraries = [root, library, studio];
   const folders = [folder('field-projects', 'Projects', library.id), folder('studio-projects', 'Projects', studio.id)];
   const files: Entry[] = folders.map((parent, index) => ({
@@ -20,9 +20,12 @@ export async function mockPrivateLibraries(page: Page): Promise<void> {
     const pathname = new URL(request.url()).pathname;
     const json = (value: unknown) => route.fulfill({ json: value });
     const pageOf = (items: Entry[]) => ({ items, next_cursor: null, has_more: false });
-    if (pathname === '/instance') return json({ name: 'Sylux' });
+    if (pathname === '/instance') return json({ name: options.name ?? 'Sylux' });
+    if (pathname === '/instance/appearance') return json({ accentColor: null, loginBackgroundColor: null, logoUrl: options.logoUrl ?? null, loginImageUrl: null });
+    if (pathname === '/accounts') return json([{ account_id: 'owner', handle: 'owner', role: 'administrator', enabled: true }]);
+    if (pathname === '/auth/logout') return route.fulfill({ status: 204 });
     if (pathname === '/auth/csrf') return json({ csrf_token: 'csrf' });
-    if (pathname === '/auth/local') return json({ account_id: 'owner', handle: 'owner', role: 'user' });
+    if (pathname === '/auth/local') return json({ account_id: 'owner', handle: 'owner', role: options.admin ? 'administrator' : 'user' });
     if (pathname === '/libraries' && request.method() === 'POST') {
       const name = request.postDataJSON().name as string;
       if (libraries.some(item => item.name === name)) return route.fulfill({ status: 409, json: { code: 'name_conflict' } });

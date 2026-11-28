@@ -588,3 +588,27 @@ test('saved sort choices reject invalid and foreign history state', () => {
   expect(savedContext({ ...state, accountSort: 'size_desc' }, 'owner', location)).toBeNull();
   expect(savedContext(state, 'different-owner', location)).toBeNull();
 });
+
+for (const branding of [{ name: 'Sylux' }, { name: 'Workshop', logoUrl: '/instance/appearance/assets/' + 'a'.repeat(64) }]) {
+  test(`brand returns to My libraries with ${branding.name} branding`, async ({ page }) => {
+    await mockPrivateLibraries(page, { ...branding, admin: true });
+    await page.goto('/#libraries');
+    await signInLibraryOwner(page);
+    const brand = page.getByRole('link', { name: branding.name, exact: true });
+    await expect(brand).toHaveAttribute('href', '#libraries');
+    await page.getByRole('link', { name: 'Field work', exact: true }).click();
+    await page.getByRole('button', { name: 'Open Projects', exact: true }).click();
+    await expect(page).toHaveURL(/#files\/field-projects$/);
+    await brand.focus();
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/#libraries$/);
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await expect(page).toHaveURL(/#settings$/);
+    await brand.click();
+    await expect(page).toHaveURL(/#libraries$/);
+    await page.getByRole('button', { name: 'Log out', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+    await page.getByRole('link', { name: branding.name, exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+  });
+}

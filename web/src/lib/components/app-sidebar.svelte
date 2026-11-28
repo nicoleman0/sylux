@@ -21,7 +21,7 @@
     <Sidebar.Menu><Sidebar.MenuItem>
       <Sidebar.MenuButton size="lg" tooltipContent={instanceName} aria-label={instanceName}>
         {#snippet child({ props })}
-          <a {...props} href="#files" onclick={(event) => { onhome(event); close(); }}><BrandLogo url={logoUrl} /><span class="sidebar-brand group-data-[collapsible=icon]:hidden">{instanceName}</span></a>
+          <a {...props} href="#libraries" onclick={(event) => { onhome(event); close(); }}><BrandLogo url={logoUrl} /><span class="sidebar-brand group-data-[collapsible=icon]:hidden">{instanceName}</span></a>
         {/snippet}
       </Sidebar.MenuButton>
     </Sidebar.MenuItem></Sidebar.Menu>
