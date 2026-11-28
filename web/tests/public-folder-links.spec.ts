@@ -100,3 +100,39 @@ for (const [width, colorScheme] of [[1280, 'light'], [360, 'dark']] as const) {
     await expect(page.getByText('Public link active', { exact: true })).toHaveCount(0);
   });
 }
+
+test('an unavailable link list keeps the last known status until refresh succeeds', async ({ page }) => {
+  await mockPrivateLibraries(page);
+  const now = Math.floor(Date.now() / 1000);
+  let links: PublicLink[] | null = [{
+    id: 'link', kind: 'folder', entry_id: 'field-work', name: 'Field work',
+    created_at: now, expires_at: now + 3600,
+  }];
+  let releaseFailure!: () => void;
+  const heldFailure = new Promise<void>(resolve => { releaseFailure = resolve; });
+  await page.route('**/share-links', async route => {
+    if (links) return route.fulfill({ json: links });
+    await heldFailure;
+    return route.fulfill({ status: 500, json: { code: 'unavailable' } });
+  });
+
+  await page.goto('/#libraries');
+  await signInLibraryOwner(page);
+  const active = page.getByRole('button', { name: 'Public link active for Field work. Manage public links' });
+  const warning = page.getByRole('status').filter({ hasText: 'Could not check public links.' });
+  await expect(active).toBeVisible();
+
+  links = null;
+  await page.getByRole('link', { name: 'Field work', exact: true }).press('Enter');
+  await expect(page.getByRole('heading', { name: 'Field work', exact: true })).toBeFocused();
+  await active.focus();
+  releaseFailure();
+  await expect(warning).toContainText('Open Shared links in Account');
+  await expect(active).toBeFocused();
+
+  links = [];
+  const refresh = page.getByRole('button', { name: 'Refresh folder', exact: true });
+  await refresh.press('Enter');
+  await expect(warning).toHaveCount(0);
+  await expect(active).toHaveCount(0);
+});

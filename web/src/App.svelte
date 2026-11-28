@@ -1697,6 +1697,7 @@
       else if (!operation?.inProgress) textEdit.state.operation = null;
     }
     share = null; shareBusy = false; directShare = null; directShareBusy = ''; settleTreeSharing(false);
+    updateFolderLinks([]);
     sharedView = null; sharedLocation = { folder: '', file: undefined };
     webdavAvailable = false; webdavOpen = false; webdavTrigger = null;
     clearSearch();
@@ -2520,12 +2521,14 @@
 
   let ownedFolderLinks = $state<PublicLink[]>([]);
   let publicLinksRefresh = $state(0);
+  let publicLinksError = $state(false);
   let folderLinkClock = $state(Date.now());
   const activeFolderLinks = $derived(ownedFolderLinks.filter(link => link.expires_at * 1000 > folderLinkClock));
   const publicFolderIds = $derived(new Set(activeFolderLinks.map(link => link.entry_id)));
 
   function updateFolderLinks(links: PublicLink[]): void {
     ownedFolderLinks = links.filter(link => link.kind === 'folder');
+    publicLinksError = false;
     folderLinkClock = Date.now();
   }
 
@@ -2533,17 +2536,13 @@
     const scope = librariesView ? 'libraries' : filesView ? currentFolder.id : '';
     const generation = sessionGeneration;
     const refresh = publicLinksRefresh;
-    if (!user || !scope || restorationPending) {
-      updateFolderLinks([]);
-      return;
-    }
+    if (!user || !scope || restorationPending) return;
     const controller = new AbortController();
+    const isCurrent = () => !controller.signal.aborted && generation === sessionGeneration && refresh === publicLinksRefresh;
     void client.request<PublicLink[]>('/share-links', { signal: controller.signal }).then(links => {
-      if (!controller.signal.aborted && generation === sessionGeneration && refresh === publicLinksRefresh) {
-        updateFolderLinks(links);
-      }
+      if (isCurrent()) updateFolderLinks(links);
     }).catch(() => {
-      if (!controller.signal.aborted) updateFolderLinks([]);
+      if (isCurrent()) publicLinksError = true;
     });
     return () => controller.abort();
   });
@@ -3186,6 +3185,12 @@
   }
 </script>
 
+{#snippet publicLinksStatus()}
+  {#if publicLinksError && !restorationPending}
+    <p class="text-sm text-muted-foreground" role="status">Could not check public links. Open Shared links in Account to check.</p>
+  {/if}
+{/snippet}
+
 {#snippet routePlaceholder()}
   <div class="route-placeholder" aria-hidden="true"><span></span><span></span><span></span></div>
 {/snippet}
@@ -3506,6 +3511,7 @@
               onretry={() => void navigate('libraries')} oncreate={createLibrary}
               onshare={(folder, trigger) => directShare = { folder, trigger }}
               onpubliclink={(folder, trigger) => share = { entry: folder, trigger }} />
+            {@render publicLinksStatus()}
             {#if restorationPending && !presentedRoute}{@render routePlaceholder()}{/if}
           </section>
         {:else if sharedView}
@@ -3566,6 +3572,7 @@
               {#if publicFolderIds.has(currentFolder.id)}
                 <Button variant="link" size="sm" class="px-0" aria-label={`Public link active for ${currentFolder.name}. Manage public links`} onclick={(event) => { share = { entry: currentFolder, trigger: event.currentTarget }; }}>Public link active</Button>
               {/if}
+              {@render publicLinksStatus()}
             </div>
             <div class="search-toolbar">
               <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || (restorationPending && !searchDuringRoute) || restorationFailed} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : namedLibrary ? 'Search this library by name' : 'Search all libraries by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}

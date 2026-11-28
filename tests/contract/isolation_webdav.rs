@@ -1421,3 +1421,72 @@ async fn webdav_sync_updates_a_live_public_folder_without_granting_write_access(
     assert_eq!(dav("GET", file, "").await.2, b"replacement bytes");
     f.close().await;
 }
+
+#[tokio::test]
+async fn webdav_replacement_requires_a_strong_match_and_rechecks_a_renamed_entry() {
+    use serde_json::Value;
+
+    let f = Fixture::with_webdav(true).await;
+    let (_, owner) = f.credential(0, "Replacement desktop", false).await;
+    let file = "/dav/Files/replacement.bin";
+    let renamed = "/dav/Files/renamed.bin";
+    let put = async |mut conditions: Vec<(&str, String)>, body| {
+        conditions.push(owner.clone());
+        f.request("PUT", file, None, &conditions, body).await
+    };
+    let get = async |path| {
+        f.request("GET", path, None, std::slice::from_ref(&owner), "")
+            .await
+    };
+
+    let (status, headers, _) = put(vec![], "first bytes").await;
+    assert_eq!(status, 201);
+    let tag = &headers["etag"];
+    for conditions in [
+        vec![("If-Match", format!("W/{tag}"))],
+        vec![("If-Match", "*".into())],
+        vec![("If-Match", tag.clone()), ("If-None-Match", "*".into())],
+    ] {
+        assert_eq!(put(conditions, "rejected bytes").await.0, 412);
+    }
+
+    let (status, headers, _) = put(vec![("If-Match", tag.clone())], "second bytes").await;
+    assert_eq!(status, 204);
+    let current_tag = headers["etag"].clone();
+    assert_ne!(&current_tag, tag);
+    assert_eq!(get(file).await.2, b"second bytes");
+    let (status, _, body) = f.request("GET", "/trash", cookie(0), &[], "").await;
+    assert_eq!(status, 200);
+    let trash: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        trash["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "replacement.bin")
+    );
+
+    f.upload_commit.arm();
+    let (replacement, moved) =
+        tokio::join!(put(vec![("If-Match", current_tag)], "third bytes"), async {
+            tokio::time::timeout(Duration::from_secs(5), f.upload_commit.wait_paused())
+                .await
+                .unwrap();
+            let moved = f
+                .request(
+                    "MOVE",
+                    file,
+                    None,
+                    &[owner.clone(), ("Destination", renamed.into())],
+                    "",
+                )
+                .await;
+            f.upload_commit.release();
+            moved
+        });
+    assert_eq!(moved.0, 201);
+    assert_eq!(replacement.0, 412);
+    assert_eq!(get(file).await.0, 404);
+    assert_eq!(get(renamed).await.2, b"second bytes");
+    f.close().await;
+}
