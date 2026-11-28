@@ -5,6 +5,7 @@
   import { tick } from 'svelte';
   import { ListingApi, type Entry, type FileEntry } from './listing';
   import PublicFolderNotice from './PublicFolderNotice.svelte';
+  import { publicFolderNotice } from './public-folder-notice.svelte';
   import { TEXT_EDIT_LIMIT, TextSave, draftBytes, editorText, preserveLineEndings, type TextEditState } from './text-edit';
   import { loadPreview, mediaPreviewKind, type MediaPreview, type Preview } from './preview';
   import { getPdfPreviewCompatibilityError } from './pdf-compatibility';
@@ -38,6 +39,7 @@
   let editButton = $state<HTMLElement | null>(null);
   const draft = $derived(edit.draft);
   const editing = $derived(!!draft && entry?.id === draft.entry.id);
+  const saveAudience = publicFolderNotice(() => client, () => editing ? draft?.entry.parent_id ?? null : null);
   const dirty = $derived(!!draft && draft.wire !== draft.original);
   const payload = $derived(draft ? draftBytes(draft.wire, draft.source.bom) : null);
   const tooLarge = $derived((payload?.size ?? 0) > TEXT_EDIT_LIMIT);
@@ -82,7 +84,7 @@
 
   async function saveDraft() {
     const signal = editSignal;
-    if (signal.aborted || !editing || !draft || !dirty || !payload || tooLarge || edit.stale || editBusy) return;
+    if (signal.aborted || !editing || !draft || !dirty || !payload || tooLarge || edit.stale || editBusy || saveAudience.pending) return;
     const { entry: target, source } = draft;
     const bytes = payload;
     editBusy = 'save';
@@ -316,7 +318,7 @@
       {/if}
     </div>
     {#if editing}
-      <PublicFolderNotice {client} folder={entry?.parent_id ?? null} subject="The saved changes" />
+      <PublicFolderNotice status={saveAudience.status} subject="The saved changes" />
       {#if editError || tooLarge}
         <p id="text-edit-error" role="alert" class="text-destructive shrink-0 text-sm">
           {tooLarge ? `The edit limit is ${TEXT_EDIT_LIMIT / 1024} KiB. Shorten the text or download your draft.` : editError}
@@ -330,8 +332,8 @@
         <div class="flex gap-2">
           <Button variant="outline" disabled={editBusy === 'save'} aria-disabled={!!editBusy}
             aria-busy={editBusy === 'cancel'} onclick={cancelDraft}>{editBusy === 'cancel' ? 'Canceling…' : 'Cancel'}</Button>
-          <Button disabled={!dirty || tooLarge || edit.stale || editBusy === 'cancel'}
-            aria-disabled={editBusy === 'save' || undefined} aria-busy={editBusy === 'save'} onclick={saveDraft}>
+          <Button disabled={!dirty || tooLarge || edit.stale || editBusy === 'cancel' || saveAudience.pending}
+            aria-disabled={editBusy === 'save' || undefined} aria-busy={editBusy === 'save' || saveAudience.pending} onclick={saveDraft}>
             {editBusy === 'save' ? 'Saving…' : unresolved ? 'Retry save' : 'Save'}
           </Button>
         </div>

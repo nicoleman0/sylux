@@ -120,6 +120,80 @@ async function backend(page: Page, fault?: { name: string; outcome: 'failed' | '
 
 }
 
+
+const rootAudience = (url: URL) => url.pathname === '/folders/root/path' && url.searchParams.get('public_links') === 'true';
+
+for (const audience of ['private', 'failed'] as const) {
+  test(`new folder waits for public link status when the lookup is ${audience}`, async ({ page }) => {
+    const store = await backend(page);
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    await page.route(rootAudience, async route => {
+      await held;
+      if (audience === 'failed') return route.fulfill({ status: 500, json: { code: 'internal_error' } });
+      await route.fulfill({ json: { public_link_active: false } });
+    });
+    try {
+      await page.getByRole('button', { name: 'New folder', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Create folder' });
+      const name = dialog.getByLabel('Folder name');
+      const create = dialog.getByRole('button', { name: 'Create folder' });
+      const warning = dialog.getByText(/will be available to anyone/);
+      await expect(dialog.getByRole('status')).toHaveText('Checking public links…');
+      await expect(warning).toHaveCount(0);
+      await expect(create).toBeDisabled();
+      await name.fill('New collection');
+      await name.press('Enter');
+      expect(store.events).toEqual([]);
+
+      release();
+      await expect(dialog.getByRole('status')).toHaveCount(0);
+      if (audience === 'failed') {
+        await expect(warning).toHaveText('The new folder will be available to anyone with a public folder link, if one is active here.');
+      } else {
+        await expect(warning).toHaveCount(0);
+      }
+      await expect(create).toBeEnabled();
+      expect(store.events).toEqual([]);
+      await create.click();
+      await expect(page.getByRole('button', { name: 'Open New collection' })).toBeVisible();
+      expect(store.events).toEqual([{ kind: 'folder', name: 'New collection', parent: 'root' }]);
+    } finally {
+      release();
+    }
+  });
+}
+
+for (const audience of ['public', 'failed'] as const) {
+  test(`canceling upload after a ${audience} folder audience reply starts no upload`, async ({ page }) => {
+    const store = await backend(page);
+    await page.route(rootAudience, route => audience === 'public'
+      ? route.fulfill({ json: { public_link_active: true } })
+      : route.fulfill({ status: 500, json: { code: 'internal_error' } }));
+    const uploads: string[] = [];
+    page.on('request', request => {
+      const { pathname } = new URL(request.url());
+      if (pathname === '/mutation-tickets' || pathname.startsWith('/uploads')) uploads.push(pathname);
+    });
+    await page.getByLabel('Choose files to upload').setInputFiles({
+      name: 'private.txt', mimeType: 'text/plain', buffer: Buffer.from('private content'),
+    });
+    const prompt = page.getByRole('dialog', { name: 'Upload to Files?' });
+    await expect(prompt).toContainText('Anyone with a public link');
+    const failureNotice = prompt.getByText('Could not check for public folder links.', { exact: false });
+    if (audience === 'failed') await expect(failureNotice).toBeVisible();
+    else await expect(failureNotice).toHaveCount(0);
+    const cancel = prompt.getByRole('button', { name: 'Cancel', exact: true });
+    await expect(cancel).toBeFocused();
+    await cancel.press('Enter');
+    await expect(prompt).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Choose files', exact: true })).toBeEnabled();
+    expect(uploads).toEqual([]);
+    expect(store.events).toEqual([]);
+    expect(store.sent).toEqual([]);
+  });
+}
+
 async function desktopDrop(page: Page, target: Locator, sources: Source[], fallback = false, capture = false) {
   await expect(page.locator('.files-content')).toHaveAttribute('aria-busy', 'false');
   const dataTransfer = await page.evaluateHandle(({ sources, fallback }) => {

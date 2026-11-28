@@ -1,25 +1,13 @@
 <script lang="ts">
-  import type { ApiClient } from './api';
-  import { publicFolderLinkStatus } from './public-folder-links';
+  import type { PublicFolderNoticeState } from './public-folder-notice.svelte';
 
-  let { client, folder, subject }: { client: ApiClient; folder: string | null; subject: string } = $props();
-  let active = $state<boolean | null>(null);
-
-  $effect(() => {
-    active = null;
-    if (!folder) return;
-    const controller = new AbortController();
-    void publicFolderLinkStatus(client, folder, controller.signal).then(value => {
-      if (!controller.signal.aborted) active = value;
-    }, () => {
-      if (!controller.signal.aborted) active = null;
-    });
-    return () => controller.abort();
-  });
+  let { status, subject }: { status: PublicFolderNoticeState; subject: string } = $props();
 </script>
 
-{#if folder && active !== false}
+{#if status === 'checking'}
+  <p role="status" class="text-sm text-muted-foreground">Checking public links…</p>
+{:else if status === 'public' || status === 'unavailable'}
   <p class="text-sm text-muted-foreground">
-    {subject} will be available to anyone with {active ? 'a public link to this location' : 'a public folder link, if one is active here'}.
+    {subject} will be available to anyone with {status === 'public' ? 'a public link to this location' : 'a public folder link, if one is active here'}.
   </p>
 {/if}

@@ -1233,14 +1233,94 @@ async fn webdav_cannot_add_content_to_a_public_folder_without_owner_warning() {
     assert_eq!(move_to(existing, destination).await, 403);
     assert_eq!(dav("GET", existing, "").await.0, 200);
 
-    let revoke = format!("/share-links/{}", link["id"].as_str().unwrap());
+    let link_id = link["id"].as_str().unwrap();
+    let expired_id = link_id.to_owned();
+    let workers = f.workers.as_ref().unwrap();
+    workers
+        .transact(move |tx| {
+            assert_eq!(
+                tx.execute(
+                    "UPDATE share_link SET created_at=1,expires_at=86401 WHERE share_id=?1",
+                    [expired_id],
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let folder = root["id"].as_str().unwrap();
+    let (status, _, body) = f
+        .request(
+            "GET",
+            &format!("/folders/{folder}/path?public_links=true"),
+            cookie(0),
+            &[],
+            "",
+        )
+        .await;
+    assert_eq!(status, 200);
+    let path: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(path["public_link_active"], false);
+
+    let file = "00000000000000000000000000000302";
+    let mut move_headers = mutation.to_vec();
+    move_headers.push(("If-Match", format!("\"{file}:1\"")));
+    let (status, _, _) = f
+        .request(
+            "POST",
+            &format!("/entries/{file}/move"),
+            cookie(0),
+            &move_headers,
+            &json!({"parent_id": folder}).to_string(),
+        )
+        .await;
+    assert_eq!(
+        status, 200,
+        "an expired link does not require move confirmation"
+    );
+    assert_eq!(
+        dav("PUT", "/dav/Recipient%20folder/expired.bin", "after expiry")
+            .await
+            .0,
+        201
+    );
+    assert_eq!(
+        dav("GET", "/dav/Recipient%20folder/expired.bin", "")
+            .await
+            .2,
+        b"after expiry"
+    );
+    let expired_id = link_id.to_owned();
+    let persisted: i64 = workers
+        .read(move |db| {
+            db.query_row(
+                "SELECT count(*) FROM share_link WHERE share_id=?1 AND expires_at=86401",
+                [expired_id],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted, 1,
+        "the audience checks ran before expired-link cleanup"
+    );
+
+    let revoke = format!("/share-links/{link_id}");
     assert_eq!(
         f.request("DELETE", &revoke, cookie(0), &mutation, "")
             .await
             .0,
         204
     );
-    assert_eq!(move_to(existing, destination).await, 201);
+    assert_eq!(
+        dav("GET", "/dav/Recipient%20folder/private-file.bin", "")
+            .await
+            .2,
+        b"synthetic isolation payload"
+    );
     assert_eq!(dav("PUT", pending, "now private").await.0, 201);
     f.close().await;
 }

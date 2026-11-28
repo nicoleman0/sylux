@@ -20,6 +20,7 @@
   import LogOutIcon from '@lucide/svelte/icons/log-out';
   import EntryOptions, { type EntryAction } from './lib/EntryOptions.svelte';
   import PublicFolderNotice from './lib/PublicFolderNotice.svelte';
+  import { publicFolderNotice } from './lib/public-folder-notice.svelte';
   import { publicFolderLinkStatus } from './lib/public-folder-links';
   import ShareLinks from './lib/ShareLinks.svelte';
   import AccountOptions from './lib/AccountOptions.svelte';
@@ -928,6 +929,10 @@
   let moveDialog = $state<HTMLElement | null>(null);
   type ReplacementPrompt = { file: File; folder: Folder; target: { id: string; name: string; etag: string } };
   let replacementPrompt = $state<ReplacementPrompt | null>(null);
+  const createAudience = publicFolderNotice(() => client, () => createOpen ? currentFolder.id || null : null);
+  const copyAudience = publicFolderNotice(() => client, () =>
+    destinationAction === 'copy' && moveDestinationReady ? movePath.at(-1)?.id ?? null : null);
+  const replacementAudience = publicFolderNotice(() => client, () => replacementPrompt?.folder.id ?? null);
   let uploadReplacement = $state(false);
   let transferName = $state('');
   let progress = $state(0);
@@ -1772,7 +1777,7 @@
   async function createFolder(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (namespaceUnknown) { folderError = 'Close this dialog and check Files and Trash before continuing.'; return; }
-    if (restorationPending || restorationFailed || folderBusy || !currentFolder.id) return;
+    if (restorationPending || restorationFailed || folderBusy || createAudience.pending || !currentFolder.id) return;
     const name = folderName.trim();
     if (!name || name === '.' || name === '..' || /[\/\\\x00-\x1f\x7f]/.test(name)) {
       folderError = 'Enter a folder name without slashes or control characters.';
@@ -2038,7 +2043,7 @@
 
   async function copyEntry(): Promise<void> {
     const target = moveTarget, destination = movePath.at(-1);
-    if (!target || !destination || pendingCopy || moveBusy || moveLoading || !moveDestinationReady ||
+    if (!target || !destination || pendingCopy || moveBusy || moveLoading || !moveDestinationReady || copyAudience.pending ||
         namespaceUnknown || destination.id === target.parent_id || movePath.some(folder => folder.id === target.id)) return;
     const generation = sessionGeneration, feedback = feedbackRevision;
     moveBusy = true; moveError = '';
@@ -2798,7 +2803,7 @@
 
   async function confirmReplacement(): Promise<void> {
     const prompt = replacementPrompt;
-    if (!prompt || transferBusy || unresolvedUploadId) return;
+    if (!prompt || transferBusy || unresolvedUploadId || replacementAudience.pending) return;
     replacementPrompt = null;
     if (replacementDecision) {
       const decide = replacementDecision; replacementDecision = null;
@@ -3603,7 +3608,7 @@
     <Dialog.Root open={createOpen} onOpenChange={(open) => { if (!folderBusy) createOpen = open; }}>
       <Dialog.Content showCloseButton={!folderBusy} onOpenAutoFocus={(event) => { event.preventDefault(); folderInput?.focus(); }} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(createTrigger); createTrigger = null; }}>
         <Dialog.Header><Dialog.Title>Create folder</Dialog.Title><Dialog.Description>Add a folder to {currentFolder.name}.</Dialog.Description></Dialog.Header>
-        <form class="grid gap-6" aria-busy={folderBusy} onsubmit={createFolder}><div class="grid gap-2"><Label for="new-folder">Folder name</Label><Input id="new-folder" bind:ref={folderInput} bind:value={folderName} disabled={folderBusy} maxlength={255} aria-invalid={!!folderError} aria-describedby={folderError ? 'folder-error' : undefined} required /></div><PublicFolderNotice {client} folder={currentFolder.id} subject="The new folder" />{#if folderError}<p id="folder-error" role="alert">{folderError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={folderBusy} onclick={() => createOpen = false}>Cancel</Button><Button type="submit" disabled={folderBusy}>{folderBusy ? 'Creating…' : 'Create folder'}</Button></Dialog.Footer></form>
+        <form class="grid gap-6" aria-busy={folderBusy} onsubmit={createFolder}><div class="grid gap-2"><Label for="new-folder">Folder name</Label><Input id="new-folder" bind:ref={folderInput} bind:value={folderName} disabled={folderBusy} maxlength={255} aria-invalid={!!folderError} aria-describedby={folderError ? 'folder-error' : undefined} required /></div><PublicFolderNotice status={createAudience.status} subject="The new folder" />{#if folderError}<p id="folder-error" role="alert">{folderError}</p>{/if}<Dialog.Footer><Button type="button" variant="outline" disabled={folderBusy} onclick={() => createOpen = false}>Cancel</Button><Button type="submit" disabled={folderBusy || createAudience.pending} aria-busy={folderBusy || createAudience.pending}>{folderBusy ? 'Creating…' : 'Create folder'}</Button></Dialog.Footer></form>
       </Dialog.Content>
     </Dialog.Root>
     {#key user.id}
@@ -3657,7 +3662,7 @@
           {#if moveCursor}<Button variant="outline" disabled={moveCloseRefreshBusy || moveLoading || destinationBusy} onclick={() => loadMoveFolder(movePath, moveCursor)}>More destination folders</Button>{/if}
         </div>
         {#if destinationAction === 'copy'}
-          <PublicFolderNotice {client} folder={movePath.at(-1)?.id ?? null} subject="The copy" />
+          <PublicFolderNotice status={copyAudience.status} subject="The copy" />
           <p class="text-sm break-all">Destination: {movePath.map((folder) => folder.name).join(' / ') || 'Choose a folder'}</p>
           {#if moveAlreadyHere}<p class="text-muted-foreground text-sm">This item is already here. Open another folder or choose an ancestor above.</p>{/if}
         {:else if moveDestinationReady && moveAlreadyHere && (destinationFolders.length || moveCursor)}
@@ -3666,7 +3671,7 @@
         {#if moveError}<p role="alert">{moveError}</p>{/if}{#if moveNeedsRefresh || moveCloseRefreshBusy}<RefreshButton label="Close and refresh files" busyLabel="Refreshing files…" busy={moveCloseRefreshBusy} disabled={moveBusy || moveLoading} onclick={closeMoveAndRefresh} />{:else if moveError || moveLoading}<RefreshButton label="Refresh destinations" busyLabel="Refreshing destinations…" busy={moveLoading} disabled={moveBusy} onclick={() => movePath.length ? loadMoveFolder(movePath) : loadMoveLibraries()} />{/if}
         <Dialog.Footer>
           <Button variant="outline" disabled={destinationBusy} onclick={closeMove}>Cancel</Button>
-          <Button disabled={!canConfirmMove} aria-disabled={destinationBusy || undefined} aria-busy={destinationBusy} class="aria-disabled:cursor-default" onclick={() => {
+          <Button disabled={!canConfirmMove || copyAudience.pending} aria-disabled={destinationBusy || undefined} aria-busy={destinationBusy || copyAudience.pending} class="aria-disabled:cursor-default" onclick={() => {
             if (!destinationBusy) return bulkAction === 'move' ? runBulk() : destinationAction === 'copy' ? copyEntry() : moveEntry();
           }}>
             {destinationAction === 'copy' ? (moveBusy ? 'Copying…' : 'Copy here') : (destinationBusy ? 'Moving…' : 'Move here')}
@@ -3732,8 +3737,8 @@
     <Dialog.Root open={!!replacementPrompt} onOpenChange={(open) => { if (!open) dismissReplacement(); }}>
       <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); const choose = document.getElementById('choose-file') as HTMLButtonElement | null; restoreFocus(choose && !choose.disabled ? choose : null); }}>
         <Dialog.Header><Dialog.Title>Replace {replacementPrompt?.target.name}?</Dialog.Title><Dialog.Description>A file with this name already exists in {replacementPrompt?.folder.name}. The previous file will move to trash and stay there until restored. Rename the current file before restoring it. If this upload fails or is canceled before saving, the previous file stays unchanged.</Dialog.Description></Dialog.Header>
-        <PublicFolderNotice {client} folder={replacementPrompt?.folder.id ?? null} subject="The replacement file" />
-        <Dialog.Footer><Button variant="outline" onclick={dismissReplacement}>Keep existing file</Button><Button onclick={confirmReplacement}>Replace file</Button></Dialog.Footer>
+        <PublicFolderNotice status={replacementAudience.status} subject="The replacement file" />
+        <Dialog.Footer><Button variant="outline" onclick={dismissReplacement}>Keep existing file</Button><Button disabled={replacementAudience.pending} aria-busy={replacementAudience.pending} onclick={confirmReplacement}>Replace file</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
     <Dialog.Root open={!!removalPreview} onOpenChange={(open) => { if (!open && !removalSubmitting) removalPreview = null; }}>
