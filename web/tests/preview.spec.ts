@@ -531,6 +531,20 @@ async function openTextDraft(page: Page) {
   return auth;
 }
 
+test('edit description is the save warning and cancel returns to an undescribed text preview', async ({ page }) => {
+  await openTextDraft(page);
+  const dialog = page.getByRole('dialog', { name: 'Edit private-notes.txt' });
+  const warning = 'Saving moves the previous version to Trash and ends any download links for it.';
+  await expect(dialog).toHaveAttribute('aria-describedby', /.+/);
+  await expect(dialog.getByText(warning, { exact: true })).toBeVisible();
+  const descriptionId = await dialog.getAttribute('aria-describedby');
+  await expect(page.locator(`#${descriptionId}`)).toHaveText(warning);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  const preview = page.getByRole('dialog', { name: 'Preview private-notes.txt' });
+  await expect(preview).toBeVisible();
+  await expect(preview).not.toHaveAttribute('aria-describedby');
+});
+
 async function expireTextEdit(page: Page, auth: { expired: boolean }) {
   auth.expired = true;
   await page.getByRole('button', { name: 'Refresh folder', exact: true }).click();

@@ -209,16 +209,15 @@ test('focus stays on the item through a refresh', async ({ page }) => {
   await expect(item(page, 'beta')).toBeFocused();
 });
 
-test('fresh Files shows how to focus the first item from the folder heading', async ({ page }) => {
+test('Down Arrow focuses the first item from the Files heading', async ({ page }) => {
   await open(page);
   const heading = page.getByRole('heading', { name: 'Files', level: 1 });
   const hint = page.getByText('Press Down Arrow to focus the first item.', { exact: true });
   await expect(heading).toBeFocused();
-  await expect(hint).toBeVisible();
-  await expect(heading).toHaveAccessibleDescription('Press Down Arrow to focus the first item.');
+  await expect(hint).toHaveCount(0);
+  await expect(heading).not.toHaveAttribute('aria-describedby');
   await page.keyboard.press('ArrowDown');
   await expect(item(page, 'alpha')).toBeFocused();
-  await expect(hint).toBeHidden();
 });
 
 test('first pointer click after fresh Files keeps row geometry stable', async ({ page }) => {

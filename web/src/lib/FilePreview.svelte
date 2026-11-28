@@ -27,6 +27,7 @@
   let error = $state('');
   let attempt = $state(0);
   let downloadButton: HTMLElement | null = $state(null);
+  const descriptionId = $props.id();
   const isPdf = $derived(entry?.name.split('.').at(-1)?.toLowerCase() === 'pdf');
   const mediaKind = $derived(entry?.kind === 'file' ? mediaPreviewKind(entry.name) : null);
 
@@ -229,6 +230,7 @@
 
 <Dialog.Root open={!!entry} onOpenChange={(open) => { if (!open) close(); }}>
   <Dialog.Content
+    aria-describedby={isPdf || mediaKind || editing ? descriptionId : undefined}
     class={isPdf
       ? 'pdf-reader-shell !max-w-none !w-full !h-[100dvh] !max-h-none !rounded-none !gap-0 !p-0 !ring-0 overflow-hidden flex flex-col'
       : mediaKind === 'audio'
@@ -247,21 +249,19 @@
       <header class="reader-header">
         <Button variant="ghost" size="icon" aria-label="Close preview" title="Close preview" onclick={onclose}><XIcon /></Button>
         <Dialog.Title class="min-w-0 flex-1 truncate text-sm" title={entry?.name}><span class="sr-only">Preview </span>{entry?.name}</Dialog.Title>
-        <Dialog.Description class="sr-only">PDF reader</Dialog.Description>
+        <p id={descriptionId} class="sr-only">PDF reader</p>
         <Button variant="ghost" size="icon" aria-label="Download file" title="Download file" onclick={ondownload}><DownloadIcon /></Button>
       </header>
     {:else if mediaKind}
       <Dialog.Header class="shrink-0">
         <Dialog.Title class="truncate" title={entry?.name}><span class="sr-only">Preview </span>{entry?.name}</Dialog.Title>
-        <Dialog.Description class="sr-only">Media preview</Dialog.Description>
+        <p id={descriptionId} class="sr-only">Media preview</p>
       </Dialog.Header>
     {:else}
     <Dialog.Header class="shrink-0">
       <Dialog.Title class="break-all">{editing ? 'Edit' : 'Preview'} {entry?.name}</Dialog.Title>
       {#if editing}
-        <Dialog.Description>Saving moves the previous version to Trash and ends any download links for it.</Dialog.Description>
-      {:else}
-        <Dialog.Description>Read-only preview.</Dialog.Description>
+        <p id={descriptionId} class="text-muted-foreground text-sm">Saving moves the previous version to Trash and ends any download links for it.</p>
       {/if}
     </Dialog.Header>
     {/if}
