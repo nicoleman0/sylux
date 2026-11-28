@@ -153,7 +153,6 @@ h1:focus, h2:focus { outline: none; }
 .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-name:hover .filename { color: var(--primary); }
 .file-row:is(:hover, :focus-within) .filename { white-space: normal; overflow-wrap: anywhere; padding-block: 8px; }
-.folder-sort-head > :nth-child(4) { text-align: right; }
 .file-size { color: var(--muted-foreground); text-align: right; font-size: var(--type-ui); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .list-summary { margin: 17px 0 0 12px; font-size: var(--type-meta); color: var(--muted-foreground); }
 .file-row :is(.file-size, .file-modified, .mobile-file-size), .trash-row :is(.file-size, .file-modified, .trash-metadata), .account-row .account-role, .sidebar-account-role, .search-location { font-family: var(--font-data); }
@@ -290,12 +289,12 @@ h1:focus, h2:focus { outline: none; }
 .trash-location { color: var(--muted-foreground); font-size: var(--type-meta); }
 
 .sort-header { min-width: 0; }
-.sort-heading { padding-inline: 4px; color: inherit; font-size: var(--type-meta); }
+.sort-heading { width: 100%; justify-content: flex-start; padding-inline: 4px; color: inherit; font-size: var(--type-meta); }
+.folder-sort-head > :nth-child(4) .sort-heading, .trash-size-sort .sort-heading { justify-content: flex-end; }
 .sort-heading svg { width: 14px; height: 14px; }
 .sort-header[aria-sort="ascending"], .sort-header[aria-sort="descending"] { color: var(--foreground); }
 .trash-sort, .account-sort { color: var(--muted-foreground); }
 .trash-sort .sort-heading { border-inline-start-width: 0; padding-inline-start: 0; }
-.trash-size-sort { text-align: right; }
 .trash-sort .trash-size-sort .sort-heading { border-inline-end-width: 0; padding-inline-end: 0; }
 .narrow-sort { display: none; }
 @media (max-width: 620px) {

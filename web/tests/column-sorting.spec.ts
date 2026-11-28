@@ -65,6 +65,39 @@ async function installBackend(page: Page) {
   return { folderRequests, searchRequests, trashRequests, accounts };
 }
 
+for (const tableName of ['Files in current folder', 'Search matches', 'Trash items', 'Accounts'] as const) {
+  test(`clicking the Name column header reverses the visible rows in ${tableName}`, async ({ page }) => {
+    await installBackend(page);
+    if (tableName === 'Search matches') {
+      await page.getByLabel('Search files and folders', { exact: true }).fill('txt');
+    } else if (tableName === 'Trash items' || tableName === 'Accounts') {
+      await page.getByRole('button', { name: tableName === 'Accounts' ? 'Settings' : 'Trash', exact: true }).click();
+    }
+
+    const table = page.getByRole('table', { name: tableName, exact: true });
+    const header = table.getByRole('columnheader', { name: 'Name', exact: true });
+    const rows = table.locator('[role="row"][aria-label]');
+    const rowNames = () => rows.evaluateAll(items => items.map(row => row.getAttribute('aria-label')));
+    const accounts = tableName === 'Accounts';
+    await expect.poll(rowNames).toEqual(accounts ? ['ada', 'ben', 'owner', 'zoe'] : ['Alpha.txt', 'Bravo.txt']);
+    await expect(header).toHaveAttribute('aria-sort', 'ascending');
+
+    if (!accounts) {
+      await page.getByRole('button', { name: 'Next page', exact: true }).click();
+      await expect.poll(rowNames).toEqual(['Zulu.txt']);
+    }
+
+    await header.click();
+    await expect(header).toHaveAttribute('aria-sort', 'descending');
+    await expect.poll(rowNames).toEqual(accounts ? ['zoe', 'owner', 'ben', 'ada'] : ['Zulu.txt', 'Bravo.txt']);
+    if (!accounts) await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toHaveCount(0);
+
+    await header.click();
+    await expect(header).toHaveAttribute('aria-sort', 'ascending');
+    await expect.poll(rowNames).toEqual(accounts ? ['ada', 'ben', 'owner', 'zoe'] : ['Alpha.txt', 'Bravo.txt']);
+  });
+}
+
 test('folder column reversal preserves paging and selection and ignores a stale response', async ({ page }) => {
   const { folderRequests } = await installBackend(page);
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
