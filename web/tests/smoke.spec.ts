@@ -26,6 +26,7 @@ async function installBackend(page: import('@playwright/test').Page): Promise<vo
       return json({ name: instanceName });
     }
     if (path === '/libraries' && method === 'GET') return json({ items: [root] });
+    if (path === '/share-links' && method === 'GET') return json([]);
     if (path === '/auth/csrf') return json({ csrf_token: 'test-csrf' });
     if (path === '/auth/local') return json({ account_id: 'account-1', handle: 'owner', role: 'administrator', csrf_token: 'session-csrf' });
     if (path === '/setup/admin') return json({ code: 'setup_complete' }, 201);

@@ -3186,9 +3186,7 @@
 </script>
 
 {#snippet publicLinksStatus()}
-  {#if publicLinksError && !restorationPending}
-    <p class="text-sm text-muted-foreground" role="status">Could not check public links. Open Shared links in Account to check.</p>
-  {/if}
+  <p class="text-sm text-muted-foreground empty:absolute" aria-live="polite" aria-atomic="true">{#if publicLinksError && !restorationPending}Could not check public links. Open Shared links in Account to check.{/if}</p>
 {/snippet}
 
 {#snippet routePlaceholder()}
@@ -3572,7 +3570,6 @@
               {#if publicFolderIds.has(currentFolder.id)}
                 <Button variant="link" size="sm" class="px-0" aria-label={`Public link active for ${currentFolder.name}. Manage public links`} onclick={(event) => { share = { entry: currentFolder, trigger: event.currentTarget }; }}>Public link active</Button>
               {/if}
-              {@render publicLinksStatus()}
             </div>
             <div class="search-toolbar">
               <div class="search-controls"><Input id="file-search" aria-label="Search files and folders" disabled={bulkBusy || (restorationPending && !searchDuringRoute) || restorationFailed} type="search" placeholder={folderPath.length > 1 ? 'Search this folder by name' : namedLibrary ? 'Search this library by name' : 'Search all libraries by name'} maxlength={255} bind:value={searchInput} oninput={(event) => { searchInput = event.currentTarget.value; searchChanged(); }} onkeydown={searchKeydown}
@@ -3653,6 +3650,7 @@
             {/if}
             {/if}
             {#if notice}<Alert.Root role="status" class="workspace-notice"><Alert.Description>{notice}</Alert.Description></Alert.Root>{/if}
+            {@render publicLinksStatus()}
           </section>
         {/if}
         </div>
@@ -3855,7 +3853,7 @@
         <Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => authorityTarget = null}>Cancel</Button><Button disabled={accountBusy} aria-busy={accountBusy} onclick={changeAccountAuthority}>{accountBusy ? 'Updating…' : authorityTarget?.action === 'enable' ? 'Enable account' : authorityTarget?.account.role === 'user' ? 'Make administrator' : 'Make user'}</Button></Dialog.Footer>
       </Dialog.Content>
     </Dialog.Root>
-    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. Public links and direct shares end, and their published libraries are withdrawn. Enabling the account again does not restore sharing.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} aria-busy={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
+    <Dialog.Root open={!!disableTarget} onOpenChange={(open) => { if (!open && !accountBusy) disableTarget = null; }}><Dialog.Content onEscapeKeydown={(event) => { if (accountBusy) event.preventDefault(); }} onInteractOutside={(event) => { if (accountBusy) event.preventDefault(); }} showCloseButton={!accountBusy} onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(accountDialogTrigger, 'accounts-heading'); }}><Dialog.Header><Dialog.Title class="pr-8 break-words">Disable {disableTarget?.handle}?</Dialog.Title><Dialog.Description>This prevents sign in and signs out all their sessions. Their files stay stored. Their public links end. Direct shares to and from this account end, and their published libraries are withdrawn. Enabling the account again does not restore sharing.</Dialog.Description></Dialog.Header>{#if accountNotice}<p role="alert">{accountNotice}</p>{/if}<Dialog.Footer><Button variant="outline" disabled={accountBusy} onclick={() => disableTarget = null}>Cancel</Button><Button variant="destructive" disabled={accountBusy} aria-busy={accountBusy} onclick={() => disableTarget && disableAccount(disableTarget)}>{accountBusy ? 'Disabling…' : 'Disable account'}</Button></Dialog.Footer></Dialog.Content></Dialog.Root>
   {/if}
   {#if !user || loggingOut}{@render betaNotice(false)}{/if}
 </div>

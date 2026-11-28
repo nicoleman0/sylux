@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { mockPrivateLibraries, signInLibraryOwner } from './fixtures/private-libraries';
 
 test('library creation returns focus and a library opens from its keyboard-reachable link', async ({ page }) => {
@@ -27,7 +27,7 @@ test('library creation returns focus and a library opens from its keyboard-reach
 const root = { id: 'root', parent_id: null, name: 'Files', kind: 'folder', etag: '"root:1"' };
 const names = ['alpha', 'beta', 'gamma', 'delta'];
 
-async function open(page: Page) {
+async function open(page: Page, links?: (route: Route) => Promise<void>) {
   const entries = names.map(name => ({ id: name, parent_id: 'root', name: `${name}.txt`, kind: 'file', size: 3, etag: `"${name}:1"` }));
   const trashed: string[] = [];
   const renamed: { id: string; name: string }[] = [];
@@ -41,6 +41,7 @@ async function open(page: Page) {
     if (url.pathname === '/folders/children' || url.pathname === '/folders/root/children') {
       return json({ ...(url.pathname === '/folders/children' ? { root } : {}), items: entries.filter(entry => !trashed.includes(entry.id)), next_cursor: null, has_more: false });
     }
+    if (url.pathname === '/share-links' && request.method() === 'GET') return links ? links(route) : json([]);
     if (url.pathname === '/entries/search') return json({ items: [], next_cursor: null, has_more: false });
     const id = url.pathname.split('/')[2];
     if (request.method() === 'DELETE' && url.pathname.startsWith('/entries/')) { trashed.push(id); return route.fulfill({ status: 204 }); }
@@ -227,6 +228,24 @@ test('first pointer click after fresh Files keeps row geometry stable', async ({
   const before = (await target.boundingBox())!;
   await page.mouse.move(before.x + 10, before.y + before.height - 3);
   await page.mouse.down();
+  expect((await target.boundingBox())!.y).toBe(before.y);
+  await page.mouse.up();
+  await expect(page.getByRole('dialog', { name: 'Preview beta.txt' })).toBeVisible();
+});
+
+test('a failed public links request leaves the pressed file row in place', async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await open(page, async route => {
+    await held;
+    await route.fulfill({ status: 500, json: { code: 'unavailable' } });
+  });
+  const target = item(page, 'beta');
+  const before = (await target.boundingBox())!;
+  await page.mouse.move(before.x + 10, before.y + before.height - 3);
+  await page.mouse.down();
+  release();
+  await expect(page.getByText('Could not check public links. Open Shared links in Account to check.', { exact: true })).toBeVisible();
   expect((await target.boundingBox())!.y).toBe(before.y);
   await page.mouse.up();
   await expect(page.getByRole('dialog', { name: 'Preview beta.txt' })).toBeVisible();

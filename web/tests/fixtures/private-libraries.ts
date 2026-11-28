@@ -33,6 +33,7 @@ export async function mockPrivateLibraries(page: Page, options: { name?: string;
       libraries.push(created); inventory.push(created);
       return route.fulfill({ status: 201, json: created });
     }
+    if (pathname === '/share-links' && request.method() === 'GET') return json([]);
     if (pathname === '/libraries') return json({ items: libraries });
     if (pathname === '/folders/children') return json({ ...pageOf([]), root });
     const target = inventory.find(item => item.id === pathname.split('/')[2]);

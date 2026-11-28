@@ -119,7 +119,7 @@ test('an unavailable link list keeps the last known status until refresh succeed
   await page.goto('/#libraries');
   await signInLibraryOwner(page);
   const active = page.getByRole('button', { name: 'Public link active for Field work. Manage public links' });
-  const warning = page.getByRole('status').filter({ hasText: 'Could not check public links.' });
+  const warning = page.getByText('Could not check public links. Open Shared links in Account to check.', { exact: true });
   await expect(active).toBeVisible();
 
   links = null;
@@ -127,7 +127,8 @@ test('an unavailable link list keeps the last known status until refresh succeed
   await expect(page.getByRole('heading', { name: 'Field work', exact: true })).toBeFocused();
   await active.focus();
   releaseFailure();
-  await expect(warning).toContainText('Open Shared links in Account');
+  await expect(warning).toBeVisible();
+  await expect(warning).toHaveAttribute('aria-live', 'polite');
   await expect(active).toBeFocused();
 
   links = [];

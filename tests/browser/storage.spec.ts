@@ -1037,9 +1037,21 @@ test('owner shares and revokes a file downloaded in a separate signed-out TLS co
 test('public folder link browses live content in a signed-out TLS context', {
   annotation: { type: 'harness_case', description: 'storage_public_folder' },
 }, async () => {
+  const signedIn = page.waitForResponse(response => new URL(response.url()).pathname === '/auth/local' && response.request().method() === 'POST');
   await signIn();
-  const appPassword = await createDavPassword('Public folder desktop fixture');
-  await page.getByRole('navigation', { name: 'Files' }).getByRole('button', { name: 'Files', exact: true }).press('Enter');
+  const { csrf_token: csrfToken } = await (await signedIn).json();
+  if (typeof csrfToken !== 'string' || !csrfToken) throw new Error('Missing fixture session CSRF token');
+  const appPassword = await page.evaluate(async ({ name, csrfToken }) => {
+    const response = await fetch('/me/webdav', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ name, read_only: false }),
+    });
+    if (response.status !== 201) throw new Error(`Could not create fixture app password (HTTP ${response.status})`);
+    const { password } = await response.json();
+    if (typeof password !== 'string' || !password) throw new Error('Missing disposable app password');
+    return password;
+  }, { name: `Public folder desktop fixture ${phase}`, csrfToken });
   const folder = `Client delivery ${phase}`;
   const nested = 'Ready to download';
   const filename = `draft-${phase}.txt`;
