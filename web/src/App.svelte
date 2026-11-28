@@ -501,7 +501,7 @@
   async function home(event: MouseEvent): Promise<void> {
     event.preventDefault();
     if (!user) { view = 'login'; return; }
-    await navigate('files', folders[0] ? [folders[0]] : undefined);
+    await navigate('libraries');
   }
 
   async function createLibrary(name: string): Promise<Folder> {
