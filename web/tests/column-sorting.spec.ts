@@ -142,7 +142,21 @@ test('search column sort sends the selected order and resets page and selection'
   const { searchRequests } = await installBackend(page);
   await page.getByLabel('Search files and folders', { exact: true }).fill('txt');
   const results = page.getByRole('region', { name: 'Search results', exact: true });
-  await expect(results.getByRole('row', { name: 'Alpha.txt', exact: true })).toBeVisible();
+  const firstRow = results.getByRole('row', { name: 'Alpha.txt', exact: true });
+  await expect(firstRow).toBeVisible();
+  const sizeHeader = results.getByRole('columnheader', { name: 'Size', exact: true });
+  const sizeButton = sizeHeader.getByRole('button');
+  const sizeValue = firstRow.getByRole('cell', { name: '10 B', exact: true });
+  const iconRight = await sizeButton.locator('svg').evaluate(icon => icon.getBoundingClientRect().right);
+  const valueRight = await sizeValue.evaluate(cell => cell.getBoundingClientRect().right);
+  const headerWidth = await sizeHeader.evaluate(cell => cell.getBoundingClientRect().width);
+  const buttonWidth = await sizeButton.evaluate(button => button.getBoundingClientRect().width);
+  const buttonInset = await sizeButton.evaluate(button => {
+    const style = getComputedStyle(button);
+    return parseFloat(style.paddingRight) + parseFloat(style.borderRightWidth);
+  });
+  expect(buttonWidth).toBeCloseTo(headerWidth, 0);
+  expect(valueRight - iconRight).toBeCloseTo(buttonInset, 0);
   await page.getByRole('button', { name: 'Next page', exact: true }).click();
   await expect.poll(() => fileNames(page)).toEqual(['Zulu.txt']);
   await page.getByLabel('Select Zulu.txt in Files', { exact: true }).check();
@@ -156,6 +170,10 @@ test('search column sort sends the selected order and resets page and selection'
   await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toHaveCount(0);
   await expect.poll(() => fileNames(page)).toEqual(['Zulu.txt', 'Bravo.txt']);
   await expect(results.getByRole('table', { name: 'Search matches' }).locator('[role="columnheader"][aria-sort="descending"]')).toHaveCount(1);
+  await page.setViewportSize({ width: 320, height: 812 });
+  await expect(sizeButton).toBeHidden();
+  await expect(page.getByLabel('Sort search by', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
 test('a superseded search request cannot replace a newer sort', async ({ page }) => {

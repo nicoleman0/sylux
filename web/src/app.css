@@ -290,7 +290,9 @@ h1:focus, h2:focus { outline: none; }
 
 .sort-header { min-width: 0; }
 .sort-heading { width: 100%; justify-content: flex-start; padding-inline: 4px; color: inherit; font-size: var(--type-meta); }
-.folder-sort-head > :nth-child(4) .sort-heading, .trash-size-sort .sort-heading { justify-content: flex-end; }
+.folder-sort-head > :nth-child(4) .sort-heading,
+.search-head > .file-size .sort-heading,
+.trash-size-sort .sort-heading { justify-content: flex-end; }
 .sort-heading svg { width: 14px; height: 14px; }
 .sort-header[aria-sort="ascending"], .sort-header[aria-sort="descending"] { color: var(--foreground); }
 .trash-sort, .account-sort { color: var(--muted-foreground); }
