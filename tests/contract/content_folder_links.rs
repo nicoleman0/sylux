@@ -46,6 +46,22 @@ async fn revoke_public_link(f: &Fixture, link: &serde_json::Value) {
 }
 
 #[tokio::test]
+async fn public_default_root_has_accessible_name() {
+    let f = Fixture::new("public-default-root-name").await;
+    let nested = f.share_folder(ROOT, "Nested").await;
+    let link = issue_folder_link(&f, ROOT, None).await;
+    let (status, _, body) = f.request("GET", public_path(&link), None, &[]).await;
+    assert_eq!(status, 200);
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains("<h1>Files</h1>"));
+    assert!(body.contains("<title>Files · Shared folder</title>"));
+    let path = format!("{}/folders/{nested}", folder_link_base(&link));
+    let (status, _, body) = f.request("GET", &path, None, &[]).await;
+    assert_eq!(status, 200);
+    assert!(String::from_utf8(body).unwrap().contains(">Files</a>"));
+}
+
+#[tokio::test]
 async fn public_folder_link_follows_the_live_tree_and_never_exposes_ancestors() {
     use serde_json::{Value, json};
     use sylux::domain::upload::folder_etag;

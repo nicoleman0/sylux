@@ -164,13 +164,21 @@ fn escape(text: &str) -> String {
     escaped
 }
 
+fn display_name(entry: &namespace::Entry) -> &str {
+    if entry.parent_id.is_none() && entry.name.is_empty() {
+        "Files"
+    } else {
+        &entry.name
+    }
+}
+
 fn render(token: &str, listing: Listing) -> String {
     let base = format!("/share/{token}");
     let current = listing
         .path
         .last()
         .expect("authorized listing has a folder");
-    let name = escape(&current.name);
+    let name = escape(display_name(current));
     let mut html = format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -180,7 +188,7 @@ fn render(token: &str, listing: Listing) -> String {
     if listing.path.len() > 1 {
         html.push_str(r#"<nav aria-label="Folder path"><ol>"#);
         for (index, part) in listing.path.iter().enumerate() {
-            let name = escape(&part.name);
+            let name = escape(display_name(part));
             if part.id == current.id {
                 write!(html, r#"<li aria-current="page">{name}</li>"#).expect("write to String");
             } else {
