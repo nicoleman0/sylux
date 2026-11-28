@@ -25,6 +25,7 @@ async function installBackend(page: import('@playwright/test').Page): Promise<vo
       if (method === 'PATCH') instanceName = (request.postDataJSON() as { name: string }).name.trim();
       return json({ name: instanceName });
     }
+    if (path === '/libraries' && method === 'GET') return json({ items: [root] });
     if (path === '/auth/csrf') return json({ csrf_token: 'test-csrf' });
     if (path === '/auth/local') return json({ account_id: 'account-1', handle: 'owner', role: 'administrator', csrf_token: 'session-csrf' });
     if (path === '/setup/admin') return json({ code: 'setup_complete' }, 201);
@@ -1388,7 +1389,7 @@ test('instance name is saved and survives reload and sign out', async ({ page })
   await expect(page.getByLabel('Instance name')).toHaveValue('North House');
 });
 
-test('home returns from a nested folder and other screens to root files', async ({ page }) => {
+test('home returns from a nested folder and other screens to My libraries', async ({ page }) => {
   const errors: Error[] = [];
   page.on('pageerror', (error) => errors.push(error));
   await login(page);
@@ -1400,15 +1401,15 @@ test('home returns from a nested folder and other screens to root files', async 
   await expect(page.getByRole('heading', { name: 'Research', exact: true })).toBeVisible();
   const home = page.getByRole('link', { name: 'Sylux', exact: true });
   await home.click();
-  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
-  await expect(page.getByRole('row', { name: 'Welcome.txt', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'My libraries', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Files', exact: true })).toBeVisible();
   for (const section of ['Trash', 'Account', 'Settings']) {
     await page.getByRole('button', { name: section, exact: true }).click();
     await expect(page.getByRole('heading', { name: section, exact: true })).toBeVisible();
     await expect(page.getByRole('row', { name: 'Welcome.txt', exact: true })).toHaveCount(0);
     await home.click();
-    await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
-    await expect(page.getByRole('row', { name: 'Welcome.txt', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'My libraries', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Files', exact: true })).toBeVisible();
   }
   expect(errors).toEqual([]);
 });
@@ -1476,7 +1477,7 @@ test('browser history cannot reveal a previous account folder after reload', asy
   expect(state).not.toContain(privateName);
   expect(state).not.toContain('folderPath');
   await page.getByRole('link', { name: 'Sylux', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'My libraries', exact: true })).toBeVisible();
   await page.goBack();
   await expect(page.getByRole('heading', { name: privateName, exact: true })).toBeVisible();
   await signOut(page);
